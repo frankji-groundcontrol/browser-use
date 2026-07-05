@@ -16,7 +16,8 @@ Update after every green milestone. Newest first.
 | 2026-07-05 | parity S2 | **Tool contracts — done.** click coord+new_tab, type clear+mask, isError convention. (commit `fc252b7`) | done |
 | 2026-07-05 | parity S3 | **Full three-tree DOM serializer — done.** DOM+DOMSnapshot+AX fusion; JS-listener/AX/heuristic interactive detection (detects `<div onclick>`/`addEventListener`); visibility filter; scroll-normalized coords. 18 live tests green. (commit `cbaba9c`) | done |
 | 2026-07-05 | parity S4 | **bu-llm + `browser_extract_content` → 15/16 — done.** Reqwest OpenAI-compatible client (no wrapper needed); extract verified vs the real gateway. (commit `52f9132`) | done |
-| — | parity S5 | Agent loop (`bu-agent`) + `retry_with_browser_use_agent` → 16/16 (capstone). | in progress |
+| 2026-07-05 | parity S5 | **Agent loop + `retry_with_browser_use_agent` → 16/16 — done.** `bu-agent` perceive→decide→act loop; verified: live run completed a task in 2 steps with Python's exact report format. (commit `324bfb0`) | done |
+| 2026-07-05 | **FULL PARITY** | **Rust `tools/list` is byte-identical to Python: 16 tools, same order, 0 schema diffs.** Both LLM tools verified vs the real gateway. All 4 agents re-wired to `browser-use-rs` + OpenAI env (16 tools each, connected). Concurrency correct (actor + per-process isolation). | **done** |
 | — | 2 | Extract tool + `bu-llm` (openai-compatible) parity. | pending |
 | — | 3 | Event bus + watchdogs + autonomous agent (beta JSON-RPC conformance). | pending |
 | — | 4 | Provider/watchdog/parity hardening + cross-platform release. | pending |
