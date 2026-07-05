@@ -279,6 +279,11 @@ impl BrowserUseMcpServer {
         // override. Restore the base policy afterward.
         let allowed_domains =
             optional_string_list(arguments.as_ref(), "allowed_domains").filter(|d| !d.is_empty());
+
+        // Build the LLM BEFORE mutating the policy, so a config error can't
+        // `?`-return past the restore and leak the scoped policy into the session.
+        let provider = build_agent_llm(model).await?;
+
         let restore = match allowed_domains {
             Some(domains) => match self.actor.get_policy().await {
                 Ok(base) => {
@@ -298,7 +303,8 @@ impl BrowserUseMcpServer {
             None => None,
         };
 
-        let provider = build_agent_llm(model).await?;
+        // No `?` between set_policy(scoped) and the restore below; run_task
+        // returns a report rather than propagating errors, so restore always runs.
         let report =
             bu_agent::run_task(task, max_steps, self.actor.clone(), &provider, use_vision).await;
 

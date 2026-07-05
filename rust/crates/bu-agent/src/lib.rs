@@ -144,9 +144,10 @@ pub async fn run_task(
             agent_memory = memory;
         }
 
-        // A reasoning-only turn (no actions) is a valid no-op step.
+        // A reasoning-only turn (no actions) is a valid no-op step, but it is not
+        // progress: leave the failure counter unchanged so alternating a failing
+        // action with a no-op can't evade the consecutive-failure cap.
         if actions.is_empty() {
-            consecutive_failures = 0;
             continue;
         }
 

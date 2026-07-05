@@ -447,7 +447,29 @@ impl BrowserActor {
         Ok(())
     }
 
+    /// Enforcement point #4: catch a disallowed URL reached by ANY path (a DOM
+    /// click that navigated, JS `window.open`/`location=`, a redirect) at the
+    /// observation boundary, resetting it to about:blank so disallowed content is
+    /// never returned. Best-effort; mirrors Python's on_NavigationCompleteEvent.
+    async fn guard_active_url(&mut self) {
+        if self.policy.is_unrestricted() || self.page.is_none() {
+            return;
+        }
+        let Ok(page) = self.active_page().await else {
+            return;
+        };
+        let Ok(state) = page.state().await else {
+            return;
+        };
+        if !self.policy.is_url_allowed(&state.url) {
+            tracing::warn!(url = %state.url, "resetting disallowed page to about:blank (security policy)");
+            let _ = page.navigate("about:blank").await;
+            self.selector_cache.clear();
+        }
+    }
+
     async fn get_state(&mut self, include_screenshot: bool) -> Result<BrowserStateSnapshot> {
+        self.guard_active_url().await;
         let page = self.active_page().await?;
         let state = page.state().await?;
         let elements = page.selector_map().await?;
@@ -501,10 +523,12 @@ impl BrowserActor {
     }
 
     async fn screenshot(&mut self, full_page: bool) -> Result<Vec<u8>> {
+        self.guard_active_url().await;
         self.active_page().await?.screenshot_png(full_page).await
     }
 
     async fn get_html(&mut self, selector: Option<&str>) -> Result<String> {
+        self.guard_active_url().await;
         let page = self.active_page().await?;
         if let Some(selector) = selector {
             let exists = page.query_selector_exists(selector).await?;
@@ -525,10 +549,11 @@ impl BrowserActor {
     async fn switch_tab(&mut self, tab: &str) -> Result<PageState> {
         let session = self.active_session().await?;
         let page = session.switch_tab(tab).await?;
-        let state = page.state().await?;
         self.page = Some(page);
         self.selector_cache.clear();
-        Ok(state)
+        // Reset the tab if it (e.g. a JS-opened tab) is on a disallowed URL.
+        self.guard_active_url().await;
+        self.active_page().await?.state().await
     }
 
     async fn close_tab(&mut self, tab: &str) -> Result<String> {

@@ -85,7 +85,17 @@ pub(crate) fn parse_output(response: &str) -> anyhow::Result<AgentOutput> {
         });
     }
 
-    // Multi-action / reasoning object (possibly with an empty actions list).
+    // Multi-action / reasoning object — require at least one recognized field so
+    // arbitrary JSON (e.g. {"result":"42"}) isn't silently coerced into an empty
+    // no-op turn that would defeat the consecutive-failure cap.
+    let has_recognized_field = ["actions", "memory", "next_goal", "evaluation_previous_goal"]
+        .iter()
+        .any(|key| value.get(key).is_some());
+    if !has_recognized_field {
+        return Err(anyhow::anyhow!(
+            "agent output has no recognized action or reasoning fields"
+        ));
+    }
     serde_json::from_value(value)
         .map_err(|error| anyhow::anyhow!("could not parse agent output: {error}"))
 }
@@ -146,5 +156,13 @@ mod tests {
     #[test]
     fn non_json_prose_is_an_error() {
         assert!(parse_output("I will click the button").is_err());
+    }
+
+    #[test]
+    fn unrecognized_json_object_is_an_error_not_a_noop() {
+        // Valid JSON but no recognized action/reasoning field: must be an error
+        // (counts as a parse failure) rather than a silent empty no-op.
+        assert!(parse_output(r#"{"result":"42","status":"done"}"#).is_err());
+        assert!(parse_output("{}").is_err());
     }
 }
