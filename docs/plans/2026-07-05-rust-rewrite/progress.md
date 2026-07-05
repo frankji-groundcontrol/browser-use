@@ -17,10 +17,13 @@ Update after every green milestone. Newest first.
 | 2026-07-05 | parity S3 | **Full three-tree DOM serializer — done.** DOM+DOMSnapshot+AX fusion; JS-listener/AX/heuristic interactive detection (detects `<div onclick>`/`addEventListener`); visibility filter; scroll-normalized coords. 18 live tests green. (commit `cbaba9c`) | done |
 | 2026-07-05 | parity S4 | **bu-llm + `browser_extract_content` → 15/16 — done.** Reqwest OpenAI-compatible client (no wrapper needed); extract verified vs the real gateway. (commit `52f9132`) | done |
 | 2026-07-05 | parity S5 | **Agent loop + `retry_with_browser_use_agent` → 16/16 — done.** `bu-agent` perceive→decide→act loop; verified: live run completed a task in 2 steps with Python's exact report format. (commit `324bfb0`) | done |
-| 2026-07-05 | **FULL PARITY** | **Rust `tools/list` is byte-identical to Python: 16 tools, same order, 0 schema diffs.** Both LLM tools verified vs the real gateway. All 4 agents re-wired to `browser-use-rs` + OpenAI env (16 tools each, connected). Concurrency correct (actor + per-process isolation). | **done** |
-| — | 2 | Extract tool + `bu-llm` (openai-compatible) parity. | pending |
-| — | 3 | Event bus + watchdogs + autonomous agent (beta JSON-RPC conformance). | pending |
-| — | 4 | Provider/watchdog/parity hardening + cross-platform release. | pending |
+| 2026-07-05 | tools parity | **Rust `tools/list` byte-identical to Python: 16 tools, same order, 0 schema diffs.** All 4 agents on `browser-use-rs` + OpenAI env. Concurrency correct (actor + per-process isolation). | done |
+| 2026-07-05 | parity S3.4/3.5 | **DOM element-set parity — done.** Ported Python's PaintOrderRemover (drop interactive elements fully covered by higher-painted opaque rects) + `_apply_bounding_box_filtering` (collapse a child ≥99% contained in a propagating interactive parent; form-control/onclick/aria-label carve-outs). 4 live tests (opaque modal, icon+text button, tabbable child, input-in-link). (commit `9168de0`) | **done** |
+| 2026-07-05 | refactor | **`bu-cdp/lib.rs` 1765 → 913**, split into `geometry.rs`/`dom.rs`/`discovery.rs` (no monolith). Pure move, all tests green. (commit `4850197`) | **done** |
+| 2026-07-05 | agent parity | **Vision + multi-action + reasoning — done.** `bu-llm` modular (multimodal `message.rs` + `LlmProvider` enum); `bu-agent` modular (`AgentOutput` with evaluation/memory/next_goal + ordered actions, screenshot attached when `use_vision`, batch stops after nav/click, extraction fed back). Vision **verified end-to-end** vs the real gateway (agent read the H1 from a screenshot in ~2s). (commit `48f17a6`) | **done** |
+| 2026-07-05 | agent parity | **AWS Bedrock provider — done.** `bu-llm` feature `bedrock` (Converse API via aws-sdk-bedrockruntime 1.135; text+PNG blocks; SigV4 via SDK), selected by `MODEL_PROVIDER=bedrock`, forwarded through bu-mcp/bu-core. Compiles + clippy clean + 5 unit tests; not live-tested (no AWS creds, same as Python). (commit `126b7d9`) | **done** |
+| 2026-07-05 | **FULL PARITY** | **Both documented gaps closed.** DOM element-set matches Python on occluded/nested pages; agent has vision (verified), multi-action, reasoning fields, and the Bedrock provider. `tools/list` still byte-identical. Default binary rebuilt + reinstalled (16 tools). | **done** |
+| — | 4 | Remaining hardening: `allowed_domains`/SecurityWatchdog enforcement (schema advertised, not yet enforced), cross-platform release. | pending |
 
 ## Notes / decisions
 
@@ -33,10 +36,13 @@ Update after every green milestone. Newest first.
   claude/codex/hermes/opencode). The Python install (uv-tool binary + wrapper +
   `~/.config/browseruse/config.json`) is kept ON DISK for rollback — nothing was
   deleted.
-  - **Known regressions until Phase 1d:** the 2 LLM tools
-    (`browser_extract_content`, `retry_with_browser_use_agent`) return "not
-    implemented"; element detection is a first-cut selector map (lower quality than
-    the Python serializer on complex pages). Closing these = full parity.
+  - **All Phase-1d regressions closed (full parity reached):** both LLM tools work;
+    the selector map now ports Python's paint-order + bbox filtering; the agent has
+    vision + multi-action + reasoning; Bedrock is available behind a feature.
+  - **Deployment requirement:** `OPENAI_BASE_URL` must include the API path
+    (`.../v1`) — `bu-llm` posts `{base_url}/chat/completions` (same as Python's
+    OpenAI client). The 4 agents' MCP config is correct (`https://…/v1`); a bare host
+    makes the LLM tools hit the gateway's HTML landing page → "failed to parse".
   - **Rollback (one edit per agent):** repoint `browser-use` back to the Python
     wrapper `~/.local/share/uv/tools/browser-use/bin/python
     ~/.config/browseruse/mcp-launch.py` with env `OPENAI_API_KEY` + `OPENAI_BASE_URL`.
