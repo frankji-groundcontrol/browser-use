@@ -84,6 +84,11 @@ impl ActorHandle {
         .await
     }
 
+    /// Returns current page metadata without rebuilding the selector cache.
+    pub async fn page_state(&self) -> Result<PageState> {
+        self.request(|reply| Command::PageState { reply }).await
+    }
+
     /// Clicks an element by the index from the last selector snapshot.
     pub async fn click(&self, index: usize, new_tab: bool) -> Result<ClickOutcome> {
         self.request(|reply| Command::Click {
@@ -194,6 +199,9 @@ enum Command {
         include_screenshot: bool,
         reply: Reply<BrowserStateSnapshot>,
     },
+    PageState {
+        reply: Reply<PageState>,
+    },
     Click {
         index: usize,
         new_tab: bool,
@@ -284,6 +292,13 @@ impl BrowserActor {
                     reply,
                 } => {
                     let _ = reply.send(self.get_state(include_screenshot).await);
+                }
+                Command::PageState { reply } => {
+                    let result = match self.active_page().await {
+                        Ok(page) => page.state().await,
+                        Err(e) => Err(e),
+                    };
+                    let _ = reply.send(result);
                 }
                 Command::Click {
                     index,

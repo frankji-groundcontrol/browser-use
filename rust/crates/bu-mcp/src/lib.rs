@@ -7,6 +7,8 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use bu_actor::{ActorHandle, ClickOutcome};
+use bu_dom::extract_clean_markdown;
+use bu_llm::{message, OpenAiChatClient};
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResult, ContentBlock, ErrorCode, Implementation,
@@ -77,6 +79,7 @@ impl BrowserUseMcpServer {
             "browser_click" => self.click(request.arguments).await,
             "browser_type" => self.type_text(request.arguments).await,
             "browser_get_html" => self.get_html(request.arguments).await,
+            "browser_extract_content" => self.extract_content(request.arguments).await,
             "browser_screenshot" => self.screenshot(request.arguments).await,
             "browser_scroll" => self.scroll(request.arguments).await,
             "browser_go_back" => self.go_back().await,
@@ -248,6 +251,45 @@ impl BrowserUseMcpServer {
             .await
             .map_err(browser_error("browser_get_html failed"))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(html)]))
+    }
+
+    async fn extract_content(
+        &self,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let query = required_str(arguments.as_ref(), "query", "browser_extract_content")?;
+        let extract_links = optional_bool(arguments.as_ref(), "extract_links").unwrap_or(false);
+
+        let html = self
+            .actor
+            .get_html(None)
+            .await
+            .map_err(browser_error("browser_extract_content failed"))?;
+        let page = self
+            .actor
+            .page_state()
+            .await
+            .map_err(browser_error("browser_extract_content failed"))?;
+        let (markdown, _) = extract_clean_markdown(&html, extract_links);
+
+        let system_prompt = "You extract information from clean webpage markdown. Answer the query directly and concisely using only the webpage content.";
+        let user_prompt = format!(
+            "<query>\n{query}\n</query>\n\n<webpage_content>\n{markdown}\n</webpage_content>"
+        );
+        let answer = OpenAiChatClient::from_env()
+            .map_err(llm_error)?
+            .chat(vec![
+                message("system", system_prompt),
+                message("user", user_prompt),
+            ])
+            .await
+            .map_err(llm_error)?;
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "<url>{}</url>\n<query>{query}</query>\n<result>{}</result>",
+            page.url,
+            answer.trim()
+        ))]))
     }
 
     async fn screenshot(
@@ -461,6 +503,14 @@ fn json_error(message: &'static str) -> impl FnOnce(serde_json::Error) -> ErrorD
     }
 }
 
+fn llm_error(error: anyhow::Error) -> ErrorData {
+    ErrorData::new(
+        ErrorCode::INTERNAL_ERROR,
+        "browser_extract_content failed",
+        Some(json!({ "error": error.to_string() })),
+    )
+}
+
 fn optional_str<'a>(arguments: Option<&'a Map<String, Value>>, key: &str) -> Option<&'a str> {
     arguments
         .and_then(|args| args.get(key))
@@ -553,7 +603,7 @@ pub async fn run_stdio_server() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Returns the 14 low-level browser-use tools exposed by the MVP server.
+/// Returns the 15 low-level browser-use tools exposed by the MVP server.
 pub fn low_level_tools() -> Vec<Tool> {
     vec![
         tool(
@@ -624,6 +674,22 @@ pub fn low_level_tools() -> Vec<Tool> {
                         "default": false
                     }
                 }
+            }),
+        ),
+        tool(
+            "browser_extract_content",
+            "Extract information from the current page using an LLM",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What information to extract from the page"},
+                    "extract_links": {
+                        "type": "boolean",
+                        "description": "Whether to include links in the extraction",
+                        "default": false
+                    }
+                },
+                "required": ["query"]
             }),
         ),
         tool(
@@ -745,8 +811,9 @@ mod tests {
     use super::BrowserUseMcpServer;
     #[cfg(feature = "live-chrome")]
     use rmcp::model::CallToolRequestParams;
+    use serde_json::json;
     #[cfg(feature = "live-chrome")]
-    use serde_json::{json, Map, Value};
+    use serde_json::{Map, Value};
     #[cfg(feature = "live-chrome")]
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -758,11 +825,11 @@ mod tests {
     use tokio::time::{timeout, Duration};
 
     #[test]
-    fn tools_list_returns_14_low_level_tools() {
+    fn tools_list_returns_15_low_level_tools() {
         let tools = low_level_tools();
         let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
 
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 15);
         assert_eq!(
             names,
             [
@@ -770,6 +837,7 @@ mod tests {
                 "browser_click",
                 "browser_type",
                 "browser_get_state",
+                "browser_extract_content",
                 "browser_get_html",
                 "browser_screenshot",
                 "browser_scroll",
@@ -781,6 +849,25 @@ mod tests {
                 "browser_close_session",
                 "browser_close_all",
             ]
+        );
+        let extract = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == "browser_extract_content")
+            .expect("extract tool should be listed");
+        assert_eq!(
+            serde_json::to_value(extract.input_schema.as_ref()).unwrap(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What information to extract from the page"},
+                    "extract_links": {
+                        "type": "boolean",
+                        "description": "Whether to include links in the extraction",
+                        "default": false
+                    }
+                },
+                "required": ["query"]
+            })
         );
     }
 
@@ -1295,6 +1382,105 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn extract_content_posts_chat_request_and_returns_framed_answer() -> anyhow::Result<()> {
+        let llm_server = MockHttpServer::spawn_json(
+            serde_json::json!({
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Alpha is the useful fact."},
+                        "finish_reason": "stop"
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .await?;
+        let page_server = MockHttpServer::spawn_html(
+            r#"
+            <html>
+              <head>
+                <title>Extract Fixture</title>
+                <style>.noise { display: none; }</style>
+                <script>window.noise = true;</script>
+              </head>
+              <body>
+                <nav>Navigation noise</nav>
+                <main>
+                  <h1>Alpha</h1>
+                  <p>Alpha is the useful fact.</p>
+                  <a href="/details">Details</a>
+                </main>
+              </body>
+            </html>
+            "#,
+        )
+        .await?;
+        let _env = EnvGuard::set_many(&[
+            ("OPENAI_API_KEY", "test-key"),
+            ("OPENAI_BASE_URL", &llm_server.base_url()),
+            ("BROWSER_USE_LLM_MODEL", "test-model"),
+        ]);
+        let server = BrowserUseMcpServer::new();
+
+        server
+            .call_browser_tool(call(
+                "browser_navigate",
+                json!({"url": format!("{}/data", page_server.base_url())}),
+            ))
+            .await?;
+
+        let result = server
+            .call_browser_tool(call(
+                "browser_extract_content",
+                json!({"query": "What is Alpha?", "extract_links": true}),
+            ))
+            .await?;
+
+        assert_eq!(
+            text_content(&result),
+            format!(
+                "<url>{}/data</url>\n<query>What is Alpha?</query>\n<result>Alpha is the useful fact.</result>",
+                page_server.base_url()
+            )
+        );
+        let request = llm_server.received_request().await?;
+        assert_eq!(request.path, "/chat/completions");
+        assert_eq!(
+            request.header("authorization"),
+            Some("Bearer test-key"),
+            "LLM client should use OPENAI_API_KEY as bearer auth"
+        );
+        assert!(
+            !request
+                .header("user-agent")
+                .unwrap_or_default()
+                .contains("OpenAI"),
+            "default reqwest user-agent must not pretend to be OpenAI"
+        );
+
+        let body: Value = serde_json::from_slice(&request.body)?;
+        assert_eq!(body["model"], "test-model");
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert_eq!(body["temperature"], Value::Null);
+        let user_prompt = body["messages"][1]["content"]
+            .as_str()
+            .expect("user message content should be a string");
+        assert!(user_prompt.contains("<query>\nWhat is Alpha?\n</query>"));
+        assert!(user_prompt.contains("<webpage_content>"));
+        assert!(user_prompt.contains("Alpha is the useful fact."));
+        assert!(user_prompt.contains("[Details]("));
+        assert!(!user_prompt.contains("Navigation noise"));
+        assert!(!user_prompt.contains("window.noise"));
+
+        Ok(())
+    }
+
     #[cfg(feature = "live-chrome")]
     fn call(name: &'static str, arguments: Value) -> CallToolRequestParams {
         let Value::Object(arguments) = arguments else {
@@ -1342,5 +1528,160 @@ mod tests {
             "input",
             "old value",
         ))
+    }
+
+    #[cfg(feature = "live-chrome")]
+    struct EnvGuard {
+        previous: Vec<(&'static str, Option<String>)>,
+    }
+
+    #[cfg(feature = "live-chrome")]
+    impl EnvGuard {
+        fn set_many(values: &[(&'static str, &str)]) -> Self {
+            let previous = values
+                .iter()
+                .map(|(key, value)| {
+                    let previous = std::env::var(key).ok();
+                    std::env::set_var(key, value);
+                    (*key, previous)
+                })
+                .collect();
+            Self { previous }
+        }
+    }
+
+    #[cfg(feature = "live-chrome")]
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, previous) in self.previous.drain(..) {
+                if let Some(value) = previous {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "live-chrome")]
+    #[derive(Debug)]
+    struct RecordedRequest {
+        path: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+
+    #[cfg(feature = "live-chrome")]
+    impl RecordedRequest {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        }
+    }
+
+    #[cfg(feature = "live-chrome")]
+    struct MockHttpServer {
+        address: std::net::SocketAddr,
+        request: tokio::sync::oneshot::Receiver<RecordedRequest>,
+    }
+
+    #[cfg(feature = "live-chrome")]
+    impl MockHttpServer {
+        async fn spawn_json(response_body: String) -> anyhow::Result<Self> {
+            Self::spawn("application/json", response_body).await
+        }
+
+        async fn spawn_html(response_body: &str) -> anyhow::Result<Self> {
+            Self::spawn("text/html; charset=utf-8", response_body.to_owned()).await
+        }
+
+        async fn spawn(content_type: &'static str, response_body: String) -> anyhow::Result<Self> {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let address = listener.local_addr()?;
+            let (tx, request) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let Ok(recorded) = read_http_request(&mut stream).await else {
+                    return;
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes()).await;
+                let _ = tx.send(recorded);
+            });
+
+            Ok(Self { address, request })
+        }
+
+        fn base_url(&self) -> String {
+            format!("http://{}", self.address)
+        }
+
+        async fn received_request(self) -> anyhow::Result<RecordedRequest> {
+            Ok(self.request.await?)
+        }
+    }
+
+    #[cfg(feature = "live-chrome")]
+    async fn read_http_request(
+        stream: &mut tokio::net::TcpStream,
+    ) -> anyhow::Result<RecordedRequest> {
+        let mut buffer = Vec::new();
+        let mut scratch = [0_u8; 1024];
+        let header_end = loop {
+            let read = tokio::io::AsyncReadExt::read(stream, &mut scratch).await?;
+            if read == 0 {
+                anyhow::bail!("connection closed before request headers");
+            }
+            buffer.extend_from_slice(&scratch[..read]);
+            if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+
+        let headers_text = std::str::from_utf8(&buffer[..header_end])?;
+        let mut lines = headers_text.split("\r\n");
+        let request_line = lines
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("missing request line"))?;
+        let path = request_line
+            .split_whitespace()
+            .nth(1)
+            .ok_or_else(|| anyhow::anyhow!("missing request path"))?
+            .to_owned();
+        let headers = lines
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                Some((name.trim().to_owned(), value.trim().to_owned()))
+            })
+            .collect::<Vec<_>>();
+        let content_length = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.parse::<usize>().ok())
+            .unwrap_or(0);
+
+        let mut body = buffer[header_end..].to_vec();
+        while body.len() < content_length {
+            let read = tokio::io::AsyncReadExt::read(stream, &mut scratch).await?;
+            if read == 0 {
+                break;
+            }
+            body.extend_from_slice(&scratch[..read]);
+        }
+        body.truncate(content_length);
+
+        Ok(RecordedRequest {
+            path,
+            headers,
+            body,
+        })
     }
 }
