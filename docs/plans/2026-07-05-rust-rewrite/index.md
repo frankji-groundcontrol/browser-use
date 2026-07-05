@@ -1,10 +1,15 @@
 # Plan: Rust rewrite (2026-07-05)
 
-Status: **active** · Branch: `franky-rust` · Method: **TDD**
+Status: **full parity reached + hardened + deployed** · Branch: `franky-rust` · Method: **TDD**
 
 Re-implement browser-use in Rust, delivered as a Cargo workspace, developed
-test-first, and driven to completion by codex under orchestration. This folder is
-the source of truth for the effort; keep [progress.md](progress.md) current.
+test-first. **Done:** `browser-use-rs --mcp` is the deployed MCP server for all
+agents — 16 tools, `tools/list` byte-identical to Python, vision + multi-action
+agent, AWS Bedrock provider (feature-gated), and a ported + adversarially-hardened
+URL-access policy. The finished design is documented at
+[architecture/12-rust-implementation.md](../../architecture/12-rust-implementation.md);
+this folder keeps the plan + [progress.md](progress.md) build log. Remaining is
+Phase-4 polish (read `allowed_domains` from `config.json`; cross-platform release).
 
 ## Goal and guiding constraint
 

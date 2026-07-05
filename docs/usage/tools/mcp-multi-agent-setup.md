@@ -4,14 +4,19 @@ How to install browser-use as an MCP **server** and register it with several
 coding agents at once (Claude Code, OpenAI Codex CLI, OpenCode, Hermes), so each
 agent can drive a real browser through the same 16 tools.
 
-This guide records a working setup on a headless Ubuntu 24.04 host, including the
-two non-obvious obstacles you will hit there: Chrome's sandbox on modern Ubuntu,
-and OpenAI-compatible gateways that block the official SDK. Secrets and private
-endpoints are shown as placeholders — substitute your own.
+> **What's deployed here.** The server in production on this host is the Rust
+> reimplementation, **`browser-use-rs --mcp`** (crate workspace under
+> [`rust/`](../../../rust), branch `franky-rust`) — a drop-in replacement for the
+> Python `browser-use --mcp` with byte-identical `tools/list` output and full
+> behavioural parity. See
+> [architecture/12-rust-implementation.md](../../architecture/12-rust-implementation.md)
+> for the design. The original Python setup is kept at the end as a rollback
+> path. Secrets and private endpoints are shown as placeholders.
 
 ## The tool surface
 
-`browser-use --mcp` speaks MCP over stdio and exposes **16 tools**:
+`browser-use-rs --mcp` speaks MCP over stdio and exposes **16 tools** (identical
+names/schemas to the Python server):
 
 - **14 low-level primitives** — `browser_navigate`, `browser_click`,
   `browser_type`, `browser_get_state`, `browser_get_html`, `browser_screenshot`,
@@ -19,134 +24,147 @@ endpoints are shown as placeholders — substitute your own.
   `browser_close_tab`, `browser_list_sessions`, `browser_close_session`,
   `browser_close_all`. These need **no LLM key**; the calling agent is the brain.
 - **2 LLM-backed tools** — `browser_extract_content` (page → structured answer)
-  and `retry_with_browser_use_agent` (a full autonomous sub-agent). These use the
-  server's own OpenAI-compatible model and therefore need `OPENAI_API_KEY`.
+  and `retry_with_browser_use_agent` (a full autonomous sub-agent with vision,
+  multi-action, and reasoning). These call the server's own OpenAI-compatible (or
+  AWS Bedrock) model and need `OPENAI_API_KEY` (or `MODEL_PROVIDER=bedrock`).
 
-## 1. Install
-
-```bash
-uv tool install 'browser-use[cli]'   # -> ~/.local/bin/browser-use (+ aliases bu, browser)
-```
-
-The `[cli]` extra is currently empty, so `uv tool install browser-use` is
-equivalent. Ensure `~/.local/bin` is on `PATH` (`uv tool update-shell`).
-
-## 2. Provision Chromium (headless-safe)
-
-Chromium is downloaded, not bundled:
+## 1. Build & install the Rust binary
 
 ```bash
-browser-use install     # playwright install chromium (+ --with-deps on Linux)
+cd rust
+cargo build -p bu-core --release           # -> rust/target/release/browser-use-rs
+install -m755 target/release/browser-use-rs ~/.local/bin/browser-use-rs
 ```
 
-On a **headless server** set headless mode and disable the Chrome sandbox — on
-Ubuntu 23.10+/24.04, `apparmor_restrict_unprivileged_userns=1` makes Chrome
-**core-dump** unless it launches with `--no-sandbox`. browser-use adds
-`--no-sandbox` when `chromium_sandbox` is false. Edit
-`~/.config/browseruse/config.json` and set on the default browser profile:
+Ensure `~/.local/bin` is on `PATH`. For AWS Bedrock support build with
+`--features bedrock` (off by default so the OpenAI-compatible binary stays lean).
 
-```json
-{ "headless": true, "chromium_sandbox": false }
-```
+If a server is already running (agents keep the MCP subprocess alive), the copy
+fails with *"Text file busy"*; unlink first so running processes keep the old
+inode: `rm -f ~/.local/bin/browser-use-rs && cp … ~/.local/bin/browser-use-rs`,
+then restart the agent to pick it up.
 
-Because `LLMEntry`/`BrowserProfileEntry` differ (only the profile entry is
-`extra='allow'`), `chromium_sandbox` propagates through config but `base_url`
-does **not** — see §4.
+## 2. Chromium (headless-safe, auto-discovered)
 
-Verify end to end:
+Chromium is **not bundled**; the binary discovers a
+`~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome` build (or
+`BROWSER_USE_CHROMIUM_PATH`). Provision one once with either playwright or the
+Python package's `browser-use install`.
 
-```bash
-browser-use doctor
-```
+On a headless server the binary launches with `--no-sandbox` +
+`--disable-dev-shm-usage` automatically (Ubuntu 23.10+/24.04's
+`apparmor_restrict_unprivileged_userns=1` core-dumps Chrome otherwise). Headless
+is the default; set `BROWSER_USE_HEADLESS=true` explicitly if you want to be sure.
 
-## 3. Register with each agent
+Unlike the Python server, **each process gets its own unique `user_data_dir`**,
+so multiple agents can drive browsers in parallel with no `SingletonLock`
+contention.
 
-All four agents support local/stdio MCP servers. None ship a `browser-use` entry
-by default, so there is no collision.
+## 3. Environment
 
-| Agent | Mechanism | Config file |
-| --- | --- | --- |
-| Claude Code | `claude mcp add … -s user` | `~/.claude.json` |
-| Codex CLI | `codex mcp add …` | `~/.codex/config.toml` |
-| OpenCode | edit `mcp` object (CLI is interactive) | `~/.config/opencode/opencode.json` |
-| Hermes | edit `mcp_servers` (or `hermes mcp add`) | `~/.hermes/config.yaml` |
+| Var | Purpose |
+| --- | --- |
+| `OPENAI_API_KEY` | Bearer auth for the 2 LLM tools. |
+| `OPENAI_BASE_URL` | **Must include the API path** (e.g. `https://…/v1`) — the client POSTs `{base}/chat/completions`. A bare host hits the gateway's HTML page → *"failed to parse LLM chat response"*. |
+| `BROWSER_USE_LLM_MODEL` | Model id (default `gpt-4o`; set to what your gateway lists). |
+| `BROWSER_USE_LLM_TEMPERATURE` | Optional; defaults to `0.7`. |
+| `BROWSER_USE_HEADLESS` | `true` for servers. |
+| `BROWSER_USE_ALLOWED_DOMAINS` | Optional comma-separated allowlist; navigation off-list is blocked and disallowed pages are reset to `about:blank`. |
+| `BROWSER_USE_PROHIBITED_DOMAINS` | Optional denylist (consulted when no allowlist is set). |
+| `BROWSER_USE_BLOCK_IP_ADDRESSES` | `true` to reject bare-IP navigation (SSRF hardening). |
+| `MODEL_PROVIDER=bedrock` | Use AWS Bedrock (requires the `bedrock` build); `MODEL`/`REGION` select the model. |
+
+**No User-Agent workaround is needed.** The Rust client uses `reqwest`'s default
+UA, which does not contain `OpenAI`, so gateways that WAF-block the official SDK's
+fingerprint accept it directly. (This is why the Python wrapper existed — see §5.)
+
+## 4. Register with each agent
+
+All four agents launch a local/stdio MCP server; point each at
+`browser-use-rs --mcp`.
+
+| Agent | Config file |
+| --- | --- |
+| Claude Code | `~/.claude.json` |
+| Codex CLI | `~/.codex/config.toml` |
+| OpenCode | `~/.config/opencode/opencode.json` |
+| Hermes | `~/.hermes/config.yaml` |
 
 **Claude Code** (env values passed by `${VAR}` reference, expanded at spawn):
 
 ```bash
 claude mcp add browser-use -s user \
   -e OPENAI_API_KEY='${OPENAI_API_KEY}' -e OPENAI_BASE_URL='${OPENAI_BASE_URL}' \
-  -- <python-with-browser-use> <path>/contrib/mcp/mcp-launch.py
+  -e BROWSER_USE_LLM_MODEL='gpt-5.4-mini' -e BROWSER_USE_HEADLESS='true' \
+  -- browser-use-rs --mcp
 ```
 
-**Codex CLI**:
+**Codex CLI** — `~/.codex/config.toml`:
 
-```bash
-codex mcp add browser-use \
-  --env OPENAI_API_KEY="$OPENAI_API_KEY" --env OPENAI_BASE_URL="$OPENAI_BASE_URL" \
-  -- <python-with-browser-use> <path>/contrib/mcp/mcp-launch.py
+```toml
+[mcp_servers.browser-use]
+command = "browser-use-rs"
+args = ["--mcp"]
+[mcp_servers.browser-use.env]
+OPENAI_API_KEY = "…"
+OPENAI_BASE_URL = "https://…/v1"
+BROWSER_USE_LLM_MODEL = "gpt-5.4-mini"
+BROWSER_USE_HEADLESS = "true"
 ```
 
-**OpenCode** — add to the top-level `mcp` object:
+**OpenCode** — top-level `mcp` object in `opencode.json`:
 
 ```json
 "browser-use": {
   "type": "local",
-  "command": ["<python-with-browser-use>", "<path>/contrib/mcp/mcp-launch.py"],
+  "command": ["browser-use-rs", "--mcp"],
   "enabled": true,
-  "environment": { "OPENAI_API_KEY": "{env:OPENAI_API_KEY}", "OPENAI_BASE_URL": "{env:OPENAI_BASE_URL}" }
+  "environment": {
+    "OPENAI_API_KEY": "{env:OPENAI_API_KEY}",
+    "OPENAI_BASE_URL": "{env:OPENAI_BASE_URL}",
+    "BROWSER_USE_LLM_MODEL": "gpt-5.4-mini"
+  }
 }
 ```
 
-**Hermes** — add a top-level `mcp_servers` key (values interpolate `${VAR}` from
-the environment):
+**Hermes** — top-level `browser-use` under the MCP servers key in `config.yaml`:
 
 ```yaml
-mcp_servers:
-  browser-use:
-    command: <python-with-browser-use>
-    args: [<path>/contrib/mcp/mcp-launch.py]
-    enabled: true
-    env:
-      OPENAI_API_KEY: "${OPENAI_API_KEY}"
-      OPENAI_BASE_URL: "${OPENAI_BASE_URL}"
+browser-use:
+  command: browser-use-rs
+  args: [--mcp]
+  enabled: true
+  env:
+    OPENAI_API_KEY: "${OPENAI_API_KEY}"
+    OPENAI_BASE_URL: "https://…/v1"
+    BROWSER_USE_LLM_MODEL: "gpt-5.4-mini"
+    BROWSER_USE_HEADLESS: "true"
 ```
 
-Verify: `claude mcp get browser-use`, `codex mcp get browser-use`,
-`hermes mcp test browser-use` (expect “16 tools”), `opencode mcp list`.
+Verify: `claude mcp get browser-use` (expect ✔ Connected), `codex mcp get
+browser-use`, `hermes gateway restart && hermes gateway status`. A quick manual
+smoke test — pipe `initialize` then `tools/list` into `browser-use-rs --mcp` and
+expect 16 tools.
 
-## 4. Gateways that block the OpenAI SDK
+MCP servers run as agent subprocesses. After reinstalling the binary or changing
+env, **restart the agent session** (or its gateway, e.g. `hermes gateway
+restart`) so it respawns the new binary — a long-lived subprocess keeps the old
+one until then.
 
-If your `OPENAI_BASE_URL` points at a ChatGPT-account reverse-proxy gateway
-rather than api.openai.com, three things commonly break the two LLM-backed tools
-(the 14 low-level tools are unaffected):
+## 5. Rollback to the Python server
 
-1. **`/v1` path** — the SDK POSTs to `{base}/chat/completions`; if the gateway
-   serves its API under `/v1`, the base URL must end in `/v1`.
-2. **Model** — the gateway may reject browser-use's default (`gpt-4.1-mini`) and
-   serve a different family; set `BROWSER_USE_LLM_MODEL` to one it lists at
-   `GET {base}/v1/models`.
-3. **User-Agent WAF** — some gateways 403-block any request whose `User-Agent`
-   contains `OpenAI` (the SDK's fingerprint). browser-use's MCP server offers no
-   header hook.
+The Python install is retained for rollback. Repoint an agent's `browser-use`
+command back to the Python wrapper, which patches the OpenAI SDK's User-Agent,
+optionally appends `/v1` (`BROWSER_USE_MCP_FORCE_V1=1`), and defaults to
+headless:
 
-The launcher [`contrib/mcp/mcp-launch.py`](../../../contrib/mcp/mcp-launch.py)
-fixes all three: it patches `openai.AsyncOpenAI` to send a neutral User-Agent,
-optionally appends `/v1` (`BROWSER_USE_MCP_FORCE_V1=1`), defaults to headless,
-then runs the normal server. Point each agent's command at it (as shown above)
-instead of at `browser-use` directly. It is fully env-driven and hardcodes
-nothing gateway-specific. Background and evidence:
+```bash
+claude mcp remove browser-use -s user
+claude mcp add browser-use -s user \
+  -e OPENAI_API_KEY='${OPENAI_API_KEY}' -e OPENAI_BASE_URL='${OPENAI_BASE_URL}' \
+  -- ~/.local/share/uv/tools/browser-use/bin/python ~/.config/browseruse/mcp-launch.py
+```
+
+Background on the three gateway obstacles the wrapper fixes (`/v1` path, model
+family, User-Agent WAF):
 [learning/2026-07-05-openai-gateway-sdk-fingerprint-block.md](../../learning/2026-07-05-openai-gateway-sdk-fingerprint-block.md).
-
-## Notes & caveats
-
-- The LLM tools need each agent's **process** to have `OPENAI_API_KEY` /
-  `OPENAI_BASE_URL` in its environment at launch (the configs above pass them by
-  reference). Without them, the 14 low-level tools still work.
-- All agents share one Chrome profile
-  (`~/.config/browseruse/profiles/default`). One agent driving the browser at a
-  time is fine; concurrent use contends on Chrome's `SingletonLock`. Give each
-  agent its own `user_data_dir` (via a per-agent `BROWSER_USE_CONFIG_DIR`) for
-  true parallelism.
-- Restart a running agent session (or use its reload command) to pick up config
-  changes.

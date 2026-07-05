@@ -4,11 +4,19 @@ This `docs/` tree keeps operating knowledge modular so the router files
 ([`CLAUDE.md`](../CLAUDE.md), [`AGENTS.md`](../AGENTS.md)) stay thin. It was
 organized on the `franky` branch following the `clean-repo-org` practice.
 
+> **Deployed MCP server:** the surface the coding agents drive on this host is the
+> Rust reimplementation **`browser-use-rs --mcp`** (workspace under
+> [`rust/`](../rust), branch `franky-rust`) — full parity with the Python server,
+> plus a hardened URL-access policy and agent loop. Reference:
+> [architecture/12-rust-implementation.md](architecture/12-rust-implementation.md);
+> setup: [usage/tools/mcp-multi-agent-setup.md](usage/tools/mcp-multi-agent-setup.md).
+
 ## Sections
 
 - [architecture/](architecture/index.md) — how the library is built: the
   event-driven `BrowserSession`, CDP integration, DOM pipeline, tools registry,
-  MCP server, agent loop, and LLM abstraction.
+  MCP server, agent loop, and LLM abstraction — plus the
+  [Rust implementation](architecture/12-rust-implementation.md) that ports it.
 - [usage/](usage/README.md) — guides for end users, developers, and the
   shipped tools (including the MCP-server multi-agent setup).
 - [issues/](issues/README.md) — concrete implementation issue records.

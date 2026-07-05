@@ -40,9 +40,13 @@ Read these for the real, source-grounded detail (each cites specific files):
 - [09 — Configuration, Logging & Process Bootstrap](09-configuration-logging-bootstrap.md)
 - [10 — Cross-Cutting Services](10-cross-cutting-services.md)
 - [11 — The Beta Rust Bridge & JSON-RPC Contract](11-beta-rust-bridge.md)
+- [12 — Rust Implementation (`browser-use-rs`)](12-rust-implementation.md) — the **deployed** MCP server; a full-parity Rust reimplementation of docs 00–11.
 
-For the forward-looking Rust rewrite, see the plan at
-[docs/plans/2026-07-05-rust-rewrite/](../plans/2026-07-05-rust-rewrite/index.md).
+> **Deployed server.** The MCP server running on this host is the Rust
+> reimplementation ([12](12-rust-implementation.md)); docs 00–11 describe the
+> Python design it ports (byte-identical `tools/list`, hardened URL policy +
+> agent). Its plan + living build log are at
+> [docs/plans/2026-07-05-rust-rewrite/](../plans/2026-07-05-rust-rewrite/index.md).
 
 ## Key patterns
 
