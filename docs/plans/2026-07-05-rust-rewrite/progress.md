@@ -13,8 +13,10 @@ Update after every green milestone. Newest first.
 | — | 1d | Full parity is now tracked by the staged [parity-plan.md](parity-plan.md) (post-cutover review). | — |
 | 2026-07-05 | parity S1 | **Concurrency + robustness — done.** Single-owner actor serializes browser work (within-process race fixed: 8 concurrent get_state → 1 browser, verified); multi-process isolation verified (4 procs); stable-backendNodeId click cache (no TOCTOU); tracing + CDP-spam hygiene; bounded go_back/navigate; resilient tab listing. All live tests green (serial). | done |
 | — | parity S2 | Tool-contract parity (click coord+new_tab, type clear+mask, get_state rich shape, isError convention, sessions). | in progress |
-| — | parity S3 | Full three-tree DOM serializer (Python element-detection parity — visibility/paint-order/JS-listener detection). | pending |
-| — | parity S4-5 | LLM client + `browser_extract_content` + agent loop + `retry_with_browser_use_agent` (16/16). | pending |
+| 2026-07-05 | parity S2 | **Tool contracts — done.** click coord+new_tab, type clear+mask, isError convention. (commit `fc252b7`) | done |
+| 2026-07-05 | parity S3 | **Full three-tree DOM serializer — done.** DOM+DOMSnapshot+AX fusion; JS-listener/AX/heuristic interactive detection (detects `<div onclick>`/`addEventListener`); visibility filter; scroll-normalized coords. 18 live tests green. (commit `cbaba9c`) | done |
+| — | parity S4 | LLM client (`bu-llm`) + `browser_extract_content` → 15/16. | in progress |
+| — | parity S5 | Agent loop + `retry_with_browser_use_agent` → 16/16 (capstone). | pending |
 | — | 2 | Extract tool + `bu-llm` (openai-compatible) parity. | pending |
 | — | 3 | Event bus + watchdogs + autonomous agent (beta JSON-RPC conformance). | pending |
 | — | 4 | Provider/watchdog/parity hardening + cross-platform release. | pending |
