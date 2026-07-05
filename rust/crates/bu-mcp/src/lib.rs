@@ -86,6 +86,7 @@ impl BrowserUseMcpServer {
             "browser_list_tabs" => self.list_tabs().await,
             "browser_switch_tab" => self.switch_tab(request.arguments).await,
             "browser_close_tab" => self.close_tab(request.arguments).await,
+            "retry_with_browser_use_agent" => self.retry_agent(request.arguments).await,
             "browser_list_sessions" => self.list_sessions().await,
             "browser_close_session" => self.close_session(request.arguments).await,
             "browser_close_all" => self.close_all().await,
@@ -251,6 +252,25 @@ impl BrowserUseMcpServer {
             .await
             .map_err(browser_error("browser_get_html failed"))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(html)]))
+    }
+
+    async fn retry_agent(
+        &self,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let task =
+            required_str(arguments.as_ref(), "task", "retry_with_browser_use_agent")?.to_owned();
+        let max_steps = optional_i64(arguments.as_ref(), "max_steps")
+            .unwrap_or(100)
+            .max(1) as usize;
+        let model = optional_str(arguments.as_ref(), "model").map(str::to_owned);
+        let config =
+            bu_llm::OpenAiChatConfig::from_env_with_model_override(model).map_err(llm_error)?;
+        let llm = OpenAiChatClient::new(config).map_err(llm_error)?;
+        let report = bu_agent::run_task(task, max_steps, self.actor.clone(), llm).await;
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            report.to_python_report(),
+        )]))
     }
 
     async fn extract_content(
@@ -767,6 +787,39 @@ pub fn low_level_tools() -> Vec<Tool> {
             }),
         ),
         tool(
+            "retry_with_browser_use_agent",
+            "Retry a task using the browser-use agent. Only use this as a last resort if you fail to interact with a page multiple times.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "The high-level goal and detailed step-by-step description of the task the AI browser agent needs to attempt, along with any relevant data needed to complete the task and info about previous attempts."
+                    },
+                    "max_steps": {
+                        "type": "integer",
+                        "description": "Maximum number of steps an agent can take.",
+                        "default": 100
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "LLM model to use (e.g., gpt-4o, claude-3-opus-20240229). Defaults to the configured model."
+                    },
+                    "allowed_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of domains the agent is allowed to visit (security feature). Omit to use the server-configured profile defaults. An empty list is treated the same as omitting the argument and will NOT disable server-configured restrictions."
+                    },
+                    "use_vision": {
+                        "type": "boolean",
+                        "description": "Whether to use vision capabilities (screenshots) for the agent",
+                        "default": true
+                    }
+                },
+                "required": ["task"]
+            }),
+        ),
+        tool(
             "browser_list_sessions",
             "List all active browser sessions with their details and last activity time",
             json!({"type": "object", "properties": {}}),
@@ -825,11 +878,11 @@ mod tests {
     use tokio::time::{timeout, Duration};
 
     #[test]
-    fn tools_list_returns_15_low_level_tools() {
+    fn tools_list_returns_16_low_level_tools() {
         let tools = low_level_tools();
         let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
 
-        assert_eq!(tools.len(), 15);
+        assert_eq!(tools.len(), 16);
         assert_eq!(
             names,
             [
@@ -845,6 +898,7 @@ mod tests {
                 "browser_list_tabs",
                 "browser_switch_tab",
                 "browser_close_tab",
+                "retry_with_browser_use_agent",
                 "browser_list_sessions",
                 "browser_close_session",
                 "browser_close_all",
@@ -867,6 +921,48 @@ mod tests {
                     }
                 },
                 "required": ["query"]
+            })
+        );
+        let retry = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == "retry_with_browser_use_agent")
+            .expect("retry_with_browser_use_agent tool should be listed");
+        assert_eq!(
+            retry.description.as_deref(),
+            Some(
+            "Retry a task using the browser-use agent. Only use this as a last resort if you fail to interact with a page multiple times."
+            )
+        );
+        assert_eq!(
+            serde_json::to_value(retry.input_schema.as_ref()).unwrap(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "The high-level goal and detailed step-by-step description of the task the AI browser agent needs to attempt, along with any relevant data needed to complete the task and info about previous attempts."
+                    },
+                    "max_steps": {
+                        "type": "integer",
+                        "description": "Maximum number of steps an agent can take.",
+                        "default": 100
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "LLM model to use (e.g., gpt-4o, claude-3-opus-20240229). Defaults to the configured model."
+                    },
+                    "allowed_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of domains the agent is allowed to visit (security feature). Omit to use the server-configured profile defaults. An empty list is treated the same as omitting the argument and will NOT disable server-configured restrictions."
+                    },
+                    "use_vision": {
+                        "type": "boolean",
+                        "description": "Whether to use vision capabilities (screenshots) for the agent",
+                        "default": true
+                    }
+                },
+                "required": ["task"]
             })
         );
     }

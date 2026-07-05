@@ -98,6 +98,15 @@ dependencies = [
 [[package]]
 name = "bu-agent"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bu-actor",
+ "bu-dom",
+ "bu-llm",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "bu-bus"
@@ -150,6 +159,7 @@ dependencies = [
  "anyhow",
  "base64",
  "bu-actor",
+ "bu-agent",
  "bu-dom",
  "bu-llm",
  "rmcp",

@@ -61,6 +61,11 @@ struct ChatChoiceMessage {
 impl OpenAiChatConfig {
     /// Loads OpenAI-compatible chat configuration from the process environment.
     pub fn from_env() -> Result<Self> {
+        Self::from_env_with_model_override(None)
+    }
+
+    /// Loads OpenAI-compatible chat configuration and applies an optional model override.
+    pub fn from_env_with_model_override(model_override: Option<String>) -> Result<Self> {
         let api_key = env::var("OPENAI_API_KEY")
             .map(|value| value.trim().to_owned())
             .ok()
@@ -70,9 +75,14 @@ impl OpenAiChatConfig {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
-        let model = env::var("BROWSER_USE_LLM_MODEL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
+        let model = model_override
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                env::var("BROWSER_USE_LLM_MODEL")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
             .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
         let temperature = match env::var("BROWSER_USE_LLM_TEMPERATURE") {
             Ok(value) if !value.trim().is_empty() => Some(
@@ -100,6 +110,13 @@ impl OpenAiChatClient {
     /// Creates a chat client from environment configuration.
     pub fn from_env() -> Result<Self> {
         Self::new(OpenAiChatConfig::from_env()?)
+    }
+
+    /// Creates a chat client from environment configuration and an optional model override.
+    pub fn from_env_with_model_override(model_override: Option<String>) -> Result<Self> {
+        Self::new(OpenAiChatConfig::from_env_with_model_override(
+            model_override,
+        )?)
     }
 
     /// Creates a chat client from explicit configuration.
