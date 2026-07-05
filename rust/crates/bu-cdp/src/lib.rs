@@ -38,9 +38,12 @@ const REQUIRED_COMPUTED_STYLES: &[&str] = &[
     "display",
     "visibility",
     "opacity",
+    "background-color",
     "cursor",
     "pointer-events",
 ];
+const MAX_OCCLUSION_RECTS: usize = 5_000;
+const CONTAINMENT_THRESHOLD: f64 = 0.99;
 
 /// Browser launch options used by the thin CDP session wrapper.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +127,7 @@ struct EnhancedNode {
     ax_properties: HashMap<String, serde_json::Value>,
     computed_styles: HashMap<String, String>,
     bounds: Option<Rect>,
+    paint_order: Option<i64>,
     has_js_click_listener: bool,
 }
 
@@ -133,6 +137,175 @@ struct Rect {
     y: f64,
     width: f64,
     height: f64,
+}
+
+impl Rect {
+    fn x2(self) -> f64 {
+        self.x + self.width
+    }
+
+    fn y2(self) -> f64 {
+        self.y + self.height
+    }
+
+    fn area(self) -> f64 {
+        self.width * self.height
+    }
+
+    fn is_empty(self) -> bool {
+        self.width <= 0.0 || self.height <= 0.0
+    }
+
+    fn intersects(self, other: Rect) -> bool {
+        !(self.x2() <= other.x
+            || other.x2() <= self.x
+            || self.y2() <= other.y
+            || other.y2() <= self.y)
+    }
+
+    fn contains(self, other: Rect) -> bool {
+        self.x <= other.x && self.y <= other.y && self.x2() >= other.x2() && self.y2() >= other.y2()
+    }
+
+    fn intersection_area(self, other: Rect) -> f64 {
+        let x_overlap = (self.x2().min(other.x2()) - self.x.max(other.x)).max(0.0);
+        let y_overlap = (self.y2().min(other.y2()) - self.y.max(other.y)).max(0.0);
+        x_overlap * y_overlap
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SelectorMapCandidate {
+    backend_node_id: BackendNodeId,
+    tag: String,
+    text: String,
+    href: Option<String>,
+    bounds: Rect,
+}
+
+impl SelectorMapCandidate {
+    fn backend_node_id_value(&self) -> i64 {
+        *self.backend_node_id.inner()
+    }
+
+    fn into_element(self, index: usize) -> SelectorMapElement {
+        SelectorMapElement {
+            index,
+            backend_node_id: self.backend_node_id,
+            tag: self.tag,
+            text: self.text,
+            href: self.href,
+            x: self.bounds.x + self.bounds.width / 2.0,
+            y: self.bounds.y + self.bounds.height / 2.0,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct RectUnion {
+    rects: Vec<Rect>,
+}
+
+impl RectUnion {
+    fn contains(&self, rect: Rect) -> bool {
+        if self.rects.is_empty() || rect.is_empty() {
+            return false;
+        }
+
+        let mut pending = vec![rect];
+        for covered in &self.rects {
+            let mut next_pending = Vec::new();
+            for piece in pending {
+                if covered.contains(piece) {
+                    continue;
+                }
+                if piece.intersects(*covered) {
+                    next_pending.extend(split_rect_difference(piece, *covered));
+                } else {
+                    next_pending.push(piece);
+                }
+            }
+            if next_pending.is_empty() {
+                return true;
+            }
+            pending = next_pending;
+        }
+
+        false
+    }
+
+    fn add(&mut self, rect: Rect) -> bool {
+        if rect.is_empty() || self.rects.len() >= MAX_OCCLUSION_RECTS || self.contains(rect) {
+            return false;
+        }
+
+        let mut pending = vec![rect];
+        for existing in &self.rects {
+            let mut next_pending = Vec::new();
+            for piece in pending {
+                if piece.intersects(*existing) {
+                    next_pending.extend(split_rect_difference(piece, *existing));
+                } else {
+                    next_pending.push(piece);
+                }
+            }
+            pending = next_pending;
+            if pending.is_empty() {
+                return false;
+            }
+        }
+
+        if self.rects.len() + pending.len() > MAX_OCCLUSION_RECTS {
+            return false;
+        }
+
+        self.rects.extend(pending);
+        true
+    }
+}
+
+fn split_rect_difference(rect: Rect, cutter: Rect) -> Vec<Rect> {
+    let mut parts = Vec::with_capacity(4);
+
+    if rect.y < cutter.y {
+        parts.push(Rect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: cutter.y - rect.y,
+        });
+    }
+    if cutter.y2() < rect.y2() {
+        parts.push(Rect {
+            x: rect.x,
+            y: cutter.y2(),
+            width: rect.width,
+            height: rect.y2() - cutter.y2(),
+        });
+    }
+
+    let y = rect.y.max(cutter.y);
+    let y2 = rect.y2().min(cutter.y2());
+    let height = y2 - y;
+
+    if rect.x < cutter.x && height > 0.0 {
+        parts.push(Rect {
+            x: rect.x,
+            y,
+            width: cutter.x - rect.x,
+            height,
+        });
+    }
+    if cutter.x2() < rect.x2() && height > 0.0 {
+        parts.push(Rect {
+            x: cutter.x2(),
+            y,
+            width: rect.x2() - cutter.x2(),
+            height,
+        });
+    }
+
+    parts
 }
 
 impl SelectorMapElement {
@@ -555,8 +728,16 @@ impl BrowserPage {
             }
         }
 
-        let mut elements = Vec::new();
-        collect_interactive_elements(&dom_tree, &enhanced_nodes, &mut elements);
+        let mut candidates = Vec::new();
+        collect_interactive_elements(&dom_tree, &enhanced_nodes, &mut candidates);
+        apply_paint_order_occlusion_filter(&mut candidates, &enhanced_nodes);
+        apply_bounding_box_containment_filter(&dom_tree, &enhanced_nodes, &mut candidates);
+
+        let elements = candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, candidate)| candidate.into_element(index))
+            .collect();
 
         Ok(elements)
     }
@@ -942,6 +1123,15 @@ fn merge_snapshot(
                 });
             }
 
+            if let Some(paint_order) = document
+                .layout
+                .paint_orders
+                .as_ref()
+                .and_then(|paint_orders| paint_orders.get(layout_index))
+            {
+                enhanced.paint_order = Some(*paint_order);
+            }
+
             if enhanced.text.is_empty() {
                 if let Some(text) = document
                     .layout
@@ -1003,7 +1193,7 @@ fn visible_backend_node_ids(nodes: &HashMap<i64, EnhancedNode>) -> Vec<BackendNo
 fn collect_interactive_elements(
     node: &Node,
     enhanced_nodes: &HashMap<i64, EnhancedNode>,
-    elements: &mut Vec<SelectorMapElement>,
+    elements: &mut Vec<SelectorMapCandidate>,
 ) {
     if node.node_type == 1 {
         if let Some(enhanced) = enhanced_nodes.get(node.backend_node_id.inner()) {
@@ -1011,14 +1201,12 @@ fn collect_interactive_elements(
                 if let (Some(backend_node_id), Some(bounds)) =
                     (enhanced.backend_node_id, enhanced.bounds)
                 {
-                    elements.push(SelectorMapElement {
-                        index: elements.len(),
+                    elements.push(SelectorMapCandidate {
                         backend_node_id,
                         tag: enhanced.tag.clone(),
                         text: enhanced.text.clone(),
                         href: enhanced.attributes.get("href").cloned(),
-                        x: bounds.x + bounds.width / 2.0,
-                        y: bounds.y + bounds.height / 2.0,
+                        bounds,
                     });
                 }
             }
@@ -1037,6 +1225,157 @@ fn collect_interactive_elements(
     if let Some(template_content) = &node.template_content {
         collect_interactive_elements(template_content, enhanced_nodes, elements);
     }
+}
+
+/// Drops interactive candidates fully covered by higher-painted opaque elements
+/// (e.g. a button under a full-screen modal backdrop). Mirrors Python's PaintOrderRemover.
+fn apply_paint_order_occlusion_filter(
+    candidates: &mut Vec<SelectorMapCandidate>,
+    enhanced: &HashMap<i64, EnhancedNode>,
+) {
+    // Opaque occluders sorted front-to-back (highest paint order first).
+    let mut occluders: Vec<(i64, Rect)> = enhanced
+        .values()
+        .filter(|node| is_opaque_enhanced_node(node))
+        .filter_map(|node| Some((node.paint_order?, node.bounds?)))
+        .filter(|(_, rect)| !rect.is_empty())
+        .collect();
+    occluders.sort_by(|a, b| b.0.cmp(&a.0));
+
+    candidates.retain(|candidate| {
+        let candidate_paint = enhanced
+            .get(&candidate.backend_node_id_value())
+            .and_then(|node| node.paint_order)
+            .unwrap_or(i64::MIN);
+        let mut union = RectUnion::default();
+        for (paint_order, rect) in &occluders {
+            // Only elements painted strictly above the candidate can occlude it.
+            if *paint_order <= candidate_paint {
+                break;
+            }
+            union.add(*rect);
+            if union.contains(candidate.bounds) {
+                return false;
+            }
+        }
+        true
+    });
+}
+
+/// Collapses a candidate that is >=99% contained inside a propagating interactive
+/// parent (a/button/[role=button|link|combobox]) into that parent — a button
+/// wrapping icon+text yields one index. Mirrors Python's _apply_bounding_box_filtering.
+fn apply_bounding_box_containment_filter(
+    _dom_tree: &Node,
+    enhanced: &HashMap<i64, EnhancedNode>,
+    candidates: &mut Vec<SelectorMapCandidate>,
+) {
+    let n = candidates.len();
+    let mut excluded = vec![false; n];
+    for i in 0..n {
+        // Carve-outs: form controls / own onclick / own aria-label always keep their index.
+        if candidate_has_containment_carveout(&candidates[i], enhanced) {
+            continue;
+        }
+        let child = candidates[i].bounds;
+        if child.is_empty() {
+            continue;
+        }
+        for j in 0..n {
+            if i == j || excluded[j] {
+                continue;
+            }
+            let parent = candidates[j].bounds;
+            if parent.area() >= child.area()
+                && is_propagating_parent(&candidates[j], enhanced)
+                && parent.intersection_area(child) / child.area() >= CONTAINMENT_THRESHOLD
+            {
+                excluded[i] = true;
+                break;
+            }
+        }
+    }
+    let mut index = 0;
+    candidates.retain(|_| {
+        let keep = !excluded[index];
+        index += 1;
+        keep
+    });
+}
+
+fn is_propagating_parent(
+    candidate: &SelectorMapCandidate,
+    enhanced: &HashMap<i64, EnhancedNode>,
+) -> bool {
+    if matches!(candidate.tag.as_str(), "a" | "button" | "select") {
+        return true;
+    }
+    if let Some(node) = enhanced.get(&candidate.backend_node_id_value()) {
+        let role = node
+            .attributes
+            .get("role")
+            .map(String::as_str)
+            .or(node.ax_role.as_deref());
+        if let Some(role) = role {
+            if matches!(
+                role.to_ascii_lowercase().as_str(),
+                "button" | "link" | "combobox"
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn candidate_has_containment_carveout(
+    candidate: &SelectorMapCandidate,
+    enhanced: &HashMap<i64, EnhancedNode>,
+) -> bool {
+    if matches!(candidate.tag.as_str(), "input" | "select" | "textarea") {
+        return true;
+    }
+    if let Some(node) = enhanced.get(&candidate.backend_node_id_value()) {
+        if node.attributes.contains_key("onclick") || node.attributes.contains_key("aria-label") {
+            return true;
+        }
+    }
+    false
+}
+
+/// An element occludes what is behind it only if it has an opaque background and
+/// full opacity — a transparent wrapper/text node does not hide a button.
+fn is_opaque_enhanced_node(node: &EnhancedNode) -> bool {
+    let opacity = node
+        .computed_styles
+        .get("opacity")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(1.0);
+    if opacity < 0.9 {
+        return false;
+    }
+    node.computed_styles
+        .get("background-color")
+        .map(|bg| background_alpha(bg) > 0.1)
+        .unwrap_or(false)
+}
+
+fn background_alpha(color: &str) -> f64 {
+    let color = color.trim();
+    if color.eq_ignore_ascii_case("transparent") {
+        return 0.0;
+    }
+    if let Some(inner) = color
+        .strip_prefix("rgba(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let parts: Vec<&str> = inner.split(',').collect();
+        if parts.len() == 4 {
+            return parts[3].trim().parse::<f64>().unwrap_or(1.0);
+        }
+    }
+    // rgb(...), hex, and named colors are opaque.
+    1.0
 }
 
 fn is_click_like_event(event_type: &str) -> bool {

@@ -863,6 +863,8 @@ mod tests {
     #[cfg(feature = "live-chrome")]
     use super::BrowserUseMcpServer;
     #[cfg(feature = "live-chrome")]
+    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+    #[cfg(feature = "live-chrome")]
     use rmcp::model::CallToolRequestParams;
     use serde_json::json;
     #[cfg(feature = "live-chrome")]
@@ -1158,6 +1160,167 @@ mod tests {
         assert!(
             !has_element(elements, "button", "Gone"),
             "display:none elements must be hidden from selector map: {elements:?}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn selector_map_drops_button_fully_covered_by_opaque_modal() -> anyhow::Result<()> {
+        let server = BrowserUseMcpServer::new();
+        let html = r#"
+            <title>Modal Cover</title>
+            <body style="margin:0">
+              <button style="position:absolute;left:80px;top:80px;width:160px;height:50px;z-index:1" onclick="document.body.dataset.clicked='target'">Covered Target</button>
+              <div id="modal" style="position:fixed;inset:0;background:rgb(0, 0, 0);opacity:1;z-index:9999"></div>
+            </body>
+        "#;
+
+        server
+            .call_browser_tool(call("browser_navigate", json!({"url": data_url(html)})))
+            .await?;
+
+        let covered_state = server
+            .call_browser_tool(call("browser_get_state", json!({})))
+            .await?
+            .structured_content
+            .expect("browser_get_state should return structured JSON");
+        let covered_elements = covered_state["elements"]
+            .as_array()
+            .expect("elements should be an array");
+        assert!(
+            !has_element(covered_elements, "button", "Covered Target"),
+            "fully covered button must be removed from selector map: {covered_elements:?}"
+        );
+
+        server
+            .actor()
+            .evaluate("document.getElementById('modal').remove()")
+            .await?;
+
+        let uncovered_state = server
+            .call_browser_tool(call("browser_get_state", json!({})))
+            .await?
+            .structured_content
+            .expect("browser_get_state should return structured JSON");
+        let uncovered_elements = uncovered_state["elements"]
+            .as_array()
+            .expect("elements should be an array");
+        assert!(
+            has_element(uncovered_elements, "button", "Covered Target"),
+            "button must return to selector map after modal removal: {uncovered_elements:?}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn selector_map_keeps_one_index_for_button_wrapping_icon_and_text() -> anyhow::Result<()>
+    {
+        let server = BrowserUseMcpServer::new();
+        let html = r#"
+            <title>Wrapped Button</title>
+            <button style="display:inline-flex;align-items:center;gap:4px;width:120px;height:44px">
+              <svg width="16" height="16" aria-hidden="true"></svg>
+              <span>Buy</span>
+            </button>
+        "#;
+
+        server
+            .call_browser_tool(call("browser_navigate", json!({"url": data_url(html)})))
+            .await?;
+
+        let state = server
+            .call_browser_tool(call("browser_get_state", json!({})))
+            .await?
+            .structured_content
+            .expect("browser_get_state should return structured JSON");
+        let elements = state["elements"]
+            .as_array()
+            .expect("elements should be an array");
+        let buy_elements = elements
+            .iter()
+            .filter(|element| element["text"] == "Buy")
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            buy_elements.len(),
+            1,
+            "button with wrapped icon/text must produce one indexed element: {elements:?}"
+        );
+        assert_eq!(buy_elements[0]["tag"], "button");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn selector_map_excludes_contained_tabbable_child_of_button() -> anyhow::Result<()> {
+        let server = BrowserUseMcpServer::new();
+        let html = r#"
+            <title>Contained Child</title>
+            <button style="display:inline-block;width:180px;height:56px">
+              <span tabindex="0" style="display:block;width:100%;height:100%">Nested Action</span>
+            </button>
+        "#;
+
+        server
+            .call_browser_tool(call("browser_navigate", json!({"url": data_url(html)})))
+            .await?;
+
+        let state = server
+            .call_browser_tool(call("browser_get_state", json!({})))
+            .await?
+            .structured_content
+            .expect("browser_get_state should return structured JSON");
+        let elements = state["elements"]
+            .as_array()
+            .expect("elements should be an array");
+        let nested_elements = elements
+            .iter()
+            .filter(|element| element["text"] == "Nested Action")
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            nested_elements.len(),
+            1,
+            "contained tabbable child must be excluded in favor of parent button: {elements:?}"
+        );
+        assert_eq!(nested_elements[0]["tag"], "button");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn selector_map_keeps_form_control_inside_link() -> anyhow::Result<()> {
+        let server = BrowserUseMcpServer::new();
+        let html = r#"
+            <title>Nested Form Control</title>
+            <a href="/checkout" style="display:inline-block;padding:12px">
+              Checkout
+              <input value="Nested Control" style="display:block;width:160px;height:32px">
+            </a>
+        "#;
+
+        server
+            .call_browser_tool(call("browser_navigate", json!({"url": data_url(html)})))
+            .await?;
+
+        let state = server
+            .call_browser_tool(call("browser_get_state", json!({})))
+            .await?
+            .structured_content
+            .expect("browser_get_state should return structured JSON");
+        let elements = state["elements"]
+            .as_array()
+            .expect("elements should be an array");
+
+        assert!(
+            has_element(elements, "input", "Nested Control"),
+            "form control inside link must remain indexed: {elements:?}"
         );
 
         Ok(())
@@ -1608,6 +1771,11 @@ mod tests {
         elements
             .iter()
             .any(|element| element["tag"] == tag && element["text"] == text)
+    }
+
+    #[cfg(feature = "live-chrome")]
+    fn data_url(html: &str) -> String {
+        format!("data:text/html;base64,{}", BASE64_STANDARD.encode(html))
     }
 
     #[cfg(feature = "live-chrome")]
