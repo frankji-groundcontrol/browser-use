@@ -3,7 +3,10 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -112,6 +115,7 @@ impl SelectorMapElement {
 pub struct BrowserSession {
     browser: Arc<Mutex<Browser>>,
     handler_task: JoinHandle<()>,
+    healthy: Arc<AtomicBool>,
     user_data_dir: PathBuf,
 }
 
@@ -153,19 +157,32 @@ impl BrowserSession {
         .await
         .context("failed to launch Chromium")?;
 
+        let healthy = Arc::new(AtomicBool::new(true));
+        let handler_healthy = healthy.clone();
         let handler_task = tokio::spawn(async move {
             while let Some(event) = handler.next().await {
-                if let Err(error) = event {
-                    eprintln!("chromiumoxide handler error: {error}");
+                if let Err(err) = event {
+                    if matches!(&err, chromiumoxide::error::CdpError::Serde(_)) {
+                        continue;
+                    }
+                    tracing::warn!(%err, "chromiumoxide handler error");
                 }
             }
+            handler_healthy.store(false, Ordering::SeqCst);
+            tracing::warn!("chromiumoxide handler ended; browser is unavailable");
         });
 
         Ok(Self {
             browser: Arc::new(Mutex::new(browser)),
             handler_task,
+            healthy,
             user_data_dir,
         })
+    }
+
+    /// Returns whether the Chromium handler task still reports a live browser.
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::SeqCst)
     }
 
     /// Opens a new page.
@@ -182,6 +199,32 @@ impl BrowserSession {
     }
 
     /// Returns metadata for all open pages.
+    /// Returns Chromium's first existing page, if any — so callers adopt the
+    /// browser's initial tab instead of opening a redundant second one.
+    pub async fn first_page(&self) -> Result<Option<BrowserPage>> {
+        let pages = self
+            .browser
+            .lock()
+            .await
+            .pages()
+            .await
+            .context("failed to list Chromium pages")?;
+        Ok(pages.into_iter().next().map(|page| BrowserPage { page }))
+    }
+
+    /// Returns the browser's primary page, waiting briefly for Chromium's initial
+    /// page to register before creating one — avoids a redundant second tab from a
+    /// launch-time race where `pages()` is momentarily empty.
+    pub async fn primary_page(&self) -> Result<BrowserPage> {
+        for _ in 0..40 {
+            if let Some(page) = self.first_page().await? {
+                return Ok(page);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        self.new_page().await
+    }
+
     pub async fn tabs(&self, active_page: Option<&BrowserPage>) -> Result<Vec<TabInfo>> {
         let pages = self
             .browser
@@ -195,7 +238,12 @@ impl BrowserSession {
         let mut tabs = Vec::with_capacity(pages.len());
         for page in pages {
             let browser_page = BrowserPage { page };
-            let state = browser_page.state().await?;
+            // A page that is mid-close/detached (or chrome:// mid-nav) can fail its
+            // state read with "receiver is gone"; skip it rather than failing the
+            // whole listing. (Review item 2.5 — brittle tab listing.)
+            let Ok(state) = browser_page.state().await else {
+                continue;
+            };
             let target_id = browser_page.target_id();
             tabs.push(TabInfo {
                 id: short_tab_id(&target_id),
@@ -393,6 +441,19 @@ impl BrowserPage {
             .context("failed to decode selector query result")
     }
 
+    /// Evaluates JavaScript in the current page and decodes the result as JSON.
+    #[cfg(feature = "live-chrome")]
+    pub async fn evaluate_json(&self, script: &str) -> Result<serde_json::Value> {
+        let result = self
+            .page
+            .evaluate(script)
+            .await
+            .with_context(|| format!("failed to evaluate script: {script}"))?;
+        // A void/undefined result (e.g. calling a function that returns nothing)
+        // has no remote value; treat it as JSON null rather than an error.
+        Ok(result.into_value().unwrap_or(serde_json::Value::Null))
+    }
+
     /// Builds a first-cut selector map from Chromium's live flattened DOM.
     pub async fn selector_map(&self) -> Result<Vec<SelectorMapElement>> {
         let root = self
@@ -432,6 +493,15 @@ impl BrowserPage {
             .find(|element| element.index == index)
             .with_context(|| format!("interactive element index {index} not found"))?;
 
+        self.click_backend_node_id(element.backend_node_id_value())
+            .await
+            .with_context(|| format!("failed to click interactive element index {index}"))?;
+        Ok(())
+    }
+
+    /// Clicks an element by stable Chromium backend node id.
+    pub async fn click_backend_node_id(&self, backend_node_id: i64) -> Result<()> {
+        let element = self.element_for_backend_node_id(backend_node_id).await?;
         self.dispatch_mouse_event(DispatchMouseEventType::MousePressed, &element)
             .await?;
         self.dispatch_mouse_event(DispatchMouseEventType::MouseReleased, &element)
@@ -448,6 +518,17 @@ impl BrowserPage {
             .find(|element| element.index == index)
             .with_context(|| format!("interactive element index {index} not found"))?;
 
+        self.type_into_backend_node_id(element.backend_node_id_value(), text)
+            .await
+            .with_context(|| format!("failed to type into interactive element index {index}"))?;
+
+        Ok(())
+    }
+
+    /// Focuses an element by stable Chromium backend node id and types text into it.
+    pub async fn type_into_backend_node_id(&self, backend_node_id: i64, text: &str) -> Result<()> {
+        let element = self.element_for_backend_node_id(backend_node_id).await?;
+
         self.page
             .execute(
                 FocusParams::builder()
@@ -455,7 +536,7 @@ impl BrowserPage {
                     .build(),
             )
             .await
-            .with_context(|| format!("failed to focus interactive element index {index}"))?;
+            .with_context(|| format!("failed to focus backend node id {backend_node_id}"))?;
 
         if let Err(insert_error) = self.page.execute(InsertTextParams::new(text)).await {
             self.dispatch_text_as_key_events(text)
@@ -466,6 +547,28 @@ impl BrowserPage {
         }
 
         Ok(())
+    }
+
+    async fn element_for_backend_node_id(
+        &self,
+        backend_node_id: i64,
+    ) -> Result<SelectorMapElement> {
+        let backend_node_id = BackendNodeId::new(backend_node_id);
+        let (x, y) = self.box_center(backend_node_id).await?.with_context(|| {
+            format!(
+                "backend node id {} not found or not visible",
+                *backend_node_id.inner()
+            )
+        })?;
+
+        Ok(SelectorMapElement {
+            index: 0,
+            backend_node_id,
+            tag: String::new(),
+            text: String::new(),
+            x,
+            y,
+        })
     }
 
     async fn box_center(&self, backend_node_id: BackendNodeId) -> Result<Option<(f64, f64)>> {

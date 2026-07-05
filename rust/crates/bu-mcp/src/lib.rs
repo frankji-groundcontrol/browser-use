@@ -6,7 +6,7 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use bu_cdp::{BrowserPage, BrowserSession};
+use bu_actor::ActorHandle;
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResult, ContentBlock, ErrorCode, Implementation,
@@ -17,26 +17,43 @@ use rmcp::{
     ErrorData, ServerHandler, ServiceExt,
 };
 use serde_json::{json, Map, Value};
-use tokio::sync::Mutex;
 
 const SESSION_ID: &str = "default";
 
 /// Minimal rmcp server implementation for the browser-use MCP surface.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BrowserUseMcpServer {
-    browser: Arc<Mutex<Option<SharedBrowser>>>,
+    actor: ActorHandle,
 }
 
-#[derive(Debug)]
-struct SharedBrowser {
-    session: BrowserSession,
-    page: BrowserPage,
+impl Default for BrowserUseMcpServer {
+    fn default() -> Self {
+        Self {
+            actor: ActorHandle::spawn(),
+        }
+    }
 }
 
 impl BrowserUseMcpServer {
     /// Creates a new browser-use MCP server.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a server whose actor reports Chromium launches to `launch_counter`.
+    #[cfg(feature = "live-chrome")]
+    pub fn with_browser_launch_counter(
+        launch_counter: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        Self {
+            actor: ActorHandle::spawn_with_launch_counter(launch_counter),
+        }
+    }
+
+    /// Returns the underlying actor handle for live browser integration tests.
+    #[cfg(feature = "live-chrome")]
+    pub fn actor(&self) -> ActorHandle {
+        self.actor.clone()
     }
 
     async fn call_browser_tool(
@@ -56,7 +73,7 @@ impl BrowserUseMcpServer {
 
         match request.name.as_ref() {
             "browser_navigate" => self.navigate(request.arguments).await,
-            "browser_get_state" => self.get_state().await,
+            "browser_get_state" => self.get_state(request.arguments).await,
             "browser_click" => self.click(request.arguments).await,
             "browser_type" => self.type_text(request.arguments).await,
             "browser_get_html" => self.get_html(request.arguments).await,
@@ -92,12 +109,8 @@ impl BrowserUseMcpServer {
             })?;
         let new_tab = optional_bool(arguments.as_ref(), "new_tab").unwrap_or(false);
 
-        let page = if new_tab {
-            self.new_active_page().await?
-        } else {
-            self.shared_page().await?
-        };
-        page.navigate(url)
+        self.actor
+            .navigate(url.to_owned(), new_tab)
             .await
             .map_err(browser_error("browser_navigate failed"))?;
 
@@ -106,16 +119,19 @@ impl BrowserUseMcpServer {
         ))]))
     }
 
-    async fn get_state(&self) -> Result<CallToolResult, ErrorData> {
-        let page = self.shared_page().await?;
-        let state = page
-            .state()
+    async fn get_state(
+        &self,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let include_screenshot =
+            optional_bool(arguments.as_ref(), "include_screenshot").unwrap_or(false);
+        let snapshot = self
+            .actor
+            .get_state(include_screenshot)
             .await
             .map_err(browser_error("browser_get_state failed"))?;
-        let elements = page
-            .selector_map()
-            .await
-            .map_err(browser_error("browser_get_state failed"))?
+        let elements = snapshot
+            .elements
             .into_iter()
             .map(|element| {
                 json!({
@@ -125,14 +141,34 @@ impl BrowserUseMcpServer {
                 })
             })
             .collect::<Vec<_>>();
-        let tabs = self.tab_values().await?;
+        let tabs = snapshot
+            .tabs
+            .into_iter()
+            .map(|tab| {
+                json!({
+                    "id": tab.id,
+                    "tab_id": tab.id,
+                    "target_id": tab.target_id,
+                    "url": tab.url,
+                    "title": tab.title,
+                    "active": tab.active
+                })
+            })
+            .collect::<Vec<_>>();
 
-        let payload = json!({
-            "url": state.url,
-            "title": state.title,
+        let mut payload = json!({
+            "url": snapshot.page.url,
+            "title": snapshot.page.title,
             "elements": elements,
             "tabs": tabs
         });
+        if let Some(screenshot) = snapshot.screenshot {
+            payload["screenshot"] = json!({
+                "mime_type": "image/png",
+                "size_bytes": screenshot.len(),
+                "data": BASE64_STANDARD.encode(screenshot)
+            });
+        }
 
         Ok(CallToolResult::structured(payload))
     }
@@ -142,8 +178,8 @@ impl BrowserUseMcpServer {
         arguments: Option<Map<String, Value>>,
     ) -> Result<CallToolResult, ErrorData> {
         let index = required_usize(arguments.as_ref(), "index", "browser_click")?;
-        let page = self.shared_page().await?;
-        page.click_element(index)
+        self.actor
+            .click(index)
             .await
             .map_err(browser_error("browser_click failed"))?;
 
@@ -157,9 +193,9 @@ impl BrowserUseMcpServer {
         arguments: Option<Map<String, Value>>,
     ) -> Result<CallToolResult, ErrorData> {
         let index = required_usize(arguments.as_ref(), "index", "browser_type")?;
-        let text = required_str(arguments.as_ref(), "text", "browser_type")?;
-        let page = self.shared_page().await?;
-        page.type_into_element(index, text)
+        let text = required_str(arguments.as_ref(), "text", "browser_type")?.to_owned();
+        self.actor
+            .type_text(index, text)
             .await
             .map_err(browser_error("browser_type failed"))?;
 
@@ -173,22 +209,9 @@ impl BrowserUseMcpServer {
         arguments: Option<Map<String, Value>>,
     ) -> Result<CallToolResult, ErrorData> {
         let selector = optional_str(arguments.as_ref(), "selector");
-        let page = self.shared_page().await?;
-
-        if let Some(selector) = selector {
-            let exists = page
-                .query_selector_exists(selector)
-                .await
-                .map_err(browser_error("browser_get_html failed"))?;
-            if !exists {
-                return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                    "No element found for selector: {selector}"
-                ))]));
-            }
-        }
-
-        let html = page
-            .html(selector)
+        let html = self
+            .actor
+            .get_html(selector.map(str::to_owned))
             .await
             .map_err(browser_error("browser_get_html failed"))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(html)]))
@@ -199,9 +222,9 @@ impl BrowserUseMcpServer {
         arguments: Option<Map<String, Value>>,
     ) -> Result<CallToolResult, ErrorData> {
         let full_page = optional_bool(arguments.as_ref(), "full_page").unwrap_or(false);
-        let page = self.shared_page().await?;
-        let png = page
-            .screenshot_png(full_page)
+        let png = self
+            .actor
+            .screenshot(full_page)
             .await
             .map_err(browser_error("browser_screenshot failed"))?;
         let metadata = json!({ "size_bytes": png.len() }).to_string();
@@ -225,8 +248,8 @@ impl BrowserUseMcpServer {
             ));
         }
 
-        let page = self.shared_page().await?;
-        page.scroll(direction)
+        self.actor
+            .scroll(direction.to_owned())
             .await
             .map_err(browser_error("browser_scroll failed"))?;
 
@@ -236,8 +259,8 @@ impl BrowserUseMcpServer {
     }
 
     async fn go_back(&self) -> Result<CallToolResult, ErrorData> {
-        let page = self.shared_page().await?;
-        page.go_back()
+        self.actor
+            .go_back()
             .await
             .map_err(browser_error("browser_go_back failed"))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(
@@ -246,7 +269,23 @@ impl BrowserUseMcpServer {
     }
 
     async fn list_tabs(&self) -> Result<CallToolResult, ErrorData> {
-        let tabs = self.tab_values().await?;
+        let tabs = self
+            .actor
+            .list_tabs()
+            .await
+            .map_err(browser_error("failed to list browser tabs"))?
+            .into_iter()
+            .map(|tab| {
+                json!({
+                    "id": tab.id,
+                    "tab_id": tab.id,
+                    "target_id": tab.target_id,
+                    "url": tab.url,
+                    "title": tab.title,
+                    "active": tab.active
+                })
+            })
+            .collect::<Vec<_>>();
         let text = serde_json::to_string_pretty(&tabs).map_err(json_error("browser_list_tabs"))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
@@ -256,18 +295,11 @@ impl BrowserUseMcpServer {
         arguments: Option<Map<String, Value>>,
     ) -> Result<CallToolResult, ErrorData> {
         let tab_id = required_str(arguments.as_ref(), "tab_id", "browser_switch_tab")?;
-        let mut browser = self.browser.lock().await;
-        let shared = browser.as_mut().ok_or_else(no_active_browser_error)?;
-        let page = shared
-            .session
-            .switch_tab(tab_id)
+        let state = self
+            .actor
+            .switch_tab(tab_id.to_owned())
             .await
             .map_err(browser_error("browser_switch_tab failed"))?;
-        let state = page
-            .state()
-            .await
-            .map_err(browser_error("browser_switch_tab failed"))?;
-        shared.page = page;
 
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Switched to tab {tab_id}: {url}",
@@ -280,46 +312,27 @@ impl BrowserUseMcpServer {
         arguments: Option<Map<String, Value>>,
     ) -> Result<CallToolResult, ErrorData> {
         let tab_id = required_str(arguments.as_ref(), "tab_id", "browser_close_tab")?;
-        let mut browser = self.browser.lock().await;
-        let shared = browser.as_mut().ok_or_else(no_active_browser_error)?;
-        let closing_active = shared.page.target_id().ends_with(tab_id);
-
-        shared
-            .session
-            .close_tab(tab_id)
+        let current_url = self
+            .actor
+            .close_tab(tab_id.to_owned())
             .await
             .map_err(browser_error("browser_close_tab failed"))?;
-
-        if closing_active {
-            if let Ok(page) = shared.session.switch_tab("0").await {
-                shared.page = page;
-            }
-        }
-
-        let current_url = shared
-            .page
-            .state()
-            .await
-            .map(|state| state.url)
-            .unwrap_or_default();
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Closed tab # {tab_id}, now on {current_url}"
         ))]))
     }
 
     async fn list_sessions(&self) -> Result<CallToolResult, ErrorData> {
-        let browser = self.browser.lock().await;
-        let Some(shared) = browser.as_ref() else {
+        let Some(url) = self
+            .actor
+            .list_sessions()
+            .await
+            .map_err(browser_error("browser_list_sessions failed"))?
+        else {
             return Ok(CallToolResult::success(vec![ContentBlock::text(
                 "No active browser sessions",
             )]));
         };
-        let url = shared
-            .page
-            .state()
-            .await
-            .map(|state| state.url)
-            .unwrap_or_default();
         let sessions = json!([
             {
                 "session_id": SESSION_ID,
@@ -343,106 +356,27 @@ impl BrowserUseMcpServer {
             ))]));
         }
 
-        self.close_active_browser().await?;
+        self.actor
+            .close_session(session_id.to_owned())
+            .await
+            .map_err(browser_error("browser_close_session failed"))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Successfully closed session {SESSION_ID}"
         ))]))
     }
 
     async fn close_all(&self) -> Result<CallToolResult, ErrorData> {
-        let had_session = self.close_active_browser().await?;
+        let had_session = self
+            .actor
+            .close_all()
+            .await
+            .map_err(browser_error("browser_close_all failed"))?;
         let message = if had_session {
             "Closed 1 sessions"
         } else {
             "No active sessions to close"
         };
         Ok(CallToolResult::success(vec![ContentBlock::text(message)]))
-    }
-
-    async fn shared_page(&self) -> Result<BrowserPage, ErrorData> {
-        let mut browser = self.browser.lock().await;
-
-        if let Some(shared) = browser.as_ref() {
-            return Ok(shared.page.clone());
-        }
-
-        let session = BrowserSession::launch_from_env()
-            .await
-            .map_err(browser_error("failed to launch browser"))?;
-        let page = session
-            .new_page()
-            .await
-            .map_err(browser_error("failed to create browser page"))?;
-
-        *browser = Some(SharedBrowser {
-            session,
-            page: page.clone(),
-        });
-
-        Ok(page)
-    }
-
-    async fn new_active_page(&self) -> Result<BrowserPage, ErrorData> {
-        let mut browser = self.browser.lock().await;
-
-        if browser.is_none() {
-            let session = BrowserSession::launch_from_env()
-                .await
-                .map_err(browser_error("failed to launch browser"))?;
-            let page = session
-                .new_page()
-                .await
-                .map_err(browser_error("failed to create browser page"))?;
-            *browser = Some(SharedBrowser { session, page });
-        }
-
-        let shared = browser.as_mut().expect("browser was initialized above");
-        let page = shared
-            .session
-            .new_page()
-            .await
-            .map_err(browser_error("failed to create browser page"))?;
-        shared.page = page.clone();
-        Ok(page)
-    }
-
-    async fn tab_values(&self) -> Result<Vec<Value>, ErrorData> {
-        let browser = self.browser.lock().await;
-        let Some(shared) = browser.as_ref() else {
-            return Ok(Vec::new());
-        };
-        let tabs = shared
-            .session
-            .tabs(Some(&shared.page))
-            .await
-            .map_err(browser_error("failed to list browser tabs"))?;
-
-        Ok(tabs
-            .into_iter()
-            .map(|tab| {
-                json!({
-                    "id": tab.id,
-                    "tab_id": tab.id,
-                    "target_id": tab.target_id,
-                    "url": tab.url,
-                    "title": tab.title,
-                    "active": tab.active
-                })
-            })
-            .collect())
-    }
-
-    async fn close_active_browser(&self) -> Result<bool, ErrorData> {
-        let shared = self.browser.lock().await.take();
-        let Some(shared) = shared else {
-            return Ok(false);
-        };
-        shared
-            .session
-            .close()
-            .await
-            .map_err(browser_error("failed to close browser"))?;
-        Ok(true)
     }
 }
 
@@ -497,14 +431,6 @@ fn json_error(message: &'static str) -> impl FnOnce(serde_json::Error) -> ErrorD
             Some(json!({ "error": error.to_string() })),
         )
     }
-}
-
-fn no_active_browser_error() -> ErrorData {
-    ErrorData::new(
-        ErrorCode::INTERNAL_ERROR,
-        "Error: No browser session active",
-        None,
-    )
 }
 
 fn optional_str<'a>(arguments: Option<&'a Map<String, Value>>, key: &str) -> Option<&'a str> {
@@ -756,6 +682,15 @@ mod tests {
     use rmcp::model::CallToolRequestParams;
     #[cfg(feature = "live-chrome")]
     use serde_json::{json, Map, Value};
+    #[cfg(feature = "live-chrome")]
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    #[cfg(feature = "live-chrome")]
+    use tokio::task::JoinSet;
+    #[cfg(feature = "live-chrome")]
+    use tokio::time::{timeout, Duration};
 
     #[test]
     fn tools_list_returns_14_low_level_tools() {
@@ -919,6 +854,115 @@ mod tests {
             .await?;
 
         Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[cfg(feature = "live-chrome")]
+    async fn concurrent_get_state_requests_share_one_browser_launch() -> anyhow::Result<()> {
+        timeout(Duration::from_secs(20), async {
+            let launch_count = Arc::new(AtomicUsize::new(0));
+            let server = Arc::new(BrowserUseMcpServer::with_browser_launch_counter(
+                launch_count.clone(),
+            ));
+
+            server
+                .call_browser_tool(call(
+                    "browser_navigate",
+                    json!({"url": "data:text/html,<title>Concurrent</title><button>ready</button>"}),
+                ))
+                .await?;
+
+            let mut tasks = JoinSet::new();
+            for _ in 0..8 {
+                let server = server.clone();
+                tasks.spawn(async move {
+                    server
+                        .call_browser_tool(call(
+                            "browser_get_state",
+                            json!({"include_screenshot": false}),
+                        ))
+                        .await
+                });
+            }
+
+            while let Some(result) = tasks.join_next().await {
+                let state = result??;
+                assert!(
+                    state.structured_content.is_some(),
+                    "get_state should return structured JSON"
+                );
+            }
+
+            assert_eq!(launch_count.load(Ordering::SeqCst), 1);
+            Ok::<(), anyhow::Error>(())
+        })
+        .await?
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[cfg(feature = "live-chrome")]
+    async fn click_uses_cached_backend_node_id_after_dom_reorder() -> anyhow::Result<()> {
+        timeout(Duration::from_secs(20), async {
+            let server = BrowserUseMcpServer::new();
+            let html = r#"
+                <title>Stable Click</title>
+                <main id="buttons">
+                  <button id="first" onclick="document.body.dataset.clicked='first'">First</button>
+                  <button id="second" onclick="document.body.dataset.clicked='second'">Second</button>
+                </main>
+                <script>
+                  window.reorderButtons = () => {
+                    const buttons = document.getElementById('buttons');
+                    buttons.insertBefore(document.getElementById('second'), document.getElementById('first'));
+                  };
+                </script>
+            "#;
+
+            server
+                .call_browser_tool(call(
+                    "browser_navigate",
+                    json!({"url": format!("data:text/html,{html}")}),
+                ))
+                .await?;
+
+            let state = server
+                .call_browser_tool(call("browser_get_state", json!({})))
+                .await?
+                .structured_content
+                .expect("browser_get_state should return structured JSON");
+            let first_index = indexed_element(
+                state["elements"].as_array().expect("elements should be an array"),
+                "button",
+                "First",
+            );
+
+            server
+                .call_browser_tool(call(
+                    "browser_get_html",
+                    json!({"selector": "body"}),
+                ))
+                .await?;
+            server
+                .actor()
+                .evaluate("window.reorderButtons()")
+                .await?;
+
+            server
+                .call_browser_tool(call("browser_click", json!({"index": first_index})))
+                .await?;
+
+            let html = text_content(
+                &server
+                    .call_browser_tool(call("browser_get_html", json!({"selector": "body"})))
+                    .await?,
+            )
+            .to_owned();
+            assert!(html.contains("data-clicked=\"first\""), "{html}");
+            assert!(!html.contains("data-clicked=\"second\""), "{html}");
+
+            Ok::<(), anyhow::Error>(())
+        })
+        .await?
     }
 
     #[cfg(feature = "live-chrome")]

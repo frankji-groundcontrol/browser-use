@@ -5,3 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+bu-cdp = { path = "../bu-cdp" }
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[features]
+live-chrome = ["bu-cdp/live-chrome"]
