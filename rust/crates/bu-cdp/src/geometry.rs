@@ -98,10 +98,9 @@ impl RectUnion {
             }
         }
 
-        if self.rects.len() + pending.len() > MAX_OCCLUSION_RECTS {
-            return false;
-        }
-
+        // The cap is enforced only at entry (matching Python's RectUnionPure);
+        // a post-subtraction guard would drop a legitimate occluder near the cap
+        // and cause over-inclusion of elements it covers.
         self.rects.extend(pending);
         true
     }

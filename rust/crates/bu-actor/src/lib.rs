@@ -9,10 +9,15 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use bu_cdp::{BrowserPage, BrowserSession, PageState, SelectorMapElement, TabInfo};
+use bu_cdp::{BrowserPage, BrowserSession, PageState, SelectorMapElement, TabInfo, UrlPolicy};
 use tokio::sync::{mpsc, oneshot};
 
+pub use bu_cdp::UrlPolicy as BrowserUrlPolicy;
+
 const SESSION_ID: &str = "default";
+/// Backstop timeout for any single browser command, so a wedged renderer
+/// (e.g. an `onclick` that spins forever) can't hang the whole actor.
+const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 type Reply<T> = oneshot::Sender<Result<T>>;
 
@@ -73,6 +78,19 @@ impl ActorHandle {
             reply,
         })
         .await
+    }
+
+    /// Replaces the URL access policy and returns the previous one, so callers
+    /// (e.g. the agent's per-run `allowed_domains`) can scope an override and
+    /// restore it afterward.
+    pub async fn set_policy(&self, policy: UrlPolicy) -> Result<UrlPolicy> {
+        self.request(|reply| Command::SetPolicy { policy, reply })
+            .await
+    }
+
+    /// Returns the current URL access policy.
+    pub async fn get_policy(&self) -> Result<UrlPolicy> {
+        self.request(|reply| Command::GetPolicy { reply }).await
     }
 
     /// Returns current page state and updates the stable selector cache.
@@ -190,6 +208,13 @@ impl ActorHandle {
 }
 
 enum Command {
+    SetPolicy {
+        policy: UrlPolicy,
+        reply: Reply<UrlPolicy>,
+    },
+    GetPolicy {
+        reply: Reply<UrlPolicy>,
+    },
     Navigate {
         url: String,
         new_tab: bool,
@@ -265,6 +290,7 @@ struct BrowserActor {
     page: Option<BrowserPage>,
     selector_cache: SelectorCache,
     launch_counter: Option<Arc<AtomicUsize>>,
+    policy: UrlPolicy,
 }
 
 impl BrowserActor {
@@ -274,96 +300,121 @@ impl BrowserActor {
             page: None,
             selector_cache: SelectorCache::default(),
             launch_counter,
+            policy: UrlPolicy::from_env(),
         }
     }
 
     async fn run(mut self, mut rx: mpsc::Receiver<Command>) {
         while let Some(command) = rx.recv().await {
-            match command {
-                Command::Navigate {
-                    url,
-                    new_tab,
-                    reply,
-                } => {
-                    let _ = reply.send(self.navigate(&url, new_tab).await);
-                }
-                Command::GetState {
-                    include_screenshot,
-                    reply,
-                } => {
-                    let _ = reply.send(self.get_state(include_screenshot).await);
-                }
-                Command::PageState { reply } => {
-                    let result = match self.active_page().await {
-                        Ok(page) => page.state().await,
-                        Err(e) => Err(e),
-                    };
-                    let _ = reply.send(result);
-                }
-                Command::Click {
-                    index,
-                    new_tab,
-                    reply,
-                } => {
-                    let _ = reply.send(self.click(index, new_tab).await);
-                }
-                Command::ClickCoordinates { x, y, reply } => {
-                    let result = match self.active_page().await {
-                        Ok(page) => page.click_coordinates(x, y).await,
-                        Err(e) => Err(e),
-                    };
-                    let _ = reply.send(result);
-                }
-                Command::Type { index, text, reply } => {
-                    let _ = reply.send(self.type_text(index, &text).await);
-                }
-                Command::Scroll { direction, reply } => {
-                    let result = match self.active_page().await {
-                        Ok(page) => page.scroll(&direction).await,
-                        Err(e) => Err(e),
-                    };
-                    let _ = reply.send(result);
-                }
-                Command::GoBack { reply } => {
-                    let result = match self.active_page().await {
-                        Ok(page) => page.go_back().await,
-                        Err(e) => Err(e),
-                    };
-                    let _ = reply.send(result);
-                }
-                Command::Screenshot { full_page, reply } => {
-                    let _ = reply.send(self.screenshot(full_page).await);
-                }
-                Command::GetHtml { selector, reply } => {
-                    let _ = reply.send(self.get_html(selector.as_deref()).await);
-                }
-                Command::ListTabs { reply } => {
-                    let _ = reply.send(self.tabs().await);
-                }
-                Command::SwitchTab { tab, reply } => {
-                    let _ = reply.send(self.switch_tab(&tab).await);
-                }
-                Command::CloseTab { tab, reply } => {
-                    let _ = reply.send(self.close_tab(&tab).await);
-                }
-                Command::ListSessions { reply } => {
-                    let _ = reply.send(self.list_sessions().await);
-                }
-                Command::CloseSession { id, reply } => {
-                    let _ = reply.send(self.close_session(&id).await);
-                }
-                Command::CloseAll { reply } => {
-                    let _ = reply.send(self.close_all().await);
-                }
-                #[cfg(feature = "live-chrome")]
-                Command::Evaluate { script, reply } => {
-                    let _ = reply.send(self.evaluate(&script).await);
-                }
+            // Cancelling the dispatch future on timeout drops its reply sender,
+            // so the caller gets an error and the actor moves to the next command.
+            if tokio::time::timeout(COMMAND_TIMEOUT, self.dispatch(command))
+                .await
+                .is_err()
+            {
+                tracing::warn!("browser command timed out; dropping it and continuing");
             }
         }
     }
 
+    async fn dispatch(&mut self, command: Command) {
+        match command {
+            Command::SetPolicy { policy, reply } => {
+                let previous = std::mem::replace(&mut self.policy, policy);
+                let _ = reply.send(Ok(previous));
+            }
+            Command::GetPolicy { reply } => {
+                let _ = reply.send(Ok(self.policy.clone()));
+            }
+            Command::Navigate {
+                url,
+                new_tab,
+                reply,
+            } => {
+                let _ = reply.send(self.navigate(&url, new_tab).await);
+            }
+            Command::GetState {
+                include_screenshot,
+                reply,
+            } => {
+                let _ = reply.send(self.get_state(include_screenshot).await);
+            }
+            Command::PageState { reply } => {
+                let result = match self.active_page().await {
+                    Ok(page) => page.state().await,
+                    Err(e) => Err(e),
+                };
+                let _ = reply.send(result);
+            }
+            Command::Click {
+                index,
+                new_tab,
+                reply,
+            } => {
+                let _ = reply.send(self.click(index, new_tab).await);
+            }
+            Command::ClickCoordinates { x, y, reply } => {
+                let result = match self.active_page().await {
+                    Ok(page) => page.click_coordinates(x, y).await,
+                    Err(e) => Err(e),
+                };
+                let _ = reply.send(result);
+            }
+            Command::Type { index, text, reply } => {
+                let _ = reply.send(self.type_text(index, &text).await);
+            }
+            Command::Scroll { direction, reply } => {
+                let result = match self.active_page().await {
+                    Ok(page) => page.scroll(&direction).await,
+                    Err(e) => Err(e),
+                };
+                let _ = reply.send(result);
+            }
+            Command::GoBack { reply } => {
+                let _ = reply.send(self.go_back().await);
+            }
+            Command::Screenshot { full_page, reply } => {
+                let _ = reply.send(self.screenshot(full_page).await);
+            }
+            Command::GetHtml { selector, reply } => {
+                let _ = reply.send(self.get_html(selector.as_deref()).await);
+            }
+            Command::ListTabs { reply } => {
+                let _ = reply.send(self.tabs().await);
+            }
+            Command::SwitchTab { tab, reply } => {
+                let _ = reply.send(self.switch_tab(&tab).await);
+            }
+            Command::CloseTab { tab, reply } => {
+                let _ = reply.send(self.close_tab(&tab).await);
+            }
+            Command::ListSessions { reply } => {
+                let _ = reply.send(self.list_sessions().await);
+            }
+            Command::CloseSession { id, reply } => {
+                let _ = reply.send(self.close_session(&id).await);
+            }
+            Command::CloseAll { reply } => {
+                let _ = reply.send(self.close_all().await);
+            }
+            #[cfg(feature = "live-chrome")]
+            Command::Evaluate { script, reply } => {
+                let _ = reply.send(self.evaluate(&script).await);
+            }
+        }
+    }
+
+    /// Navigates back and invalidates the selector cache (the document changed).
+    async fn go_back(&mut self) -> Result<()> {
+        let page = self.active_page().await?;
+        page.go_back().await?;
+        self.selector_cache.clear();
+        Ok(())
+    }
+
     async fn navigate(&mut self, url: &str, new_tab: bool) -> Result<()> {
+        // Enforcement point #1: block disallowed targets before navigating.
+        self.ensure_url_allowed(url)?;
         let page = if new_tab {
             self.new_active_page().await?
         } else {
@@ -371,6 +422,28 @@ impl BrowserActor {
         };
         page.navigate(url).await?;
         self.selector_cache.clear();
+        // Enforcement point #2: catch redirects into a disallowed domain and
+        // reset to about:blank (mirrors on_NavigationCompleteEvent).
+        if !self.policy.is_unrestricted() {
+            let landed = page.state().await?;
+            if !self.policy.is_url_allowed(&landed.url) {
+                let _ = page.navigate("about:blank").await;
+                self.selector_cache.clear();
+                return Err(anyhow!(
+                    "navigation blocked by security policy: redirected to disallowed URL {}",
+                    landed.url
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_url_allowed(&self, url: &str) -> Result<()> {
+        if !self.policy.is_url_allowed(url) {
+            return Err(anyhow!(
+                "navigation blocked by security policy: {url} is not in the allowed domains"
+            ));
+        }
         Ok(())
     }
 
@@ -402,6 +475,8 @@ impl BrowserActor {
         if new_tab {
             if let Some(href) = href {
                 let url = page.resolve_url(&href).await?;
+                // Enforcement point #3: block disallowed new-tab targets.
+                self.ensure_url_allowed(&url)?;
                 self.new_active_page().await?.navigate(&url).await?;
                 self.selector_cache.clear();
                 return Ok(ClickOutcome::OpenedNewTab(url));
@@ -459,9 +534,11 @@ impl BrowserActor {
     async fn close_tab(&mut self, tab: &str) -> Result<String> {
         let active_target = self.page.as_ref().map(BrowserPage::target_id);
         let session = self.active_session().await?;
-        session.close_tab(tab).await?;
+        let closed_target = session.close_tab(tab).await?;
 
-        if active_target.is_some_and(|target| target.ends_with(tab)) {
+        // Only re-point the active tab if the tab we closed WAS the active one
+        // (exact target-id match, not a suffix collision).
+        if active_target.as_deref() == Some(closed_target.as_str()) {
             self.page = session.switch_tab("0").await.ok();
         }
 

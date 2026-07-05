@@ -34,6 +34,13 @@ use tokio::{sync::Mutex, task::JoinHandle};
 mod discovery;
 mod dom;
 mod geometry;
+mod security;
+
+pub use security::UrlPolicy;
+
+/// Above this many visible nodes, skip the per-node JS click-listener probe in
+/// `selector_map` to keep `get_state` responsive on very large pages.
+const MAX_LISTENER_PROBE_NODES: usize = 500;
 
 use discovery::{
     chromium_path_from_env, find_playwright_chromium, headless_from_env, unique_user_data_dir,
@@ -280,13 +287,16 @@ impl BrowserSession {
     }
 
     /// Closes a page selected by short id, full target id, or index.
-    pub async fn close_tab(&self, tab_ref: &str) -> Result<()> {
+    /// Closes the tab and returns its full target id (so the caller can tell
+    /// whether the active tab was the one closed).
+    pub async fn close_tab(&self, tab_ref: &str) -> Result<String> {
         let page = self.resolve_tab(tab_ref).await?;
+        let target_id = page.target_id();
         page.page
             .close()
             .await
             .with_context(|| format!("failed to close tab {tab_ref}"))?;
-        Ok(())
+        Ok(target_id)
     }
 
     /// Closes the Chromium browser.
@@ -525,14 +535,26 @@ impl BrowserPage {
         collect_enhanced_dom_nodes(&dom_tree, &mut enhanced_nodes);
         merge_snapshot(&snapshot, scroll_x, scroll_y, &mut enhanced_nodes);
         merge_ax_tree(&ax_nodes, &mut enhanced_nodes);
+        // The JS click-listener probe does per-node CDP round-trips, so on very
+        // large pages it would stall get_state for tens of seconds. Skip it past
+        // a threshold (Python similarly bails on huge DOMs); AX roles, interactive
+        // tags, onclick, and tabindex still classify elements.
         let listener_probe_ids = visible_backend_node_ids(&enhanced_nodes);
-        let js_click_listener_backend_ids = self
-            .js_click_listener_backend_ids(&listener_probe_ids)
-            .await;
-        for backend_node_id in js_click_listener_backend_ids {
-            if let Some(node) = enhanced_nodes.get_mut(&backend_node_id) {
-                node.has_js_click_listener = true;
+        if listener_probe_ids.len() <= MAX_LISTENER_PROBE_NODES {
+            let js_click_listener_backend_ids = self
+                .js_click_listener_backend_ids(&listener_probe_ids)
+                .await;
+            for backend_node_id in js_click_listener_backend_ids {
+                if let Some(node) = enhanced_nodes.get_mut(&backend_node_id) {
+                    node.has_js_click_listener = true;
+                }
             }
+        } else {
+            tracing::warn!(
+                visible_nodes = listener_probe_ids.len(),
+                threshold = MAX_LISTENER_PROBE_NODES,
+                "skipping JS click-listener detection on a very large page; relying on AX/tag/attribute heuristics"
+            );
         }
 
         let mut candidates = Vec::new();
@@ -810,21 +832,22 @@ fn short_tab_id(target_id: &str) -> String {
 }
 
 fn page_by_ref(pages: Vec<Page>, tab_ref: &str) -> Option<Page> {
-    if let Ok(index) = tab_ref.parse::<usize>() {
-        if let Some(page) = pages.get(index).cloned() {
-            return Some(page);
-        }
-        if index > 0 {
-            if let Some(page) = pages.get(index - 1).cloned() {
-                return Some(page);
-            }
-        }
+    // Match by full target id or the documented 4-char short id first, so a tab
+    // whose short id happens to be numeric is never mistaken for a position.
+    if let Some(page) = pages.iter().find(|page| {
+        let target_id = page.target_id();
+        let target_id = target_id.as_ref();
+        target_id == tab_ref || short_tab_id(target_id) == tab_ref
+    }) {
+        return Some(page.clone());
     }
 
-    pages.into_iter().find(|page| {
-        let target_id = page.target_id().as_ref();
-        target_id == tab_ref || short_tab_id(target_id) == tab_ref
-    })
+    // Fall back to a 0-based positional index only when no id matched.
+    if let Ok(index) = tab_ref.parse::<usize>() {
+        return pages.get(index).cloned();
+    }
+
+    None
 }
 
 #[cfg(all(test, feature = "live-chrome"))]

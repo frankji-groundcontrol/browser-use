@@ -131,12 +131,13 @@ impl BrowserUseMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let include_screenshot =
             optional_bool(arguments.as_ref(), "include_screenshot").unwrap_or(false);
-        let snapshot = self
-            .actor
-            .get_state(include_screenshot)
-            .await
-            .map_err(browser_error("browser_get_state failed"))?;
-        let elements = snapshot
+        // Recoverable browser failures return a tool error (isError), not a
+        // JSON-RPC protocol error, so the model can read and react to them.
+        let snapshot = match self.actor.get_state(include_screenshot).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => return Ok(browser_tool_error("browser_get_state failed", error)),
+        };
+        let interactive_elements = snapshot
             .elements
             .into_iter()
             .map(|element| {
@@ -163,21 +164,23 @@ impl BrowserUseMcpServer {
             })
             .collect::<Vec<_>>();
 
-        let mut payload = json!({
+        let payload = json!({
             "url": snapshot.page.url,
             "title": snapshot.page.title,
-            "elements": elements,
+            "interactive_elements": interactive_elements,
             "tabs": tabs
         });
-        if let Some(screenshot) = snapshot.screenshot {
-            payload["screenshot"] = json!({
-                "mime_type": "image/png",
-                "size_bytes": screenshot.len(),
-                "data": BASE64_STANDARD.encode(screenshot)
-            });
-        }
 
-        Ok(CallToolResult::structured(payload))
+        // Return the screenshot as an image content block (like Python), not
+        // base64 nested in the JSON.
+        let mut result = CallToolResult::structured(payload);
+        if let Some(screenshot) = snapshot.screenshot {
+            result.content.push(ContentBlock::image(
+                BASE64_STANDARD.encode(screenshot),
+                "image/png",
+            ));
+        }
+        Ok(result)
     }
 
     async fn click(
@@ -195,7 +198,13 @@ impl BrowserUseMcpServer {
                 "Clicked at coordinates ({x}, {y})"
             ))]));
         }
-        if coordinate_x.is_some() || coordinate_y.is_some() {
+        let has_index = arguments
+            .as_ref()
+            .and_then(|args| args.get("index"))
+            .is_some();
+        // A single stray coordinate is an error only when no index is given;
+        // otherwise fall through to index-based click (matching Python).
+        if (coordinate_x.is_some() || coordinate_y.is_some()) && !has_index {
             return Err(ErrorData::new(
                 ErrorCode::INVALID_PARAMS,
                 "browser_click requires both coordinate_x and coordinate_y when using coordinate mode",
@@ -246,11 +255,10 @@ impl BrowserUseMcpServer {
         arguments: Option<Map<String, Value>>,
     ) -> Result<CallToolResult, ErrorData> {
         let selector = optional_str(arguments.as_ref(), "selector");
-        let html = self
-            .actor
-            .get_html(selector.map(str::to_owned))
-            .await
-            .map_err(browser_error("browser_get_html failed"))?;
+        let html = match self.actor.get_html(selector.map(str::to_owned)).await {
+            Ok(html) => html,
+            Err(error) => return Ok(browser_tool_error("browser_get_html failed", error)),
+        };
         Ok(CallToolResult::success(vec![ContentBlock::text(html)]))
     }
 
@@ -266,9 +274,37 @@ impl BrowserUseMcpServer {
         let model = optional_str(arguments.as_ref(), "model").map(str::to_owned);
         // Python's retry tool defaults use_vision to true.
         let use_vision = optional_bool(arguments.as_ref(), "use_vision").unwrap_or(true);
+        // A non-empty allowed_domains confines the agent to those domains for this
+        // run (matching Python's `if allowed_domains:` override); empty/absent = no
+        // override. Restore the base policy afterward.
+        let allowed_domains =
+            optional_string_list(arguments.as_ref(), "allowed_domains").filter(|d| !d.is_empty());
+        let restore = match allowed_domains {
+            Some(domains) => match self.actor.get_policy().await {
+                Ok(base) => {
+                    let scoped = bu_actor::BrowserUrlPolicy {
+                        allowed_domains: domains,
+                        ..base.clone()
+                    };
+                    match self.actor.set_policy(scoped).await {
+                        Ok(_) => Some(base),
+                        Err(error) => {
+                            return Ok(browser_tool_error("browser policy update failed", error))
+                        }
+                    }
+                }
+                Err(error) => return Ok(browser_tool_error("browser policy read failed", error)),
+            },
+            None => None,
+        };
+
         let provider = build_agent_llm(model).await?;
         let report =
             bu_agent::run_task(task, max_steps, self.actor.clone(), &provider, use_vision).await;
+
+        if let Some(base) = restore {
+            let _ = self.actor.set_policy(base).await;
+        }
         Ok(CallToolResult::success(vec![ContentBlock::text(
             report.to_python_report(),
         )]))
@@ -281,17 +317,17 @@ impl BrowserUseMcpServer {
         let query = required_str(arguments.as_ref(), "query", "browser_extract_content")?;
         let extract_links = optional_bool(arguments.as_ref(), "extract_links").unwrap_or(false);
 
-        let html = self
-            .actor
-            .get_html(None)
-            .await
-            .map_err(browser_error("browser_extract_content failed"))?;
-        let page = self
-            .actor
-            .page_state()
-            .await
-            .map_err(browser_error("browser_extract_content failed"))?;
+        let html = match self.actor.get_html(None).await {
+            Ok(html) => html,
+            Err(error) => return Ok(browser_tool_error("browser_extract_content failed", error)),
+        };
+        let page = match self.actor.page_state().await {
+            Ok(page) => page,
+            Err(error) => return Ok(browser_tool_error("browser_extract_content failed", error)),
+        };
         let (markdown, _) = extract_clean_markdown(&html, extract_links);
+        // Cap very large pages so a single extraction request stays bounded.
+        let markdown = cap_markdown(&markdown, EXTRACT_MARKDOWN_CHAR_LIMIT);
 
         let system_prompt = "You extract information from clean webpage markdown. Answer the query directly and concisely using only the webpage content.";
         let user_prompt = format!(
@@ -500,16 +536,6 @@ impl ServerHandler for BrowserUseMcpServer {
     }
 }
 
-fn browser_error(message: &'static str) -> impl FnOnce(anyhow::Error) -> ErrorData {
-    move |error| {
-        ErrorData::new(
-            ErrorCode::INTERNAL_ERROR,
-            message,
-            Some(json!({ "error": error.to_string() })),
-        )
-    }
-}
-
 fn browser_tool_error(message: &'static str, error: anyhow::Error) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(format!("{message}: {error}"))])
 }
@@ -542,7 +568,9 @@ async fn build_agent_llm(model: Option<String>) -> Result<bu_llm::LlmProvider, E
             .map(|value| value.eq_ignore_ascii_case("bedrock"))
             .unwrap_or(false);
         if is_bedrock {
-            let client = bu_llm::BedrockChatClient::from_env_with_model_override(model)
+            // Python ignores the tool `model` arg for MODEL_PROVIDER=bedrock
+            // (clients often pass an OpenAI model name); use MODEL/env only.
+            let client = bu_llm::BedrockChatClient::from_env_with_model_override(None)
                 .await
                 .map_err(llm_error)?;
             return Ok(bu_llm::LlmProvider::Bedrock(client));
@@ -559,6 +587,31 @@ fn optional_str<'a>(arguments: Option<&'a Map<String, Value>>, key: &str) -> Opt
     arguments
         .and_then(|args| args.get(key))
         .and_then(Value::as_str)
+}
+
+/// Character budget for the markdown fed to a single extraction request.
+const EXTRACT_MARKDOWN_CHAR_LIMIT: usize = 30_000;
+
+/// Truncates markdown to `limit` characters on a char boundary, noting the cut.
+fn cap_markdown(markdown: &str, limit: usize) -> String {
+    if markdown.chars().count() <= limit {
+        return markdown.to_owned();
+    }
+    let truncated: String = markdown.chars().take(limit).collect();
+    format!("{truncated}\n\n[content truncated at {limit} characters]")
+}
+
+fn optional_string_list(arguments: Option<&Map<String, Value>>, key: &str) -> Option<Vec<String>> {
+    arguments
+        .and_then(|args| args.get(key))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
 }
 
 fn optional_bool(arguments: Option<&Map<String, Value>>, key: &str) -> Option<bool> {
@@ -722,7 +775,7 @@ pub fn low_level_tools() -> Vec<Tool> {
         ),
         tool(
             "browser_extract_content",
-            "Extract information from the current page using an LLM",
+            "Extract structured content from the current page based on a query",
             json!({
                 "type": "object",
                 "properties": {
@@ -1111,7 +1164,7 @@ mod tests {
             .await?
             .structured_content
             .expect("browser_get_state should return structured JSON");
-        let elements = state["elements"]
+        let elements = state["interactive_elements"]
             .as_array()
             .expect("state should include interactive elements");
         let button_index = indexed_element(elements, "button", "Go");
@@ -1161,7 +1214,7 @@ mod tests {
             .await?
             .structured_content
             .expect("browser_get_state should return structured JSON");
-        let elements = state["elements"]
+        let elements = state["interactive_elements"]
             .as_array()
             .expect("elements should be an array");
 
@@ -1210,7 +1263,7 @@ mod tests {
             .await?
             .structured_content
             .expect("browser_get_state should return structured JSON");
-        let covered_elements = covered_state["elements"]
+        let covered_elements = covered_state["interactive_elements"]
             .as_array()
             .expect("elements should be an array");
         assert!(
@@ -1228,7 +1281,7 @@ mod tests {
             .await?
             .structured_content
             .expect("browser_get_state should return structured JSON");
-        let uncovered_elements = uncovered_state["elements"]
+        let uncovered_elements = uncovered_state["interactive_elements"]
             .as_array()
             .expect("elements should be an array");
         assert!(
@@ -1261,7 +1314,7 @@ mod tests {
             .await?
             .structured_content
             .expect("browser_get_state should return structured JSON");
-        let elements = state["elements"]
+        let elements = state["interactive_elements"]
             .as_array()
             .expect("elements should be an array");
         let buy_elements = elements
@@ -1299,7 +1352,7 @@ mod tests {
             .await?
             .structured_content
             .expect("browser_get_state should return structured JSON");
-        let elements = state["elements"]
+        let elements = state["interactive_elements"]
             .as_array()
             .expect("elements should be an array");
         let nested_elements = elements
@@ -1338,7 +1391,7 @@ mod tests {
             .await?
             .structured_content
             .expect("browser_get_state should return structured JSON");
-        let elements = state["elements"]
+        let elements = state["interactive_elements"]
             .as_array()
             .expect("elements should be an array");
 
@@ -1375,7 +1428,7 @@ mod tests {
             .structured_content
             .expect("browser_get_state should return structured JSON");
         let target_index = indexed_element(
-            state["elements"]
+            state["interactive_elements"]
                 .as_array()
                 .expect("elements should be an array"),
             "button",
@@ -1470,7 +1523,7 @@ mod tests {
                 .structured_content
                 .expect("browser_get_state should return structured JSON");
             let first_index = indexed_element(
-                state["elements"].as_array().expect("elements should be an array"),
+                state["interactive_elements"].as_array().expect("elements should be an array"),
                 "button",
                 "First",
             );
@@ -1552,7 +1605,7 @@ mod tests {
             .structured_content
             .expect("browser_get_state should return structured JSON");
         let link_index = indexed_element(
-            state["elements"]
+            state["interactive_elements"]
                 .as_array()
                 .expect("elements should be an array"),
             "a",
@@ -1750,7 +1803,14 @@ mod tests {
         assert_eq!(body["model"], "test-model");
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][1]["role"], "user");
-        assert_eq!(body["temperature"], Value::Null);
+        // Defaults to Python's 0.7 (stored as f32, so compare with tolerance).
+        let temperature = body["temperature"]
+            .as_f64()
+            .expect("temperature should default to a number");
+        assert!(
+            (temperature - 0.7).abs() < 1e-6,
+            "temperature should default to 0.7, got {temperature}"
+        );
         let user_prompt = body["messages"][1]["content"]
             .as_str()
             .expect("user message content should be a string");
@@ -1760,6 +1820,50 @@ mod tests {
         assert!(user_prompt.contains("[Details]("));
         assert!(!user_prompt.contains("Navigation noise"));
         assert!(!user_prompt.contains("window.noise"));
+
+        Ok(())
+    }
+
+    #[cfg(feature = "live-chrome")]
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn navigate_enforces_allowed_domains_policy() -> anyhow::Result<()> {
+        let server = BrowserUseMcpServer::new();
+        server
+            .actor()
+            .set_policy(bu_actor::BrowserUrlPolicy {
+                allowed_domains: vec!["example.com".to_owned()],
+                ..Default::default()
+            })
+            .await?;
+
+        // data: URLs are always allowed.
+        let allowed = server
+            .call_browser_tool(call(
+                "browser_navigate",
+                json!({"url": data_url("<title>ok</title>")}),
+            ))
+            .await?;
+        assert!(
+            !allowed.is_error.unwrap_or(false),
+            "data URL must be allowed under the policy: {allowed:?}"
+        );
+
+        // An off-allowlist URL is blocked before any navigation happens.
+        let blocked = server
+            .call_browser_tool(call(
+                "browser_navigate",
+                json!({"url": "https://evil.example.org/"}),
+            ))
+            .await?;
+        assert!(
+            blocked.is_error.unwrap_or(false),
+            "off-domain navigation must be blocked: {blocked:?}"
+        );
+        assert!(
+            text_content(&blocked).contains("security policy"),
+            "block message should mention the policy: {blocked:?}"
+        );
 
         Ok(())
     }
@@ -1810,7 +1914,7 @@ mod tests {
             .structured_content
             .expect("browser_get_state should return structured JSON");
         Ok(indexed_element(
-            state["elements"]
+            state["interactive_elements"]
                 .as_array()
                 .expect("elements should be an array"),
             "input",

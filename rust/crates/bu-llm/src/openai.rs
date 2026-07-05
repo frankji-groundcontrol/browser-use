@@ -8,8 +8,14 @@ use serde::{Deserialize, Serialize};
 use crate::message::ChatMessage;
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
-const DEFAULT_MODEL: &str = "gpt-5.4-mini";
+// Matches Python's retry-path default (`llm_config.get('model', 'gpt-4o')`); a
+// deployment against a gateway sets BROWSER_USE_LLM_MODEL to override this.
+const DEFAULT_MODEL: &str = "gpt-4o";
+// Python's ChatOpenAI default sampling temperature for the agent.
+const DEFAULT_TEMPERATURE: f32 = 0.7;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+// Transient-failure retries, mirroring the OpenAI SDK's max_retries=5.
+const MAX_RETRIES: usize = 5;
 
 /// Minimal asynchronous OpenAI-compatible chat client.
 #[derive(Debug, Clone)]
@@ -51,7 +57,11 @@ struct ChatChoice {
 
 #[derive(Debug, Deserialize)]
 struct ChatChoiceMessage {
-    content: String,
+    // Spec-valid responses (reasoning models, refusals, content filters, tool
+    // calls) can send `content: null` or omit it; coerce to empty like Python's
+    // `choice.message.content or ''` instead of failing to parse.
+    #[serde(default)]
+    content: Option<String>,
 }
 
 impl OpenAiChatConfig {
@@ -86,7 +96,9 @@ impl OpenAiChatConfig {
                     .parse::<f32>()
                     .with_context(|| format!("invalid BROWSER_USE_LLM_TEMPERATURE={value:?}"))?,
             ),
-            _ => None,
+            // Default to Python's 0.7 rather than omitting it (which lets the
+            // server apply its own, usually 1.0).
+            _ => Some(DEFAULT_TEMPERATURE),
         };
 
         Ok(Self {
@@ -125,6 +137,11 @@ impl OpenAiChatClient {
     }
 
     /// Sends chat messages and returns the assistant message text.
+    ///
+    /// Retries transient failures (HTTP 429/5xx, connect/timeout) with
+    /// exponential backoff, honoring `Retry-After`, mirroring the OpenAI SDK's
+    /// `max_retries=5`. A `null`/empty assistant `content` returns an empty
+    /// string rather than erroring (matching Python's `content or ''`).
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String> {
         let request = ChatCompletionRequest {
             model: self.config.model.clone(),
@@ -132,34 +149,116 @@ impl OpenAiChatClient {
             temperature: self.config.temperature,
         };
 
-        let response = self
-            .http
-            .post(self.config.chat_completions_url())
-            .bearer_auth(&self.config.api_key)
-            .json(&request)
-            .send()
-            .await
-            .context("LLM chat request failed")?;
+        let mut attempt = 0;
+        loop {
+            let send_result = self
+                .http
+                .post(self.config.chat_completions_url())
+                .bearer_auth(&self.config.api_key)
+                .json(&request)
+                .send()
+                .await;
 
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .context("failed to read LLM response body")?;
-        if !status.is_success() {
+            let response = match send_result {
+                Ok(response) => response,
+                Err(error) => {
+                    // Connect/timeout/transport errors are transient.
+                    if attempt < MAX_RETRIES && (error.is_timeout() || error.is_connect()) {
+                        Self::backoff_sleep(attempt, None).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(anyhow::Error::new(error).context("LLM chat request failed"));
+                }
+            };
+
+            let status = response.status();
+            if status.is_success() {
+                let body = response
+                    .text()
+                    .await
+                    .context("failed to read LLM response body")?;
+                return parse_chat_body(&body);
+            }
+
+            // 429 (rate limit) and 5xx are transient; retry with backoff.
+            let retryable = status.as_u16() == 429 || status.is_server_error();
+            if retryable && attempt < MAX_RETRIES {
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.trim().parse::<u64>().ok());
+                Self::backoff_sleep(attempt, retry_after).await;
+                attempt += 1;
+                continue;
+            }
+
+            let body = response.text().await.unwrap_or_default();
             return Err(anyhow!(
                 "LLM chat request failed with HTTP {status}: {body}"
             ));
         }
+    }
 
-        let parsed: ChatCompletionResponse =
-            serde_json::from_str(&body).context("failed to parse LLM chat response")?;
-        parsed
-            .choices
-            .into_iter()
-            .next()
-            .map(|choice| choice.message.content)
-            .filter(|content| !content.trim().is_empty())
-            .ok_or_else(|| anyhow!("LLM chat response did not include assistant content"))
+    async fn backoff_sleep(attempt: usize, retry_after_secs: Option<u64>) {
+        let delay = match retry_after_secs {
+            Some(secs) => Duration::from_secs(secs.min(60)),
+            None => {
+                // 0.5s, 1s, 2s, 4s, 8s (capped) + small deterministic jitter.
+                let base = 500u64.saturating_mul(1u64 << (attempt.min(4) as u32));
+                let jitter = (attempt as u64 * 137) % 250;
+                Duration::from_millis((base + jitter).min(15_000))
+            }
+        };
+        tracing::debug!(
+            attempt,
+            ?delay,
+            "retrying LLM request after transient failure"
+        );
+        tokio::time::sleep(delay).await;
+    }
+}
+
+/// Extracts the assistant text from a successful chat-completions body. A
+/// `null`, missing, or empty `content` yields an empty string (matching Python's
+/// `content or ''`); only a genuinely empty `choices` array is an error.
+fn parse_chat_body(body: &str) -> Result<String> {
+    let parsed: ChatCompletionResponse =
+        serde_json::from_str(body).context("failed to parse LLM chat response")?;
+    let choice = parsed
+        .choices
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("LLM chat response had no choices"))?;
+    Ok(choice.message.content.unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_chat_body;
+
+    #[test]
+    fn null_content_yields_empty_string() {
+        // Reasoning models / refusals / tool-call turns send content: null.
+        let body = r#"{"choices":[{"message":{"role":"assistant","content":null}}]}"#;
+        assert_eq!(parse_chat_body(body).unwrap(), "");
+    }
+
+    #[test]
+    fn missing_content_yields_empty_string() {
+        let body = r#"{"choices":[{"message":{"role":"assistant","tool_calls":[]}}]}"#;
+        assert_eq!(parse_chat_body(body).unwrap(), "");
+    }
+
+    #[test]
+    fn normal_content_is_returned() {
+        let body = r#"{"choices":[{"message":{"content":"hello"}}]}"#;
+        assert_eq!(parse_chat_body(body).unwrap(), "hello");
+    }
+
+    #[test]
+    fn no_choices_is_an_error() {
+        assert!(parse_chat_body(r#"{"choices":[]}"#).is_err());
     }
 }

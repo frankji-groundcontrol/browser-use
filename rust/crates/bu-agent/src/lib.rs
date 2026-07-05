@@ -7,7 +7,7 @@
 mod action;
 mod report;
 
-use action::{parse_output, AgentAction};
+use action::{parse_output, AgentAction, AgentOutput};
 use bu_actor::ActorHandle;
 use bu_dom::extract_clean_markdown;
 use bu_llm::{message, message_with_image, LlmProvider};
@@ -50,10 +50,17 @@ pub async fn run_task(
 ) -> AgentRunReport {
     let task = task.into();
     let mut report = AgentRunReport::default();
+    // `agent_memory` is the model's own running memory (replaced each step).
+    // `read_state` persists extraction results + recent action errors across
+    // steps so a datum found on step 3 is still visible on step 7.
     let mut agent_memory = String::new();
+    let mut read_state: Vec<String> = Vec::new();
+    let mut consecutive_failures = 0usize;
+    let mut done = false;
 
-    for _ in 0..max_steps {
+    for step in 0..max_steps {
         report.steps += 1;
+        let is_last_step = step + 1 == max_steps;
 
         let snapshot = match actor.get_state(use_vision).await {
             Ok(snapshot) => snapshot,
@@ -63,6 +70,7 @@ pub async fn run_task(
             }
         };
         push_unique_url(&mut report.urls_visited, snapshot.page.url.clone());
+        let pre_url = snapshot.page.url.clone();
 
         let screenshot = snapshot.screenshot.clone();
         let state = json!({
@@ -76,9 +84,15 @@ pub async fn run_task(
                 })
             }).collect::<Vec<_>>()
         });
+        let final_hint = if is_last_step {
+            "\n\nThis is the FINAL step: return a single \"done\" action with your best answer."
+        } else {
+            ""
+        };
         let user_text = format!(
-            "<task>\n{task}\n</task>\n\n<memory>\n{memory}\n</memory>\n\n<current_state>\n{state}\n</current_state>",
+            "<task>\n{task}\n</task>\n\n<memory>\n{memory}\n</memory>\n\n<read_state>\n{read_state}\n</read_state>\n\n<current_state>\n{state}\n</current_state>{final_hint}",
             memory = agent_memory,
+            read_state = read_state.join("\n"),
             state = serde_json::to_string_pretty(&state).unwrap_or_else(|_| state.to_string()),
         );
         let user_message = match (use_vision, screenshot.as_deref()) {
@@ -101,7 +115,18 @@ pub async fn run_task(
             Ok(output) => output,
             Err(error) => {
                 report.errors.push(format!("invalid agent action: {error}"));
-                break;
+                push_read_state(
+                    &mut read_state,
+                    format!("could not parse your last reply: {error}"),
+                );
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    report.errors.push(format!(
+                        "aborting after {consecutive_failures} consecutive failed steps"
+                    ));
+                    break;
+                }
+                continue;
             }
         };
 
@@ -112,48 +137,127 @@ pub async fn run_task(
             "agent step"
         );
 
-        let mut observations = Vec::new();
+        let AgentOutput {
+            memory, actions, ..
+        } = output;
+        if !memory.trim().is_empty() {
+            agent_memory = memory;
+        }
+
+        // A reasoning-only turn (no actions) is a valid no-op step.
+        if actions.is_empty() {
+            consecutive_failures = 0;
+            continue;
+        }
+
+        let action_count = actions.len();
+        let mut step_error = false;
         let mut batch_done = false;
-        for action in output.actions {
+        for (index, action) in actions.into_iter().enumerate() {
             match execute_action(action, &actor, llm).await {
                 Step::Continue {
                     rerender,
                     observation,
                 } => {
                     if let Some(observation) = observation {
-                        observations.push(observation);
+                        push_read_state(&mut read_state, observation);
                     }
                     if rerender {
                         break;
+                    }
+                    // Guard remaining batched actions against a page change a
+                    // type/scroll may have triggered (stale indices otherwise).
+                    if index + 1 < action_count {
+                        if let Ok(state) = actor.page_state().await {
+                            if state.url != pre_url {
+                                break;
+                            }
+                        }
                     }
                 }
                 Step::Done { success, result } => {
                     report.success = success;
                     report.final_result = result;
                     batch_done = true;
+                    done = true;
                     break;
                 }
                 Step::Error(error) => {
+                    push_read_state(&mut read_state, format!("action failed: {error}"));
                     report.errors.push(error);
+                    step_error = true;
                     break;
                 }
             }
         }
 
-        // Carry the model's memory + any extraction results into the next prompt.
-        agent_memory = [output.memory]
-            .into_iter()
-            .chain(observations)
-            .filter(|line| !line.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-
         if batch_done {
             break;
+        }
+        if step_error {
+            consecutive_failures += 1;
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                report.errors.push(format!(
+                    "aborting after {consecutive_failures} consecutive failed steps"
+                ));
+                break;
+            }
+        } else {
+            consecutive_failures = 0;
+        }
+    }
+
+    // If the agent never emitted a `done`, synthesize a best-effort final answer
+    // from what it gathered instead of returning an empty result.
+    if !done {
+        if let Ok(answer) = best_effort_final(&task, &agent_memory, &read_state, llm).await {
+            if !answer.trim().is_empty() {
+                report.final_result = answer;
+            }
         }
     }
 
     report
+}
+
+/// Max consecutive failed steps before the run aborts (prevents burning the whole
+/// step budget re-issuing the same failing action).
+const MAX_CONSECUTIVE_FAILURES: usize = 3;
+/// Cap on the persistent extraction/error buffer.
+const READ_STATE_CAP: usize = 12;
+
+fn push_read_state(buffer: &mut Vec<String>, item: String) {
+    if item.trim().is_empty() {
+        return;
+    }
+    buffer.push(item);
+    let overflow = buffer.len().saturating_sub(READ_STATE_CAP);
+    if overflow > 0 {
+        buffer.drain(0..overflow);
+    }
+}
+
+/// Asks the model for its best final answer when the run ended without a `done`.
+async fn best_effort_final(
+    task: &str,
+    memory: &str,
+    read_state: &[String],
+    llm: &LlmProvider,
+) -> anyhow::Result<String> {
+    llm.chat(vec![
+        message(
+            "system",
+            "You are finishing a browser task that ran out of steps. Give the best final answer you can from what was gathered. Reply with plain text, no JSON.",
+        ),
+        message(
+            "user",
+            format!(
+                "<task>\n{task}\n</task>\n\n<memory>\n{memory}\n</memory>\n\n<gathered>\n{gathered}\n</gathered>\n\nProvide the best final answer you can.",
+                gathered = read_state.join("\n"),
+            ),
+        ),
+    ])
+    .await
 }
 
 enum Step {
@@ -274,7 +378,7 @@ mod tests {
         assert_eq!(
             report.to_python_report(),
             format!(
-                "Task completed in 2 steps\nSuccess: true\nFinal result: clicked\nErrors encountered: []\nURLs visited: {page}"
+                "Task completed in 2 steps\nSuccess: True\n\nFinal result:\nclicked\n\nURLs visited: {page}"
             )
         );
         assert_eq!(
