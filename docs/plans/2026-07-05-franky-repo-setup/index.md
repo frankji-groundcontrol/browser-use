@@ -20,10 +20,13 @@ generically with placeholders.
 - [x] Write the MCP multi-agent setup guide (`docs/usage/tools/`).
 - [x] Write the gateway-block learning record (`docs/learning/`).
 - [x] Bootstrap the `docs/` skeleton + indexes (usage/issues/learning/plans/practices).
-- [ ] Write real architecture docs from the codebase deep-read
-      (`docs/architecture/*`).
-- [ ] Add thin documentation-pointer sections to `CLAUDE.md` / `AGENTS.md`.
-- [ ] Verify all internal links resolve; commit + push to `franky`.
+- [x] Write real architecture docs from the codebase deep-read
+      (`docs/architecture/00–11`, 12 source-grounded files).
+- [x] Add thin documentation-pointer sections to `CLAUDE.md` / `AGENTS.md`.
+- [x] Verify all internal links resolve (0 broken across 33 docs); commit + push.
+
+Status: **docs complete.** The Rust rewrite proceeds under its own plan
+([2026-07-05-rust-rewrite](../2026-07-05-rust-rewrite/index.md)).
 
 ## Log
 
