@@ -35,6 +35,17 @@ pub struct ActorHandle {
     tx: mpsc::Sender<Command>,
 }
 
+/// Result of an index-based click.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClickOutcome {
+    /// A normal element click was dispatched.
+    Clicked,
+    /// A link href was opened in a new tab.
+    OpenedNewTab(String),
+    /// `new_tab` was requested, but the element had no href.
+    NewTabUnsupported,
+}
+
 impl ActorHandle {
     /// Spawns a browser actor that lazily launches Chromium on first browser command.
     pub fn spawn() -> Self {
@@ -74,8 +85,19 @@ impl ActorHandle {
     }
 
     /// Clicks an element by the index from the last selector snapshot.
-    pub async fn click(&self, index: usize) -> Result<()> {
-        self.request(|reply| Command::Click { index, reply }).await
+    pub async fn click(&self, index: usize, new_tab: bool) -> Result<ClickOutcome> {
+        self.request(|reply| Command::Click {
+            index,
+            new_tab,
+            reply,
+        })
+        .await
+    }
+
+    /// Clicks at viewport coordinates without resolving an element.
+    pub async fn click_coordinates(&self, x: f64, y: f64) -> Result<()> {
+        self.request(|reply| Command::ClickCoordinates { x, y, reply })
+            .await
     }
 
     /// Types into an element by the index from the last selector snapshot.
@@ -174,6 +196,12 @@ enum Command {
     },
     Click {
         index: usize,
+        new_tab: bool,
+        reply: Reply<ClickOutcome>,
+    },
+    ClickCoordinates {
+        x: f64,
+        y: f64,
         reply: Reply<()>,
     },
     Type {
@@ -257,8 +285,19 @@ impl BrowserActor {
                 } => {
                     let _ = reply.send(self.get_state(include_screenshot).await);
                 }
-                Command::Click { index, reply } => {
-                    let _ = reply.send(self.click(index).await);
+                Command::Click {
+                    index,
+                    new_tab,
+                    reply,
+                } => {
+                    let _ = reply.send(self.click(index, new_tab).await);
+                }
+                Command::ClickCoordinates { x, y, reply } => {
+                    let result = match self.active_page().await {
+                        Ok(page) => page.click_coordinates(x, y).await,
+                        Err(e) => Err(e),
+                    };
+                    let _ = reply.send(result);
                 }
                 Command::Type { index, text, reply } => {
                     let _ = reply.send(self.type_text(index, &text).await);
@@ -340,20 +379,35 @@ impl BrowserActor {
         })
     }
 
-    async fn click(&mut self, index: usize) -> Result<()> {
+    async fn click(&mut self, index: usize, new_tab: bool) -> Result<ClickOutcome> {
         let backend_node_id = self.backend_node_id_for_index(index).await?;
-        self.active_page()
-            .await?
-            .click_backend_node_id(backend_node_id)
-            .await
+        let href = self.selector_cache.href_for_index(index);
+        let page = self.active_page().await?;
+
+        if new_tab {
+            if let Some(href) = href {
+                let url = page.resolve_url(&href).await?;
+                self.new_active_page().await?.navigate(&url).await?;
+                self.selector_cache.clear();
+                return Ok(ClickOutcome::OpenedNewTab(url));
+            }
+
+            page.click_backend_node_id(backend_node_id).await?;
+            return Ok(ClickOutcome::NewTabUnsupported);
+        }
+
+        page.click_backend_node_id(backend_node_id).await?;
+        Ok(ClickOutcome::Clicked)
     }
 
     async fn type_text(&mut self, index: usize, text: &str) -> Result<()> {
         let backend_node_id = self.backend_node_id_for_index(index).await?;
-        self.active_page()
-            .await?
-            .type_into_backend_node_id(backend_node_id, text)
-            .await
+        let page = self.active_page().await?;
+        page.clear_backend_node_id(backend_node_id).await?;
+        if text.is_empty() {
+            return Ok(());
+        }
+        page.type_into_backend_node_id(backend_node_id, text).await
     }
 
     async fn screenshot(&mut self, full_page: bool) -> Result<Vec<u8>> {
@@ -525,6 +579,13 @@ impl SelectorCache {
             .get(&index)
             .copied()
             .filter(|backend_node_id| self.by_backend_node_id.contains_key(backend_node_id))
+    }
+
+    fn href_for_index(&self, index: usize) -> Option<String> {
+        let backend_node_id = self.backend_node_id_for_index(index)?;
+        self.by_backend_node_id
+            .get(&backend_node_id)
+            .and_then(|element| element.href.clone())
     }
 
     fn clear(&mut self) {

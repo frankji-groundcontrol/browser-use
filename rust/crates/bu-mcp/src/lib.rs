@@ -6,7 +6,7 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use bu_actor::ActorHandle;
+use bu_actor::{ActorHandle, ClickOutcome};
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResult, ContentBlock, ErrorCode, Implementation,
@@ -109,14 +109,16 @@ impl BrowserUseMcpServer {
             })?;
         let new_tab = optional_bool(arguments.as_ref(), "new_tab").unwrap_or(false);
 
-        self.actor
-            .navigate(url.to_owned(), new_tab)
-            .await
-            .map_err(browser_error("browser_navigate failed"))?;
+        if let Err(error) = self.actor.navigate(url.to_owned(), new_tab).await {
+            return Ok(browser_tool_error("browser_navigate failed", error));
+        }
 
-        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-            "Navigated to {url}"
-        ))]))
+        let message = if new_tab {
+            format!("Opened new tab with URL: {url}")
+        } else {
+            format!("Navigated to: {url}")
+        };
+        Ok(CallToolResult::success(vec![ContentBlock::text(message)]))
     }
 
     async fn get_state(
@@ -137,7 +139,8 @@ impl BrowserUseMcpServer {
                 json!({
                     "index": element.index,
                     "tag": element.tag,
-                    "text": element.text
+                    "text": element.text,
+                    "href": element.href
                 })
             })
             .collect::<Vec<_>>();
@@ -177,15 +180,45 @@ impl BrowserUseMcpServer {
         &self,
         arguments: Option<Map<String, Value>>,
     ) -> Result<CallToolResult, ErrorData> {
-        let index = required_usize(arguments.as_ref(), "index", "browser_click")?;
-        self.actor
-            .click(index)
-            .await
-            .map_err(browser_error("browser_click failed"))?;
+        let coordinate_x = optional_i64(arguments.as_ref(), "coordinate_x");
+        let coordinate_y = optional_i64(arguments.as_ref(), "coordinate_y");
+        if let (Some(x), Some(y)) = (coordinate_x, coordinate_y) {
+            if let Err(error) = self.actor.click_coordinates(x as f64, y as f64).await {
+                return Ok(browser_tool_error("browser_click failed", error));
+            }
 
-        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-            "Clicked element {index}"
-        ))]))
+            return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                "Clicked at coordinates ({x}, {y})"
+            ))]));
+        }
+        if coordinate_x.is_some() || coordinate_y.is_some() {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "browser_click requires both coordinate_x and coordinate_y when using coordinate mode",
+                None,
+            ));
+        }
+
+        let index = required_usize(arguments.as_ref(), "index", "browser_click")?;
+        let new_tab = optional_bool(arguments.as_ref(), "new_tab").unwrap_or(false);
+        let outcome = match self.actor.click(index, new_tab).await {
+            Ok(outcome) => outcome,
+            Err(error) => return Ok(browser_tool_error("browser_click failed", error)),
+        };
+
+        let message = match outcome {
+            ClickOutcome::Clicked => format!("Clicked element {index}"),
+            ClickOutcome::OpenedNewTab(url) => {
+                format!(
+                    "Clicked element {index} and opened in new tab {}...",
+                    prefix_chars(&url, 20)
+                )
+            }
+            ClickOutcome::NewTabUnsupported => {
+                format!("Clicked element {index} (new tab not supported for non-link elements)")
+            }
+        };
+        Ok(CallToolResult::success(vec![ContentBlock::text(message)]))
     }
 
     async fn type_text(
@@ -194,13 +227,13 @@ impl BrowserUseMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let index = required_usize(arguments.as_ref(), "index", "browser_type")?;
         let text = required_str(arguments.as_ref(), "text", "browser_type")?.to_owned();
-        self.actor
-            .type_text(index, text)
-            .await
-            .map_err(browser_error("browser_type failed"))?;
+        if let Err(error) = self.actor.type_text(index, text.clone()).await {
+            return Ok(browser_tool_error("browser_type failed", error));
+        }
 
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-            "Typed text into element {index}"
+            "Typed {} into element {index}",
+            masked_typed_text(&text)
         ))]))
     }
 
@@ -222,11 +255,10 @@ impl BrowserUseMcpServer {
         arguments: Option<Map<String, Value>>,
     ) -> Result<CallToolResult, ErrorData> {
         let full_page = optional_bool(arguments.as_ref(), "full_page").unwrap_or(false);
-        let png = self
-            .actor
-            .screenshot(full_page)
-            .await
-            .map_err(browser_error("browser_screenshot failed"))?;
+        let png = match self.actor.screenshot(full_page).await {
+            Ok(png) => png,
+            Err(error) => return Ok(browser_tool_error("browser_screenshot failed", error)),
+        };
         let metadata = json!({ "size_bytes": png.len() }).to_string();
 
         Ok(CallToolResult::success(vec![
@@ -248,10 +280,9 @@ impl BrowserUseMcpServer {
             ));
         }
 
-        self.actor
-            .scroll(direction.to_owned())
-            .await
-            .map_err(browser_error("browser_scroll failed"))?;
+        if let Err(error) = self.actor.scroll(direction.to_owned()).await {
+            return Ok(browser_tool_error("browser_scroll failed", error));
+        }
 
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Scrolled {direction}"
@@ -259,33 +290,31 @@ impl BrowserUseMcpServer {
     }
 
     async fn go_back(&self) -> Result<CallToolResult, ErrorData> {
-        self.actor
-            .go_back()
-            .await
-            .map_err(browser_error("browser_go_back failed"))?;
+        if let Err(error) = self.actor.go_back().await {
+            return Ok(browser_tool_error("browser_go_back failed", error));
+        }
         Ok(CallToolResult::success(vec![ContentBlock::text(
             "Navigated back",
         )]))
     }
 
     async fn list_tabs(&self) -> Result<CallToolResult, ErrorData> {
-        let tabs = self
-            .actor
-            .list_tabs()
-            .await
-            .map_err(browser_error("failed to list browser tabs"))?
-            .into_iter()
-            .map(|tab| {
-                json!({
-                    "id": tab.id,
-                    "tab_id": tab.id,
-                    "target_id": tab.target_id,
-                    "url": tab.url,
-                    "title": tab.title,
-                    "active": tab.active
-                })
+        let tabs = match self.actor.list_tabs().await {
+            Ok(tabs) => tabs,
+            Err(error) => return Ok(browser_tool_error("failed to list browser tabs", error)),
+        }
+        .into_iter()
+        .map(|tab| {
+            json!({
+                "id": tab.id,
+                "tab_id": tab.id,
+                "target_id": tab.target_id,
+                "url": tab.url,
+                "title": tab.title,
+                "active": tab.active
             })
-            .collect::<Vec<_>>();
+        })
+        .collect::<Vec<_>>();
         let text = serde_json::to_string_pretty(&tabs).map_err(json_error("browser_list_tabs"))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
@@ -295,11 +324,10 @@ impl BrowserUseMcpServer {
         arguments: Option<Map<String, Value>>,
     ) -> Result<CallToolResult, ErrorData> {
         let tab_id = required_str(arguments.as_ref(), "tab_id", "browser_switch_tab")?;
-        let state = self
-            .actor
-            .switch_tab(tab_id.to_owned())
-            .await
-            .map_err(browser_error("browser_switch_tab failed"))?;
+        let state = match self.actor.switch_tab(tab_id.to_owned()).await {
+            Ok(state) => state,
+            Err(error) => return Ok(browser_tool_error("browser_switch_tab failed", error)),
+        };
 
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Switched to tab {tab_id}: {url}",
@@ -312,23 +340,21 @@ impl BrowserUseMcpServer {
         arguments: Option<Map<String, Value>>,
     ) -> Result<CallToolResult, ErrorData> {
         let tab_id = required_str(arguments.as_ref(), "tab_id", "browser_close_tab")?;
-        let current_url = self
-            .actor
-            .close_tab(tab_id.to_owned())
-            .await
-            .map_err(browser_error("browser_close_tab failed"))?;
+        let current_url = match self.actor.close_tab(tab_id.to_owned()).await {
+            Ok(current_url) => current_url,
+            Err(error) => return Ok(browser_tool_error("browser_close_tab failed", error)),
+        };
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Closed tab # {tab_id}, now on {current_url}"
         ))]))
     }
 
     async fn list_sessions(&self) -> Result<CallToolResult, ErrorData> {
-        let Some(url) = self
-            .actor
-            .list_sessions()
-            .await
-            .map_err(browser_error("browser_list_sessions failed"))?
-        else {
+        let session_url = match self.actor.list_sessions().await {
+            Ok(session_url) => session_url,
+            Err(error) => return Ok(browser_tool_error("browser_list_sessions failed", error)),
+        };
+        let Some(url) = session_url else {
             return Ok(CallToolResult::success(vec![ContentBlock::text(
                 "No active browser sessions",
             )]));
@@ -356,21 +382,19 @@ impl BrowserUseMcpServer {
             ))]));
         }
 
-        self.actor
-            .close_session(session_id.to_owned())
-            .await
-            .map_err(browser_error("browser_close_session failed"))?;
+        if let Err(error) = self.actor.close_session(session_id.to_owned()).await {
+            return Ok(browser_tool_error("browser_close_session failed", error));
+        }
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Successfully closed session {SESSION_ID}"
         ))]))
     }
 
     async fn close_all(&self) -> Result<CallToolResult, ErrorData> {
-        let had_session = self
-            .actor
-            .close_all()
-            .await
-            .map_err(browser_error("browser_close_all failed"))?;
+        let had_session = match self.actor.close_all().await {
+            Ok(had_session) => had_session,
+            Err(error) => return Ok(browser_tool_error("browser_close_all failed", error)),
+        };
         let message = if had_session {
             "Closed 1 sessions"
         } else {
@@ -423,6 +447,10 @@ fn browser_error(message: &'static str) -> impl FnOnce(anyhow::Error) -> ErrorDa
     }
 }
 
+fn browser_tool_error(message: &'static str, error: anyhow::Error) -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(format!("{message}: {error}"))])
+}
+
 fn json_error(message: &'static str) -> impl FnOnce(serde_json::Error) -> ErrorData {
     move |error| {
         ErrorData::new(
@@ -443,6 +471,43 @@ fn optional_bool(arguments: Option<&Map<String, Value>>, key: &str) -> Option<bo
     arguments
         .and_then(|args| args.get(key))
         .and_then(Value::as_bool)
+}
+
+fn optional_i64(arguments: Option<&Map<String, Value>>, key: &str) -> Option<i64> {
+    arguments
+        .and_then(|args| args.get(key))
+        .and_then(Value::as_i64)
+}
+
+fn masked_typed_text(text: &str) -> String {
+    if let Some(sensitive_key_name) = sensitive_key_name(text) {
+        format!("<{sensitive_key_name}>")
+    } else {
+        format!("'{text}'")
+    }
+}
+
+fn sensitive_key_name(text: &str) -> Option<&'static str> {
+    if text.len() < 6 {
+        return None;
+    }
+
+    if text
+        .split_once('@')
+        .is_some_and(|(_, domain)| domain.contains('.'))
+    {
+        return Some("email");
+    }
+
+    let credential_like = text.len() >= 16
+        && text.chars().any(|char| char.is_ascii_digit())
+        && text.chars().any(|char| char.is_ascii_alphabetic())
+        && text.chars().any(|char| matches!(char, '.' | '-' | '_'));
+    credential_like.then_some("credential")
+}
+
+fn prefix_chars(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
 }
 
 fn required_str<'a>(
@@ -965,6 +1030,167 @@ mod tests {
         .await?
     }
 
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn coordinate_only_click_flips_positioned_button_state() -> anyhow::Result<()> {
+        let server = BrowserUseMcpServer::new();
+
+        server
+            .call_browser_tool(call(
+                "browser_navigate",
+                json!({"url": "data:text/html,<title>Coordinate Click</title><button id=b style='position:absolute;left:40px;top:50px;width:80px;height:40px' onclick='this.dataset.clicked=\"yes\"'>Hit</button>"}),
+            ))
+            .await?;
+
+        let result = server
+            .call_browser_tool(call(
+                "browser_click",
+                json!({"coordinate_x": 80, "coordinate_y": 70}),
+            ))
+            .await?;
+        assert_eq!(text_content(&result), "Clicked at coordinates (80, 70)");
+
+        let clicked = server
+            .actor()
+            .evaluate("document.getElementById('b').dataset.clicked")
+            .await?;
+        assert_eq!(clicked, json!("yes"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn new_tab_click_on_link_opens_resolved_url() -> anyhow::Result<()> {
+        let server = BrowserUseMcpServer::new();
+        let base = "https://example.com/base/index.html";
+
+        server
+            .call_browser_tool(call(
+                "browser_navigate",
+                json!({"url": format!("data:text/html,<base href='{base}'><title>Links</title><a href='next/page.html'>Next</a>")}),
+            ))
+            .await?;
+
+        let state = server
+            .call_browser_tool(call("browser_get_state", json!({})))
+            .await?
+            .structured_content
+            .expect("browser_get_state should return structured JSON");
+        let link_index = indexed_element(
+            state["elements"]
+                .as_array()
+                .expect("elements should be an array"),
+            "a",
+            "Next",
+        );
+
+        let result = server
+            .call_browser_tool(call(
+                "browser_click",
+                json!({"index": link_index, "new_tab": true}),
+            ))
+            .await?;
+        assert_eq!(
+            text_content(&result),
+            "Clicked element 0 and opened in new tab https://example.com/..."
+        );
+
+        let tabs = server
+            .call_browser_tool(call("browser_list_tabs", json!({})))
+            .await?;
+        let tabs: Value = serde_json::from_str(text_content(&tabs))?;
+        let tabs = tabs.as_array().expect("tabs should be an array");
+        assert_eq!(tabs.len(), 2);
+        assert!(tabs.iter().any(|tab| tab["url"]
+            .as_str()
+            .is_some_and(|url| url == "https://example.com/base/next/page.html")));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn typing_replaces_prefilled_value_and_masks_email_result() -> anyhow::Result<()> {
+        let server = BrowserUseMcpServer::new();
+
+        server
+            .call_browser_tool(call(
+                "browser_navigate",
+                json!({"url": "data:text/html,<title>Typing</title><input id=i value='old value'>"}),
+            ))
+            .await?;
+        let input_index = input_index(&server).await?;
+
+        let result = server
+            .call_browser_tool(call(
+                "browser_type",
+                json!({"index": input_index, "text": "person@example.com"}),
+            ))
+            .await?;
+        assert_eq!(text_content(&result), "Typed <email> into element 0");
+
+        let value = server
+            .actor()
+            .evaluate("document.getElementById('i').value")
+            .await?;
+        assert_eq!(value, json!("person@example.com"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn typing_empty_text_clears_prefilled_input() -> anyhow::Result<()> {
+        let server = BrowserUseMcpServer::new();
+
+        server
+            .call_browser_tool(call(
+                "browser_navigate",
+                json!({"url": "data:text/html,<title>Clear</title><input id=i value='old value'>"}),
+            ))
+            .await?;
+        let input_index = input_index(&server).await?;
+
+        let result = server
+            .call_browser_tool(call(
+                "browser_type",
+                json!({"index": input_index, "text": ""}),
+            ))
+            .await?;
+        assert_eq!(text_content(&result), "Typed '' into element 0");
+
+        let value = server
+            .actor()
+            .evaluate("document.getElementById('i').value")
+            .await?;
+        assert_eq!(value, json!(""));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn failing_navigate_returns_tool_error_not_transport_error() -> anyhow::Result<()> {
+        let server = BrowserUseMcpServer::new();
+
+        let result = server
+            .call_browser_tool(call(
+                "browser_navigate",
+                json!({"url": "http://127.0.0.1:9/unreachable"}),
+            ))
+            .await
+            .expect("browser failure should be an MCP tool error, not ErrorData");
+
+        assert!(
+            result.is_error.unwrap_or(false),
+            "recoverable browser failure should set is_error=true: {result:?}"
+        );
+        assert!(text_content(&result).contains("browser_navigate failed"));
+
+        Ok(())
+    }
+
     #[cfg(feature = "live-chrome")]
     fn call(name: &'static str, arguments: Value) -> CallToolRequestParams {
         let Value::Object(arguments) = arguments else {
@@ -989,5 +1215,21 @@ mod tests {
             .find(|element| element["tag"] == tag && element["text"] == text)
             .and_then(|element| element["index"].as_i64())
             .unwrap_or_else(|| panic!("missing indexed {tag} element with text {text:?}"))
+    }
+
+    #[cfg(feature = "live-chrome")]
+    async fn input_index(server: &BrowserUseMcpServer) -> anyhow::Result<i64> {
+        let state = server
+            .call_browser_tool(call("browser_get_state", json!({})))
+            .await?
+            .structured_content
+            .expect("browser_get_state should return structured JSON");
+        Ok(indexed_element(
+            state["elements"]
+                .as_array()
+                .expect("elements should be an array"),
+            "input",
+            "old value",
+        ))
     }
 }

@@ -90,6 +90,8 @@ pub struct SelectorMapElement {
     pub tag: String,
     /// Short label or visible descendant text.
     pub text: String,
+    /// Raw href attribute for anchor-like elements, if present.
+    pub href: Option<String>,
     /// Center X coordinate in CSS pixels relative to the viewport.
     pub x: f64,
     /// Center Y coordinate in CSS pixels relative to the viewport.
@@ -101,6 +103,7 @@ struct SelectorCandidate {
     backend_node_id: BackendNodeId,
     tag: String,
     text: String,
+    href: Option<String>,
 }
 
 impl SelectorMapElement {
@@ -480,6 +483,7 @@ impl BrowserPage {
                     backend_node_id: candidate.backend_node_id,
                     tag: candidate.tag,
                     text: candidate.text,
+                    href: candidate.href,
                     x,
                     y,
                 });
@@ -507,9 +511,15 @@ impl BrowserPage {
     /// Clicks an element by stable Chromium backend node id.
     pub async fn click_backend_node_id(&self, backend_node_id: i64) -> Result<()> {
         let element = self.element_for_backend_node_id(backend_node_id).await?;
-        self.dispatch_mouse_event(DispatchMouseEventType::MousePressed, &element)
+        self.click_coordinates(element.x, element.y).await?;
+        Ok(())
+    }
+
+    /// Dispatches a synthetic mouse click at viewport coordinates.
+    pub async fn click_coordinates(&self, x: f64, y: f64) -> Result<()> {
+        self.dispatch_mouse_event(DispatchMouseEventType::MousePressed, x, y)
             .await?;
-        self.dispatch_mouse_event(DispatchMouseEventType::MouseReleased, &element)
+        self.dispatch_mouse_event(DispatchMouseEventType::MouseReleased, x, y)
             .await?;
         Ok(())
     }
@@ -554,6 +564,56 @@ impl BrowserPage {
         Ok(())
     }
 
+    /// Clears an element by stable Chromium backend node id, dispatching input/change events.
+    pub async fn clear_backend_node_id(&self, backend_node_id: i64) -> Result<()> {
+        let element = self.element_for_backend_node_id(backend_node_id).await?;
+
+        self.page
+            .execute(
+                FocusParams::builder()
+                    .backend_node_id(element.backend_node_id)
+                    .build(),
+            )
+            .await
+            .with_context(|| format!("failed to focus backend node id {backend_node_id}"))?;
+
+        self.page
+            .evaluate(
+                r#"
+                (() => {
+                    const el = document.activeElement;
+                    if (!el) return false;
+                    if ('value' in el) {
+                        el.value = '';
+                    } else {
+                        el.textContent = '';
+                    }
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    return true;
+                })()
+                "#,
+            )
+            .await
+            .context("failed to clear focused element")?;
+
+        Ok(())
+    }
+
+    /// Resolves `href` as a browser URL using the page's current base URI.
+    pub async fn resolve_url(&self, href: &str) -> Result<String> {
+        let script = format!(
+            "new URL({}, document.baseURI).href",
+            serde_json::to_string(href)?
+        );
+        self.page
+            .evaluate(script)
+            .await
+            .context("failed to resolve URL")?
+            .into_value()
+            .context("failed to decode resolved URL")
+    }
+
     async fn element_for_backend_node_id(
         &self,
         backend_node_id: i64,
@@ -571,6 +631,7 @@ impl BrowserPage {
             backend_node_id,
             tag: String::new(),
             text: String::new(),
+            href: None,
             x,
             y,
         })
@@ -602,7 +663,8 @@ impl BrowserPage {
     async fn dispatch_mouse_event(
         &self,
         event_type: DispatchMouseEventType,
-        element: &SelectorMapElement,
+        x: f64,
+        y: f64,
     ) -> Result<()> {
         let buttons = if event_type == DispatchMouseEventType::MousePressed {
             1
@@ -613,8 +675,8 @@ impl BrowserPage {
             .execute(
                 DispatchMouseEventParams::builder()
                     .r#type(event_type)
-                    .x(element.x)
-                    .y(element.y)
+                    .x(x)
+                    .y(y)
                     .button(MouseButton::Left)
                     .buttons(buttons)
                     .click_count(1)
@@ -652,6 +714,7 @@ fn collect_interactive_candidates(node: &Node, candidates: &mut Vec<SelectorCand
             backend_node_id: node.backend_node_id,
             tag: node_tag(node),
             text: short_text(node_label(node)),
+            href: attr_value(node, "href").map(ToOwned::to_owned),
         });
     }
 
