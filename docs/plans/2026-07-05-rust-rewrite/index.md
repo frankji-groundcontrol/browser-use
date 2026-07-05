@@ -48,6 +48,8 @@ cheaper path and should be reconsidered.
   fixture capture.
 - [progress.md](progress.md) — living status log (updated every task).
 - [review.md](review.md) — eng-review findings, decisions, and verdict.
+- [parity-plan.md](parity-plan.md) — staged plan to reach full parity + concurrency
+  correctness + "works better" (post-cutover review).
 
 ## Non-goals (v1)
 
