@@ -4,6 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Browser-Use is an async python >= 3.11 library that implements AI browser driver abilities using LLMs + CDP (Chrome DevTools Protocol). The core architecture enables AI agents to autonomously navigate web pages, interact with elements, and complete complex tasks by processing HTML and making LLM-driven decisions.
 
+## Documentation
+
+Operating knowledge for this fork lives under [`docs/`](docs/index.md) — keep this
+router thin and add detail there: [architecture](docs/architecture/index.md),
+[usage](docs/usage/README.md), [learning](docs/learning/README.md),
+[plans](docs/plans/README.md), [practices](docs/practices/README.md),
+[issues](docs/issues/README.md). Update the nearest index when you add or move a doc.
+
 ## High-Level Architecture
 
 The library follows an event-driven architecture with several key components:
