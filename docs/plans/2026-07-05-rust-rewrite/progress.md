@@ -15,8 +15,8 @@ Update after every green milestone. Newest first.
 | — | parity S2 | Tool-contract parity (click coord+new_tab, type clear+mask, get_state rich shape, isError convention, sessions). | in progress |
 | 2026-07-05 | parity S2 | **Tool contracts — done.** click coord+new_tab, type clear+mask, isError convention. (commit `fc252b7`) | done |
 | 2026-07-05 | parity S3 | **Full three-tree DOM serializer — done.** DOM+DOMSnapshot+AX fusion; JS-listener/AX/heuristic interactive detection (detects `<div onclick>`/`addEventListener`); visibility filter; scroll-normalized coords. 18 live tests green. (commit `cbaba9c`) | done |
-| — | parity S4 | LLM client (`bu-llm`) + `browser_extract_content` → 15/16. | in progress |
-| — | parity S5 | Agent loop + `retry_with_browser_use_agent` → 16/16 (capstone). | pending |
+| 2026-07-05 | parity S4 | **bu-llm + `browser_extract_content` → 15/16 — done.** Reqwest OpenAI-compatible client (no wrapper needed); extract verified vs the real gateway. (commit `52f9132`) | done |
+| — | parity S5 | Agent loop (`bu-agent`) + `retry_with_browser_use_agent` → 16/16 (capstone). | in progress |
 | — | 2 | Extract tool + `bu-llm` (openai-compatible) parity. | pending |
 | — | 3 | Event bus + watchdogs + autonomous agent (beta JSON-RPC conformance). | pending |
 | — | 4 | Provider/watchdog/parity hardening + cross-platform release. | pending |
