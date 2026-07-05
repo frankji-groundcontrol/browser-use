@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+use bu_cdp::{BrowserPage, BrowserSession};
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResult, ContentBlock, ErrorCode, Implementation,
@@ -15,15 +16,120 @@ use rmcp::{
     ErrorData, ServerHandler, ServiceExt,
 };
 use serde_json::{json, Map, Value};
+use tokio::sync::Mutex;
 
 /// Minimal rmcp server implementation for the browser-use MCP surface.
 #[derive(Debug, Clone, Default)]
-pub struct BrowserUseMcpServer;
+pub struct BrowserUseMcpServer {
+    browser: Arc<Mutex<Option<SharedBrowser>>>,
+}
+
+#[derive(Debug)]
+struct SharedBrowser {
+    _session: BrowserSession,
+    page: BrowserPage,
+}
 
 impl BrowserUseMcpServer {
     /// Creates a new browser-use MCP server.
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    async fn call_browser_tool(
+        &self,
+        request: CallToolRequestParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !low_level_tools()
+            .iter()
+            .any(|tool| tool.name == request.name)
+        {
+            return Err(ErrorData::new(
+                ErrorCode::METHOD_NOT_FOUND,
+                format!("Unknown tool: {}", request.name),
+                None,
+            ));
+        }
+
+        match request.name.as_ref() {
+            "browser_navigate" => self.navigate(request.arguments).await,
+            "browser_get_state" => self.get_state().await,
+            name => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "{name} is not implemented yet"
+            ))])),
+        }
+    }
+
+    async fn navigate(
+        &self,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let url = arguments
+            .as_ref()
+            .and_then(|args| args.get("url"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ErrorData::new(
+                    ErrorCode::INVALID_PARAMS,
+                    "browser_navigate requires a string url argument",
+                    None,
+                )
+            })?;
+
+        let page = self.shared_page().await?;
+        page.navigate(url)
+            .await
+            .map_err(browser_error("browser_navigate failed"))?;
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Navigated to {url}"
+        ))]))
+    }
+
+    async fn get_state(&self) -> Result<CallToolResult, ErrorData> {
+        let page = self.shared_page().await?;
+        let state = page
+            .state()
+            .await
+            .map_err(browser_error("browser_get_state failed"))?;
+
+        let payload = json!({
+            "url": state.url,
+            "title": state.title,
+            "tabs": [
+                {
+                    "id": "0001",
+                    "url": state.url,
+                    "title": state.title,
+                    "active": true
+                }
+            ]
+        });
+
+        Ok(CallToolResult::structured(payload))
+    }
+
+    async fn shared_page(&self) -> Result<BrowserPage, ErrorData> {
+        let mut browser = self.browser.lock().await;
+
+        if let Some(shared) = browser.as_ref() {
+            return Ok(shared.page.clone());
+        }
+
+        let session = BrowserSession::launch_from_env()
+            .await
+            .map_err(browser_error("failed to launch browser"))?;
+        let page = session
+            .new_page()
+            .await
+            .map_err(browser_error("failed to create browser page"))?;
+
+        *browser = Some(SharedBrowser {
+            _session: session,
+            page: page.clone(),
+        });
+
+        Ok(page)
     }
 }
 
@@ -48,29 +154,25 @@ impl ServerHandler for BrowserUseMcpServer {
             .find(|tool| tool.name.as_ref() == name)
     }
 
+    // rmcp's ServerHandler declares this as `-> impl Future`; keep the trait's
+    // signature shape rather than an `async fn` desugaring.
+    #[allow(clippy::manual_async_fn)]
     fn call_tool(
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<CallToolResult, ErrorData>> + Send + '_ {
-        let tool_exists = low_level_tools()
-            .iter()
-            .any(|tool| tool.name == request.name);
+        async move { self.call_browser_tool(request).await }
+    }
+}
 
-        let result = if tool_exists {
-            Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                "{} is not implemented yet",
-                request.name
-            ))]))
-        } else {
-            Err(ErrorData::new(
-                ErrorCode::METHOD_NOT_FOUND,
-                format!("Unknown tool: {}", request.name),
-                None,
-            ))
-        };
-
-        future::ready(result)
+fn browser_error(message: &'static str) -> impl FnOnce(anyhow::Error) -> ErrorData {
+    move |error| {
+        ErrorData::new(
+            ErrorCode::INTERNAL_ERROR,
+            message,
+            Some(json!({ "error": error.to_string() })),
+        )
     }
 }
 
@@ -268,7 +370,9 @@ fn schema_object(value: Value) -> Arc<Map<String, Value>> {
 
 #[cfg(test)]
 mod tests {
-    use super::low_level_tools;
+    use super::{low_level_tools, BrowserUseMcpServer};
+    use rmcp::model::CallToolRequestParams;
+    use serde_json::{json, Map, Value};
 
     #[test]
     fn tools_list_returns_14_low_level_tools() {
@@ -295,5 +399,39 @@ mod tests {
                 "browser_close_all",
             ]
         );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn navigate_then_get_state_uses_live_browser() -> anyhow::Result<()> {
+        let server = BrowserUseMcpServer::new();
+
+        server
+            .call_browser_tool(call(
+                "browser_navigate",
+                json!({"url": "data:text/html,<title>MCP Live</title><h1>OK</h1>"}),
+            ))
+            .await?;
+
+        let result = server
+            .call_browser_tool(call("browser_get_state", json!({})))
+            .await?;
+        let state = result
+            .structured_content
+            .expect("browser_get_state should return structured JSON");
+
+        assert_eq!(state["title"], "MCP Live");
+        assert!(state["url"].as_str().unwrap().starts_with("data:text/html"));
+        assert_eq!(state["tabs"].as_array().unwrap().len(), 1);
+
+        Ok(())
+    }
+
+    fn call(name: &'static str, arguments: Value) -> CallToolRequestParams {
+        let Value::Object(arguments) = arguments else {
+            unreachable!("test arguments are object literals")
+        };
+
+        CallToolRequestParams::new(name).with_arguments(Map::from_iter(arguments))
     }
 }
