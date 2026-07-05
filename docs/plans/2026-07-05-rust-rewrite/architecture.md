@@ -42,7 +42,7 @@ franky-rust/                     (workspace root; lives on branch franky-rust)
 > (direct CDP), bypassing `bu-bus`. The bus + watchdogs below come online in
 > Phase 3 for the autonomous agent. So in the MVP, "tool → CDP" is via the actor;
 > the "tool → bus.dispatch()" shape is Phase 3. See
-> [plans/2026-07-05-rust-rewrite/plan.md](../plans/2026-07-05-rust-rewrite/plan.md).
+> [plan.md](plan.md).
 
 ### `bu-session` — the stateful core
 - Four maps (targets, sessions, target→sessions, session→target) behind **one**
