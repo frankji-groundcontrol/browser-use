@@ -47,9 +47,10 @@ then restart the agent to pick it up.
 ## 2. Chromium (headless-safe, auto-discovered)
 
 Chromium is **not bundled**; the binary discovers a
-`~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome` build (or
-`BROWSER_USE_CHROMIUM_PATH`). Provision one once with either playwright or the
-Python package's `browser-use install`.
+`~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome` build, or an explicit
+path from the first set of `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`,
+`PLAYWRIGHT_CHROME_EXECUTABLE_PATH`, `CHROMIUM_PATH`, or `CHROME`. Provision one
+once with either playwright or the Python package's `browser-use install`.
 
 On a headless server the binary launches with `--no-sandbox` +
 `--disable-dev-shm-usage` automatically (Ubuntu 23.10+/24.04's
