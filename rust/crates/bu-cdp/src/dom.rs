@@ -1,7 +1,7 @@
 //! Three-tree DOM fusion (DOM + DOMSnapshot + AX), interactive detection,
 //! and paint-order / bounding-box filtering for the live selector map.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chromiumoxide::cdp::browser_protocol::{
     accessibility::{AxNode, AxValue},
@@ -334,117 +334,142 @@ pub(crate) fn apply_paint_order_occlusion_filter(
 /// Collapses a candidate that is >=99% contained inside a propagating interactive
 /// parent (a/button/[role=button|link|combobox]) into that parent — a button
 /// wrapping icon+text yields one index. Mirrors Python's _apply_bounding_box_filtering.
+/// Collapses candidates contained in a propagating interactive ANCESTOR into
+/// that ancestor. Mirrors Python's `_apply_bounding_box_filtering`: bounds
+/// propagate DOWN the DOM tree (ancestor -> descendant only), never across
+/// siblings, so a stretched-link sibling cannot drop a sibling button.
 pub(crate) fn apply_bounding_box_containment_filter(
-    _dom_tree: &Node,
+    dom_tree: &Node,
     enhanced: &HashMap<i64, EnhancedNode>,
     candidates: &mut Vec<SelectorMapCandidate>,
 ) {
-    let n = candidates.len();
-    let mut excluded = vec![false; n];
-    for i in 0..n {
-        // Carve-outs: form controls / own onclick / own aria-label always keep their index.
-        if candidate_has_containment_carveout(&candidates[i], enhanced) {
-            continue;
-        }
-        let child = candidates[i].bounds;
-        if child.is_empty() {
-            continue;
-        }
-        for j in 0..n {
-            if i == j || excluded[j] {
-                continue;
-            }
-            let parent = candidates[j].bounds;
-            if parent.area() >= child.area()
-                && is_propagating_parent(&candidates[j], enhanced)
-                && parent.intersection_area(child) / child.area() >= CONTAINMENT_THRESHOLD
-            {
-                excluded[i] = true;
-                break;
-            }
-        }
-    }
-    let mut index = 0;
-    candidates.retain(|_| {
-        let keep = !excluded[index];
-        index += 1;
-        keep
-    });
+    let mut excluded: HashSet<i64> = HashSet::new();
+    filter_tree_recursive(dom_tree, None, enhanced, &mut excluded);
+    candidates.retain(|candidate| !excluded.contains(&candidate.backend_node_id_value()));
 }
 
-fn is_propagating_parent(
-    candidate: &SelectorMapCandidate,
+fn filter_tree_recursive(
+    node: &Node,
+    active_bounds: Option<Rect>,
     enhanced: &HashMap<i64, EnhancedNode>,
-) -> bool {
-    if matches!(candidate.tag.as_str(), "a" | "button" | "select") {
-        return true;
-    }
-    if let Some(node) = enhanced.get(&candidate.backend_node_id_value()) {
-        let role = node
-            .attributes
-            .get("role")
-            .map(String::as_str)
-            .or(node.ax_role.as_deref());
-        if let Some(role) = role {
-            if matches!(
-                role.to_ascii_lowercase().as_str(),
-                "button" | "link" | "combobox"
-            ) {
-                return true;
+    excluded: &mut HashSet<i64>,
+) {
+    if node.node_type == 1 {
+        let backend_node_id = *node.backend_node_id.inner();
+        if let Some(bounds) = active_bounds {
+            if should_exclude_child(backend_node_id, enhanced, bounds) {
+                excluded.insert(backend_node_id);
             }
         }
     }
-    false
-}
 
-fn candidate_has_containment_carveout(
-    candidate: &SelectorMapCandidate,
-    enhanced: &HashMap<i64, EnhancedNode>,
-) -> bool {
-    if matches!(candidate.tag.as_str(), "input" | "select" | "textarea") {
-        return true;
-    }
-    if let Some(node) = enhanced.get(&candidate.backend_node_id_value()) {
-        if node.attributes.contains_key("onclick") || node.attributes.contains_key("aria-label") {
-            return true;
+    // A propagating element starts new bounds for its whole subtree (even if it
+    // was itself excluded).
+    let mut new_bounds = None;
+    if node.node_type == 1 {
+        if let Some(enhanced_node) = enhanced.get(node.backend_node_id.inner()) {
+            if is_propagating_element(enhanced_node) {
+                new_bounds = enhanced_node.bounds;
+            }
         }
     }
-    false
+    let propagate = new_bounds.or(active_bounds);
+
+    for child in node.children.iter().flatten() {
+        filter_tree_recursive(child, propagate, enhanced, excluded);
+    }
+    for shadow_root in node.shadow_roots.iter().flatten() {
+        filter_tree_recursive(shadow_root, propagate, enhanced, excluded);
+    }
+    if let Some(content_document) = &node.content_document {
+        filter_tree_recursive(content_document, propagate, enhanced, excluded);
+    }
+    if let Some(template_content) = &node.template_content {
+        filter_tree_recursive(template_content, propagate, enhanced, excluded);
+    }
 }
 
-/// An element occludes what is behind it only if it has an opaque background and
-/// full opacity — a transparent wrapper/text node does not hide a button.
+/// Mirrors Python's `_should_exclude_child`: exclude a contained descendant
+/// unless it independently warrants its own index.
+fn should_exclude_child(
+    backend_node_id: i64,
+    enhanced: &HashMap<i64, EnhancedNode>,
+    parent_bounds: Rect,
+) -> bool {
+    let Some(node) = enhanced.get(&backend_node_id) else {
+        return false;
+    };
+    let Some(child_bounds) = node.bounds else {
+        return false;
+    };
+    if child_bounds.area() <= 0.0 {
+        return false;
+    }
+    if parent_bounds.intersection_area(child_bounds) / child_bounds.area() < CONTAINMENT_THRESHOLD {
+        return false;
+    }
+
+    // Exception rules — keep the child even though it is contained:
+    if matches!(node.tag.as_str(), "input" | "select" | "textarea" | "label") {
+        return false;
+    }
+    if is_propagating_element(node) {
+        return false;
+    }
+    if node.attributes.contains_key("onclick") {
+        return false;
+    }
+    if node
+        .attributes
+        .get("aria-label")
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return false;
+    }
+    if node.attributes.get("role").is_some_and(|role| {
+        matches!(
+            role.as_str(),
+            "button" | "link" | "checkbox" | "radio" | "tab" | "menuitem" | "option"
+        )
+    }) {
+        return false;
+    }
+
+    true
+}
+
+/// Mirrors Python's PROPAGATING_ELEMENTS + `_is_propagating_element`. Uses the
+/// `role` ATTRIBUTE only (not the AX role); `role=link` and `<select>` are
+/// intentionally NOT propagating.
+fn is_propagating_element(node: &EnhancedNode) -> bool {
+    let role = node.attributes.get("role").map(String::as_str);
+    matches!(
+        (node.tag.as_str(), role),
+        ("a", _)
+            | ("button", _)
+            | ("div", Some("button"))
+            | ("div", Some("combobox"))
+            | ("span", Some("button"))
+            | ("span", Some("combobox"))
+            | ("input", Some("combobox"))
+    )
+}
+
+/// An element occludes what is behind it iff its background is not fully
+/// transparent AND opacity >= 0.8 — mirrors Python's PaintOrderRemover, which
+/// skips occluders whose background is exactly `rgba(0, 0, 0, 0)` or opacity < 0.8.
 fn is_opaque_enhanced_node(node: &EnhancedNode) -> bool {
     let opacity = node
         .computed_styles
         .get("opacity")
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(1.0);
-    if opacity < 0.9 {
+    if opacity < 0.8 {
         return false;
     }
     node.computed_styles
         .get("background-color")
-        .map(|bg| background_alpha(bg) > 0.1)
-        .unwrap_or(false)
-}
-
-fn background_alpha(color: &str) -> f64 {
-    let color = color.trim();
-    if color.eq_ignore_ascii_case("transparent") {
-        return 0.0;
-    }
-    if let Some(inner) = color
-        .strip_prefix("rgba(")
-        .and_then(|rest| rest.strip_suffix(')'))
-    {
-        let parts: Vec<&str> = inner.split(',').collect();
-        if parts.len() == 4 {
-            return parts[3].trim().parse::<f64>().unwrap_or(1.0);
-        }
-    }
-    // rgb(...), hex, and named colors are opaque.
-    1.0
+        .is_some_and(|background| background != "rgba(0, 0, 0, 0)")
 }
 
 pub(crate) fn is_click_like_event(event_type: &str) -> bool {

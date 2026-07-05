@@ -1421,6 +1421,121 @@ mod tests {
 
     #[tokio::test]
     #[cfg(feature = "live-chrome")]
+    async fn bbox_filter_is_hierarchy_aware_not_all_pairs() -> anyhow::Result<()> {
+        // A Bootstrap "stretched-link": an <a> geometrically covers the whole
+        // card, but a sibling <button> is NOT its DOM descendant, so the button
+        // must be kept (all-pairs geometry would wrongly drop it).
+        let server = BrowserUseMcpServer::new();
+        let html = r#"
+            <title>Stretched Link</title>
+            <div style="position:relative;width:300px;height:200px">
+              <button style="position:absolute;left:20px;top:20px;width:120px;height:36px">Primary CTA</button>
+              <a href="/card" style="position:absolute;left:0;top:0;width:300px;height:200px"></a>
+            </div>
+        "#;
+        server
+            .call_browser_tool(call("browser_navigate", json!({"url": data_url(html)})))
+            .await?;
+        let state = server
+            .call_browser_tool(call("browser_get_state", json!({})))
+            .await?
+            .structured_content
+            .expect("structured JSON");
+        let elements = state["interactive_elements"].as_array().expect("array");
+        assert!(
+            has_element(elements, "button", "Primary CTA"),
+            "sibling button must NOT be collapsed by a stretched-link sibling: {elements:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn bbox_filter_keeps_propagating_child_in_link() -> anyhow::Result<()> {
+        // A <button> nested in an <a> is itself a propagating element, so Python's
+        // exception rule keeps it indexed.
+        let server = BrowserUseMcpServer::new();
+        let html = r#"
+            <title>Nested Button</title>
+            <a href="/product" style="display:inline-block;width:200px;height:50px">
+              <button style="width:180px;height:30px;margin:10px">Add to cart</button>
+            </a>
+        "#;
+        server
+            .call_browser_tool(call("browser_navigate", json!({"url": data_url(html)})))
+            .await?;
+        let state = server
+            .call_browser_tool(call("browser_get_state", json!({})))
+            .await?
+            .structured_content
+            .expect("structured JSON");
+        let elements = state["interactive_elements"].as_array().expect("array");
+        assert!(
+            has_element(elements, "button", "Add to cart"),
+            "a propagating button nested in a link must stay indexed: {elements:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn bbox_filter_does_not_propagate_role_link() -> anyhow::Result<()> {
+        // <div role="link"> is intentionally NOT a propagating element (Python
+        // has it commented out), so its tabbable child stays indexed.
+        let server = BrowserUseMcpServer::new();
+        let html = r#"
+            <title>Role Link</title>
+            <div role="link" style="display:block;width:200px;height:40px">
+              <span tabindex="0" style="display:block;width:100%;height:100%">Details</span>
+            </div>
+        "#;
+        server
+            .call_browser_tool(call("browser_navigate", json!({"url": data_url(html)})))
+            .await?;
+        let state = server
+            .call_browser_tool(call("browser_get_state", json!({})))
+            .await?
+            .structured_content
+            .expect("structured JSON");
+        let elements = state["interactive_elements"].as_array().expect("array");
+        assert!(
+            has_element(elements, "span", "Details"),
+            "child of div[role=link] must not be collapsed: {elements:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn paint_order_drops_element_under_semi_transparent_overlay() -> anyhow::Result<()> {
+        // opacity 0.85 (>= 0.8) + a non-transparent background is an occluder, so a
+        // fully-covered button is dropped (Python's threshold, not 0.9).
+        let server = BrowserUseMcpServer::new();
+        let html = r#"
+            <title>Semi Overlay</title>
+            <body style="margin:0">
+              <button style="position:absolute;left:0;top:0;width:120px;height:40px;z-index:1">Buy</button>
+              <div style="position:absolute;left:0;top:0;width:120px;height:40px;background:#000;opacity:0.85;z-index:9"></div>
+            </body>
+        "#;
+        server
+            .call_browser_tool(call("browser_navigate", json!({"url": data_url(html)})))
+            .await?;
+        let state = server
+            .call_browser_tool(call("browser_get_state", json!({})))
+            .await?
+            .structured_content
+            .expect("structured JSON");
+        let elements = state["interactive_elements"].as_array().expect("array");
+        assert!(
+            !has_element(elements, "button", "Buy"),
+            "button under a semi-transparent (opacity 0.85) overlay must be dropped: {elements:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
     async fn indexed_click_after_scroll_uses_viewport_normalized_coordinates() -> anyhow::Result<()>
     {
         let server = BrowserUseMcpServer::new();
@@ -1881,6 +1996,80 @@ mod tests {
             "block message should mention the policy: {blocked:?}"
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn guard_resets_active_page_that_became_disallowed() -> anyhow::Result<()> {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            sync::{
+                atomic::{AtomicBool, Ordering},
+                Arc,
+            },
+            thread,
+            time::Duration,
+        };
+
+        // A local HTTP server so the active tab lands on a real (non-data) URL
+        // that a policy can then disallow — simulating a page reached by a
+        // click/JS navigation that bypassed the navigate pre-check.
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let url = format!("http://{}/", listener.local_addr()?);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = stop.clone();
+        let server = thread::spawn(move || {
+            while !stop_thread.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                        let mut buffer = [0u8; 1024];
+                        let _ = stream.read(&mut buffer);
+                        let body = "<title>local</title><h1>local page</h1>";
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                    }
+                    Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let mcp = BrowserUseMcpServer::new();
+        // No policy yet: navigate to the local page (allowed) so it becomes active.
+        mcp.call_browser_tool(call("browser_navigate", json!({ "url": url })))
+            .await?;
+
+        // Now restrict to example.com — the active 127.0.0.1 page is disallowed.
+        mcp.actor()
+            .set_policy(bu_actor::BrowserUrlPolicy {
+                allowed_domains: vec!["example.com".to_owned()],
+                ..Default::default()
+            })
+            .await?;
+
+        // get_state's guard must reset the now-disallowed active page to about:blank.
+        let state = mcp
+            .call_browser_tool(call("browser_get_state", json!({})))
+            .await?
+            .structured_content
+            .expect("browser_get_state should return structured JSON");
+        assert_eq!(
+            state["url"], "about:blank",
+            "guard_active_url must reset a disallowed active page: {state:?}"
+        );
+
+        stop.store(true, Ordering::Relaxed);
+        let _ = server.join();
         Ok(())
     }
 

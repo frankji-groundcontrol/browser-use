@@ -262,3 +262,86 @@ mod tests {
         assert!(parse_chat_body(r#"{"choices":[]}"#).is_err());
     }
 }
+
+#[cfg(test)]
+mod http_tests {
+    use super::{OpenAiChatClient, OpenAiChatConfig};
+    use crate::message::message;
+    use std::{
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        thread,
+    };
+
+    #[tokio::test]
+    async fn retries_on_429_then_succeeds() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            // First attempt: 429 with Retry-After: 0 (instant retry).
+            let (mut first, _) = listener.accept().expect("accept 1");
+            drain_request(&mut first);
+            let body = r#"{"error":{"message":"rate limited"}}"#;
+            write!(
+                first,
+                "HTTP/1.1 429 Too Many Requests\r\nretry-after: 0\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            drop(first);
+            // Second attempt: 200 with a normal completion.
+            let (mut second, _) = listener.accept().expect("accept 2");
+            drain_request(&mut second);
+            let body = r#"{"choices":[{"message":{"content":"recovered"}}]}"#;
+            write!(
+                second,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let client = OpenAiChatClient::new(OpenAiChatConfig {
+            api_key: "k".to_owned(),
+            base_url,
+            model: "m".to_owned(),
+            temperature: None,
+        })
+        .unwrap();
+        let out = client.chat(vec![message("user", "hi")]).await.unwrap();
+        assert_eq!(
+            out, "recovered",
+            "client should retry the 429 and return the 200 body"
+        );
+        server.join().unwrap();
+    }
+
+    fn drain_request(stream: &mut TcpStream) {
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            let read = stream.read(&mut chunk).expect("read request");
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            if let Some(end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&buffer[..end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                if buffer.len() >= end + 4 + content_length {
+                    break;
+                }
+            }
+        }
+    }
+}

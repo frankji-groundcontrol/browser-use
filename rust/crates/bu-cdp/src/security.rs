@@ -168,9 +168,10 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 /// non-standard IPv4 encodings (decimal, hex, octal, short-form) that
 /// `inet_aton` accepts. Mirrors `_is_ip_address`. Never panics.
 ///
-/// Note: exotic Unicode-digit / IDNA-separator canonicalization (NFKC, U+3002)
-/// from the Python port is omitted; `block_ip_addresses` is off by default and
-/// the common SSRF vectors (dotted, decimal, hex/octal) are covered.
+/// Exotic Unicode forms (fullwidth digits, ideographic full stops) that Python
+/// handles via NFKC are already canonicalized upstream by the `url` crate's
+/// IDNA/UTS46 host processing before this is called (covered by a test), so they
+/// do not bypass detection.
 fn is_ip_address(host: &str) -> bool {
     let bare = host.trim_start_matches('[').trim_end_matches(']');
     let decoded = percent_decode(bare);
@@ -363,5 +364,21 @@ mod tests {
             "https://example.com/a/b"
         ));
         assert!(!glob_match("http://example.com/*", "https://example.com/a"));
+    }
+
+    #[test]
+    fn ip_detection_handles_exotic_unicode_forms() {
+        let p = UrlPolicy {
+            block_ip_addresses: true,
+            ..Default::default()
+        };
+        // Fullwidth digits (１２７) + ideographic full stops (。) for 127.0.0.1 —
+        // the url crate's IDNA/UTS46 host processing should canonicalize these to
+        // ASCII before is_ip_address sees them, so the literal must be blocked.
+        let exotic = "http://\u{FF11}\u{FF12}\u{FF17}\u{3002}0\u{3002}0\u{3002}1/";
+        assert!(
+            !p.is_url_allowed(exotic),
+            "exotic-Unicode IP literal must be blocked"
+        );
     }
 }

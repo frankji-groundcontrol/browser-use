@@ -15,9 +15,18 @@ use tokio::sync::{mpsc, oneshot};
 pub use bu_cdp::UrlPolicy as BrowserUrlPolicy;
 
 const SESSION_ID: &str = "default";
-/// Backstop timeout for any single browser command, so a wedged renderer
-/// (e.g. an `onclick` that spins forever) can't hang the whole actor.
-const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+/// Default backstop timeout for any single browser command, so a wedged renderer
+/// (e.g. an `onclick` that spins forever) can't hang the whole actor. Overridable
+/// via `BROWSER_USE_COMMAND_TIMEOUT_MS` (used by tests).
+const DEFAULT_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+fn command_timeout_from_env() -> std::time::Duration {
+    std::env::var("BROWSER_USE_COMMAND_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(DEFAULT_COMMAND_TIMEOUT)
+}
 
 type Reply<T> = oneshot::Sender<Result<T>>;
 
@@ -66,6 +75,18 @@ impl ActorHandle {
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(async move {
             BrowserActor::new(launch_counter).run(rx).await;
+        });
+        Self { tx }
+    }
+
+    /// Spawns an actor with an explicit per-command timeout (deterministic tests).
+    #[cfg(feature = "live-chrome")]
+    pub fn spawn_with_command_timeout(timeout: std::time::Duration) -> Self {
+        let (tx, rx) = mpsc::channel(64);
+        tokio::spawn(async move {
+            let mut actor = BrowserActor::new(None);
+            actor.command_timeout = timeout;
+            actor.run(rx).await;
         });
         Self { tx }
     }
@@ -291,6 +312,7 @@ struct BrowserActor {
     selector_cache: SelectorCache,
     launch_counter: Option<Arc<AtomicUsize>>,
     policy: UrlPolicy,
+    command_timeout: std::time::Duration,
 }
 
 impl BrowserActor {
@@ -301,6 +323,7 @@ impl BrowserActor {
             selector_cache: SelectorCache::default(),
             launch_counter,
             policy: UrlPolicy::from_env(),
+            command_timeout: command_timeout_from_env(),
         }
     }
 
@@ -308,7 +331,8 @@ impl BrowserActor {
         while let Some(command) = rx.recv().await {
             // Cancelling the dispatch future on timeout drops its reply sender,
             // so the caller gets an error and the actor moves to the next command.
-            if tokio::time::timeout(COMMAND_TIMEOUT, self.dispatch(command))
+            let timeout = self.command_timeout;
+            if tokio::time::timeout(timeout, self.dispatch(command))
                 .await
                 .is_err()
             {
@@ -722,5 +746,67 @@ impl SelectorCache {
     fn clear(&mut self) {
         self.index_to_backend_node_id.clear();
         self.by_backend_node_id.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn scoped_policy_set_get_restore_roundtrips() {
+        // The retry tool's allowed_domains scoping relies on set_policy returning
+        // the exact prior policy so it can be restored verbatim.
+        let actor = ActorHandle::spawn();
+        let base = actor.get_policy().await.unwrap();
+
+        let scoped = UrlPolicy {
+            allowed_domains: vec!["example.com".to_owned()],
+            prohibited_domains: Vec::new(),
+            block_ip_addresses: false,
+        };
+        let previous = actor.set_policy(scoped.clone()).await.unwrap();
+        assert_eq!(
+            previous, base,
+            "set_policy must return the exact prior policy"
+        );
+        assert_eq!(actor.get_policy().await.unwrap(), scoped);
+
+        actor.set_policy(previous.clone()).await.unwrap();
+        assert_eq!(
+            actor.get_policy().await.unwrap(),
+            previous,
+            "base policy must restore verbatim"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn wedged_command_times_out_and_actor_survives() {
+        // A renderer that spins forever must not hang the actor: the command is
+        // dropped on the per-command timeout and later commands still respond.
+        let actor = ActorHandle::spawn_with_command_timeout(std::time::Duration::from_secs(2));
+
+        actor
+            .navigate("data:text/html,<title>wedge</title>".to_owned(), false)
+            .await
+            .expect("initial navigate should launch the browser");
+
+        // Runtime.evaluate on an infinite loop never returns; the actor must drop
+        // it at the ~2s timeout rather than hang forever.
+        let wedged = actor.evaluate("while (true) {}").await;
+        assert!(
+            wedged.is_err(),
+            "wedged evaluate should time out, got {wedged:?}"
+        );
+
+        // A subsequent non-browser command must still respond promptly, proving
+        // the actor loop was not deadlocked by the dropped command.
+        let survived =
+            tokio::time::timeout(std::time::Duration::from_secs(5), actor.get_policy()).await;
+        assert!(
+            matches!(survived, Ok(Ok(_))),
+            "actor must still answer commands after a wedged one: {survived:?}"
+        );
     }
 }
