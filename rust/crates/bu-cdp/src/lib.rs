@@ -1,8 +1,7 @@
 //! Thin Chromium DevTools Protocol wrapper for the first Rust browser tools.
 
 use std::{
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
