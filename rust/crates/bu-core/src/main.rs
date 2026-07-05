@@ -1,8 +1,9 @@
 use anyhow::Result;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     if std::env::args().any(|arg| arg == "--mcp") {
-        println!("TODO: Rust MCP server is not implemented yet");
+        bu_mcp::run_stdio_server().await?;
     }
 
     Ok(())

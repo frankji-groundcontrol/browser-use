@@ -6,3 +6,9 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bu-mcp = { path = "../bu-mcp" }
+tokio.workspace = true
+
+[[bin]]
+name = "browser-use-rs"
+path = "src/main.rs"
