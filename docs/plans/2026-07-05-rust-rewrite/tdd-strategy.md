@@ -9,7 +9,12 @@ LLM may be faked.**
 1. **Golden-file unit tests** for pure functions (highest confidence-per-effort).
    Capture the Python implementation's outputs as fixtures and assert the Rust
    output matches byte-for-byte (or field-for-field for JSON):
-   - DOM serialization (the pseudo-HTML string) and the selector map.
+   - DOM serialization (the pseudo-HTML string) and the selector map. **Caveat:**
+     the tree structure + `selector_map` indices (backendNodeIds) are
+     deterministic and asserted exactly, but embedded coordinates/bboxes vary by
+     Chromium build/viewport/scale/headless-font-rendering — assert those
+     **field-wise with tolerance** against a **pinned Chromium build**, not
+     byte-equality.
    - `SchemaOptimizer` output for a corpus of pydantic/JSON schemas.
    - Sensitive-data `<secret>` substitution and TOTP formatting.
    - Loop-detection hashes; element hashing / `MatchLevel`.
@@ -22,11 +27,18 @@ LLM may be faked.**
    feature so `cargo test` stays hermetic by default. Mirror the Python fixtures:
    serve local HTML with a tiny in-test HTTP server; never hit remote URLs.
 
-3. **Conformance harness** against the beta JSON-RPC contract
-   ([architecture/11-beta-rust-bridge.md](../../architecture/11-beta-rust-bridge.md)).
-   `xtask conformance` runs the same task+config through the Python beta bridge and
-   the Rust `agent.run_task`, then diffs the emitted `history.events`,
-   `usage`, and `success`. This is the end-to-end oracle for the agent loop.
+3. **Conformance harness.** Two oracles, because the ideal one isn't runnable here:
+   - **Tool/protocol drop-in (runnable now):** diff the Rust `browser-use --mcp`
+     `initialize` + `tools/list` + representative `tools/call` results against the
+     **installed Python `browser-use --mcp` server** (verbatim JSON). This is the
+     real drop-in gate and needs nothing we don't own.
+   - **Agent loop (spec-level):** assert the Rust `agent.run_task` emits the
+     documented beta JSON-RPC shapes
+     ([architecture/11-beta-rust-bridge.md](../../architecture/11-beta-rust-bridge.md)).
+     A full `history.events` diff against the vendor `browser-use-terminal` binary
+     is only possible **if that binary is installed** (not owned/vendored here);
+     otherwise the installed Python autonomous agent is the behavioral oracle for
+     simple tasks.
 
 ## Fixture capture
 
@@ -47,6 +59,24 @@ crates/bu-dom/
     ├── serialize_golden.rs # tier-1 golden tests
     └── live_dom.rs         # tier-2, #[cfg(feature = "live-chrome")]
 ```
+
+## First tests to write (concrete, for the codex TDD hand-off)
+
+Write these RED first, in this order — each fails before its crate exists; codex
+implements until green:
+
+1. `bu-cdp::connects_and_reports_version` — boot headless Chrome, connect, assert
+   `Browser.getVersion` returns a product string. (live-chrome)
+2. `bu-dom::serialize_matches_golden` — load a captured CDP-tree fixture, assert
+   the serialized pseudo-HTML + selector map equal the Python golden. (tier-1)
+3. `bu-dom::selector_index_equals_backend_node_id` — assert the load-bearing
+   contract directly. (tier-1)
+4. `bu-llm::schema_optimizer_matches_golden` — flattened schema equals Python. (tier-1)
+5. `bu-mcp::tools_list_returns_14_low_level` — stdio `initialize` + `tools/list`,
+   assert the 14 tool names and their input schemas. (tier-1, in-process)
+6. `bu-mcp::navigate_then_get_state_live` — spawn the server, `browser_navigate`
+   (data: URL) + `browser_get_state`, assert the element appears; `browser_close_all`
+   cleans up. (live-chrome — this is the Phase-1 exit gate.)
 
 ## CI
 

@@ -32,8 +32,17 @@ franky-rust/                     (workspace root; lives on branch franky-rust)
   `tokio::time::timeout` (the `TimeoutWrappedCDPClient` 60s analog).
 - Events: dispatch by `method` (+ `sessionId`) to a `broadcast`/`mpsc` sink.
 - `WebSocketConfig` max_frame_size ≈ 200 MB; `bytes` for payloads.
-- CDP types: either reuse `chromiumoxide`'s generated protocol types or
-  serde-derive our own from the DevTools PDL (stay faithful to `cdp-use`).
+- CDP types + transport: build on **`chromiumoxide`** (generated CDP types +
+  WebSocket transport). Do NOT hand-roll the protocol types from the PDL — that
+  re-solves a solved problem. Keep our own single-lock session map on top;
+  chromiumoxide's `Handler` model does not match the `Mutex<SessionState>`
+  invariant, so use it for transport + types, not session ownership.
+
+> **MVP path (Phase 1):** the 14 low-level MCP tools are driven through `bu-actor`
+> (direct CDP), bypassing `bu-bus`. The bus + watchdogs below come online in
+> Phase 3 for the autonomous agent. So in the MVP, "tool → CDP" is via the actor;
+> the "tool → bus.dispatch()" shape is Phase 3. See
+> [plans/2026-07-05-rust-rewrite/plan.md](../plans/2026-07-05-rust-rewrite/plan.md).
 
 ### `bu-session` — the stateful core
 - Four maps (targets, sessions, target→sessions, session→target) behind **one**

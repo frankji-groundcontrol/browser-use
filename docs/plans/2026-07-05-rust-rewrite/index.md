@@ -27,6 +27,17 @@ the **authoritative external spec** and doubles as a conformance test suite. See
 We do not have that crate's source; `franky-rust` is a fresh implementation in
 this repo, but it should honor that contract where practical.
 
+**Strategic risk (eng review — acknowledged, decision stands).** A fresh Rust
+rewrite of ~65k LOC to displace a 1.3k-line stdio shim is a large bet, and a
+maintained native Rust core (`browser-use-terminal`) already exists but is not
+owned/vendored here (so it cannot be extended, only conformed to). The rewrite
+proceeds because it is the directed goal; the plan hedges the bet by (a) building
+on `chromiumoxide` + `rmcp` instead of reinventing transport/protocol, (b) treating
+the DOM serializer as the one irreducible core, and (c) shipping the installable
+MCP server first so value lands before the full agent loop. If the vendor
+relationship becomes available, wrapping/shipping that binary as MCP is the
+cheaper path and should be reconsidered.
+
 ## Child documents
 
 - [architecture.md](architecture.md) — target Cargo workspace and per-crate design.
@@ -36,6 +47,7 @@ this repo, but it should honor that contract where practical.
 - [tdd-strategy.md](tdd-strategy.md) — golden-file + live-Chrome test approach and
   fixture capture.
 - [progress.md](progress.md) — living status log (updated every task).
+- [review.md](review.md) — eng-review findings, decisions, and verdict.
 
 ## Non-goals (v1)
 
@@ -43,6 +55,9 @@ this repo, but it should honor that contract where practical.
 - Porting the `sandbox/` cloudpickle+AST remote executor (no Rust analog — keep as
   a Python sidecar or redesign as serializable task descriptors).
 - The `beta/` event→history reconstruction layer (dead weight in a native build).
+- Default browser extensions (uBlock/ICDC/ClearURLs) in the MVP — a bare Chromium
+  launch ships first; extension auto-download is a later parity item.
+- Cross-platform release packaging (`cargo-dist`, GitHub Releases) — Phase 4.
 
 ## Source of truth for architecture
 
