@@ -340,11 +340,7 @@ impl BrowserActor {
                 let _ = reply.send(self.get_state(include_screenshot).await);
             }
             Command::PageState { reply } => {
-                let result = match self.active_page().await {
-                    Ok(page) => page.state().await,
-                    Err(e) => Err(e),
-                };
-                let _ = reply.send(result);
+                let _ = reply.send(self.page_state().await);
             }
             Command::Click {
                 index,
@@ -409,7 +405,15 @@ impl BrowserActor {
         let page = self.active_page().await?;
         page.go_back().await?;
         self.selector_cache.clear();
+        // History may hold a disallowed URL; reset it if so.
+        self.guard_active_url().await;
         Ok(())
+    }
+
+    /// Returns current page metadata, resetting a disallowed active page first.
+    async fn page_state(&mut self) -> Result<PageState> {
+        self.guard_active_url().await;
+        self.active_page().await?.state().await
     }
 
     async fn navigate(&mut self, url: &str, new_tab: bool) -> Result<()> {
@@ -574,6 +578,8 @@ impl BrowserActor {
         }
 
         self.selector_cache.clear();
+        // Reset a disallowed active page before returning its URL.
+        self.guard_active_url().await;
         let current_url = match self.page.as_ref() {
             Some(page) => page
                 .state()
@@ -586,6 +592,8 @@ impl BrowserActor {
     }
 
     async fn list_sessions(&mut self) -> Result<Option<String>> {
+        // Reset a disallowed active page before surfacing its URL.
+        self.guard_active_url().await;
         let Some(page) = self.page.as_ref() else {
             return Ok(None);
         };
