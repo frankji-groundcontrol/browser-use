@@ -21,11 +21,21 @@ Update after every green milestone. Newest first.
   build can replace the current install; the full agent loop is Phase 3.
 - Prior art: `browser_use/beta/` already drives a native Rust core over JSON-RPC;
   its contract is the conformance oracle, not code we own.
-- **Install is A/B, not a replacement (deliberate).** `browser-use-rs` is installed
-  and registered beside the Python `browser-use`; the Python server stays the
-  functional primary for all 4 agents. Shadowing the `browser-use` name waits until
-  Phase 1b makes the 14 `tools/call` bodies real and live conformance passes —
-  replacing a stubbed server would break the agents. Reversibility over speed.
+- **Cutover done (per directive).** All 4 agents' `browser-use` MCP server now runs
+  the Rust `browser-use-rs --mcp` (14 tools; verified connected in
+  claude/codex/hermes/opencode). The Python install (uv-tool binary + wrapper +
+  `~/.config/browseruse/config.json`) is kept ON DISK for rollback — nothing was
+  deleted.
+  - **Known regressions until Phase 1d:** the 2 LLM tools
+    (`browser_extract_content`, `retry_with_browser_use_agent`) return "not
+    implemented"; element detection is a first-cut selector map (lower quality than
+    the Python serializer on complex pages). Closing these = full parity.
+  - **Rollback (one edit per agent):** repoint `browser-use` back to the Python
+    wrapper `~/.local/share/uv/tools/browser-use/bin/python
+    ~/.config/browseruse/mcp-launch.py` with env `OPENAI_API_KEY` + `OPENAI_BASE_URL`.
+    e.g. `claude mcp remove browser-use -s user && claude mcp add browser-use -s user
+    -e OPENAI_API_KEY='${OPENAI_API_KEY}' -e OPENAI_BASE_URL='${OPENAI_BASE_URL}' --
+    <python> <wrapper>`.
 - CI lives at `rust/ci/rust.yml` (not `.github/workflows/`): the push token lacks
   `workflow` scope. A maintainer with that scope should move it into
   `.github/workflows/`.
