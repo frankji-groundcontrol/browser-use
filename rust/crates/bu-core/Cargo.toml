@@ -10,6 +10,10 @@ bu-mcp = { path = "../bu-mcp" }
 tokio.workspace = true
 tracing-subscriber.workspace = true
 
+[features]
+# Build the MCP binary with AWS Bedrock agent support (MODEL_PROVIDER=bedrock).
+bedrock = ["bu-mcp/bedrock"]
+
 [[bin]]
 name = "browser-use-rs"
 path = "src/main.rs"

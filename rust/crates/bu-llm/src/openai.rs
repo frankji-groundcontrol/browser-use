@@ -147,7 +147,9 @@ impl OpenAiChatClient {
             .await
             .context("failed to read LLM response body")?;
         if !status.is_success() {
-            return Err(anyhow!("LLM chat request failed with HTTP {status}: {body}"));
+            return Err(anyhow!(
+                "LLM chat request failed with HTTP {status}: {body}"
+            ));
         }
 
         let parsed: ChatCompletionResponse =
