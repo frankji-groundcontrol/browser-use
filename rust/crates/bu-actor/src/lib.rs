@@ -543,7 +543,13 @@ impl BrowserActor {
         let Some(session) = self.session.as_ref() else {
             return Ok(Vec::new());
         };
-        session.tabs(self.page.as_ref()).await
+        let mut tabs = session.tabs(self.page.as_ref()).await?;
+        // Never surface disallowed background tabs (e.g. a JS window.open to an
+        // off-allowlist URL) to the model — that would leak the URL and title.
+        if !self.policy.is_unrestricted() {
+            tabs.retain(|tab| self.policy.is_url_allowed(&tab.url));
+        }
+        Ok(tabs)
     }
 
     async fn switch_tab(&mut self, tab: &str) -> Result<PageState> {

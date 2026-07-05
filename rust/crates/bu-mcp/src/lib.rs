@@ -26,12 +26,17 @@ const SESSION_ID: &str = "default";
 #[derive(Debug, Clone)]
 pub struct BrowserUseMcpServer {
     actor: ActorHandle,
+    // Serializes autonomous agent runs so they can't drive the single shared
+    // browser concurrently or interleave their scoped allowed_domains policy
+    // save/restore (which would corrupt the base policy).
+    agent_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Default for BrowserUseMcpServer {
     fn default() -> Self {
         Self {
             actor: ActorHandle::spawn(),
+            agent_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }
@@ -49,6 +54,7 @@ impl BrowserUseMcpServer {
     ) -> Self {
         Self {
             actor: ActorHandle::spawn_with_launch_counter(launch_counter),
+            agent_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -266,6 +272,10 @@ impl BrowserUseMcpServer {
         &self,
         arguments: Option<Map<String, Value>>,
     ) -> Result<CallToolResult, ErrorData> {
+        // Serialize agent runs: only one drives the shared browser at a time, and
+        // the scoped-policy save/restore below is reentrancy-safe under overlap.
+        let _agent_guard = self.agent_lock.lock().await;
+
         let task =
             required_str(arguments.as_ref(), "task", "retry_with_browser_use_agent")?.to_owned();
         let max_steps = optional_i64(arguments.as_ref(), "max_steps")
