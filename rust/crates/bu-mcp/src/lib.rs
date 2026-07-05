@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use bu_cdp::{BrowserPage, BrowserSession};
 use rmcp::{
     model::{
@@ -18,6 +19,8 @@ use rmcp::{
 use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
 
+const SESSION_ID: &str = "default";
+
 /// Minimal rmcp server implementation for the browser-use MCP surface.
 #[derive(Debug, Clone, Default)]
 pub struct BrowserUseMcpServer {
@@ -26,7 +29,7 @@ pub struct BrowserUseMcpServer {
 
 #[derive(Debug)]
 struct SharedBrowser {
-    _session: BrowserSession,
+    session: BrowserSession,
     page: BrowserPage,
 }
 
@@ -54,6 +57,16 @@ impl BrowserUseMcpServer {
         match request.name.as_ref() {
             "browser_navigate" => self.navigate(request.arguments).await,
             "browser_get_state" => self.get_state().await,
+            "browser_get_html" => self.get_html(request.arguments).await,
+            "browser_screenshot" => self.screenshot(request.arguments).await,
+            "browser_scroll" => self.scroll(request.arguments).await,
+            "browser_go_back" => self.go_back().await,
+            "browser_list_tabs" => self.list_tabs().await,
+            "browser_switch_tab" => self.switch_tab(request.arguments).await,
+            "browser_close_tab" => self.close_tab(request.arguments).await,
+            "browser_list_sessions" => self.list_sessions().await,
+            "browser_close_session" => self.close_session(request.arguments).await,
+            "browser_close_all" => self.close_all().await,
             name => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                 "{name} is not implemented yet"
             ))])),
@@ -75,8 +88,13 @@ impl BrowserUseMcpServer {
                     None,
                 )
             })?;
+        let new_tab = optional_bool(arguments.as_ref(), "new_tab").unwrap_or(false);
 
-        let page = self.shared_page().await?;
+        let page = if new_tab {
+            self.new_active_page().await?
+        } else {
+            self.shared_page().await?
+        };
         page.navigate(url)
             .await
             .map_err(browser_error("browser_navigate failed"))?;
@@ -92,21 +110,206 @@ impl BrowserUseMcpServer {
             .state()
             .await
             .map_err(browser_error("browser_get_state failed"))?;
+        let tabs = self.tab_values().await?;
 
         let payload = json!({
             "url": state.url,
             "title": state.title,
-            "tabs": [
-                {
-                    "id": "0001",
-                    "url": state.url,
-                    "title": state.title,
-                    "active": true
-                }
-            ]
+            "tabs": tabs
         });
 
         Ok(CallToolResult::structured(payload))
+    }
+
+    async fn get_html(
+        &self,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let selector = optional_str(arguments.as_ref(), "selector");
+        let page = self.shared_page().await?;
+
+        if let Some(selector) = selector {
+            let exists = page
+                .query_selector_exists(selector)
+                .await
+                .map_err(browser_error("browser_get_html failed"))?;
+            if !exists {
+                return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                    "No element found for selector: {selector}"
+                ))]));
+            }
+        }
+
+        let html = page
+            .html(selector)
+            .await
+            .map_err(browser_error("browser_get_html failed"))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(html)]))
+    }
+
+    async fn screenshot(
+        &self,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let full_page = optional_bool(arguments.as_ref(), "full_page").unwrap_or(false);
+        let page = self.shared_page().await?;
+        let png = page
+            .screenshot_png(full_page)
+            .await
+            .map_err(browser_error("browser_screenshot failed"))?;
+        let metadata = json!({ "size_bytes": png.len() }).to_string();
+
+        Ok(CallToolResult::success(vec![
+            ContentBlock::text(metadata),
+            ContentBlock::image(BASE64_STANDARD.encode(png), "image/png"),
+        ]))
+    }
+
+    async fn scroll(
+        &self,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let direction = optional_str(arguments.as_ref(), "direction").unwrap_or("down");
+        if !matches!(direction, "up" | "down") {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "browser_scroll direction must be 'up' or 'down'",
+                None,
+            ));
+        }
+
+        let page = self.shared_page().await?;
+        page.scroll(direction)
+            .await
+            .map_err(browser_error("browser_scroll failed"))?;
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Scrolled {direction}"
+        ))]))
+    }
+
+    async fn go_back(&self) -> Result<CallToolResult, ErrorData> {
+        let page = self.shared_page().await?;
+        page.go_back()
+            .await
+            .map_err(browser_error("browser_go_back failed"))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            "Navigated back",
+        )]))
+    }
+
+    async fn list_tabs(&self) -> Result<CallToolResult, ErrorData> {
+        let tabs = self.tab_values().await?;
+        let text = serde_json::to_string_pretty(&tabs).map_err(json_error("browser_list_tabs"))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+    }
+
+    async fn switch_tab(
+        &self,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let tab_id = required_str(arguments.as_ref(), "tab_id", "browser_switch_tab")?;
+        let mut browser = self.browser.lock().await;
+        let shared = browser.as_mut().ok_or_else(no_active_browser_error)?;
+        let page = shared
+            .session
+            .switch_tab(tab_id)
+            .await
+            .map_err(browser_error("browser_switch_tab failed"))?;
+        let state = page
+            .state()
+            .await
+            .map_err(browser_error("browser_switch_tab failed"))?;
+        shared.page = page;
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Switched to tab {tab_id}: {url}",
+            url = state.url
+        ))]))
+    }
+
+    async fn close_tab(
+        &self,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let tab_id = required_str(arguments.as_ref(), "tab_id", "browser_close_tab")?;
+        let mut browser = self.browser.lock().await;
+        let shared = browser.as_mut().ok_or_else(no_active_browser_error)?;
+        let closing_active = shared.page.target_id().ends_with(tab_id);
+
+        shared
+            .session
+            .close_tab(tab_id)
+            .await
+            .map_err(browser_error("browser_close_tab failed"))?;
+
+        if closing_active {
+            if let Ok(page) = shared.session.switch_tab("0").await {
+                shared.page = page;
+            }
+        }
+
+        let current_url = shared
+            .page
+            .state()
+            .await
+            .map(|state| state.url)
+            .unwrap_or_default();
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Closed tab # {tab_id}, now on {current_url}"
+        ))]))
+    }
+
+    async fn list_sessions(&self) -> Result<CallToolResult, ErrorData> {
+        let browser = self.browser.lock().await;
+        let Some(shared) = browser.as_ref() else {
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
+                "No active browser sessions",
+            )]));
+        };
+        let url = shared
+            .page
+            .state()
+            .await
+            .map(|state| state.url)
+            .unwrap_or_default();
+        let sessions = json!([
+            {
+                "session_id": SESSION_ID,
+                "active": true,
+                "current_url": url
+            }
+        ]);
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            serde_json::to_string_pretty(&sessions).map_err(json_error("browser_list_sessions"))?,
+        )]))
+    }
+
+    async fn close_session(
+        &self,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let session_id = required_str(arguments.as_ref(), "session_id", "browser_close_session")?;
+        if session_id != SESSION_ID {
+            return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                "Session {session_id} not found"
+            ))]));
+        }
+
+        self.close_active_browser().await?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Successfully closed session {SESSION_ID}"
+        ))]))
+    }
+
+    async fn close_all(&self) -> Result<CallToolResult, ErrorData> {
+        let had_session = self.close_active_browser().await?;
+        let message = if had_session {
+            "Closed 1 sessions"
+        } else {
+            "No active sessions to close"
+        };
+        Ok(CallToolResult::success(vec![ContentBlock::text(message)]))
     }
 
     async fn shared_page(&self) -> Result<BrowserPage, ErrorData> {
@@ -125,11 +328,74 @@ impl BrowserUseMcpServer {
             .map_err(browser_error("failed to create browser page"))?;
 
         *browser = Some(SharedBrowser {
-            _session: session,
+            session,
             page: page.clone(),
         });
 
         Ok(page)
+    }
+
+    async fn new_active_page(&self) -> Result<BrowserPage, ErrorData> {
+        let mut browser = self.browser.lock().await;
+
+        if browser.is_none() {
+            let session = BrowserSession::launch_from_env()
+                .await
+                .map_err(browser_error("failed to launch browser"))?;
+            let page = session
+                .new_page()
+                .await
+                .map_err(browser_error("failed to create browser page"))?;
+            *browser = Some(SharedBrowser { session, page });
+        }
+
+        let shared = browser.as_mut().expect("browser was initialized above");
+        let page = shared
+            .session
+            .new_page()
+            .await
+            .map_err(browser_error("failed to create browser page"))?;
+        shared.page = page.clone();
+        Ok(page)
+    }
+
+    async fn tab_values(&self) -> Result<Vec<Value>, ErrorData> {
+        let browser = self.browser.lock().await;
+        let Some(shared) = browser.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let tabs = shared
+            .session
+            .tabs(Some(&shared.page))
+            .await
+            .map_err(browser_error("failed to list browser tabs"))?;
+
+        Ok(tabs
+            .into_iter()
+            .map(|tab| {
+                json!({
+                    "id": tab.id,
+                    "tab_id": tab.id,
+                    "target_id": tab.target_id,
+                    "url": tab.url,
+                    "title": tab.title,
+                    "active": tab.active
+                })
+            })
+            .collect())
+    }
+
+    async fn close_active_browser(&self) -> Result<bool, ErrorData> {
+        let shared = self.browser.lock().await.take();
+        let Some(shared) = shared else {
+            return Ok(false);
+        };
+        shared
+            .session
+            .close()
+            .await
+            .map_err(browser_error("failed to close browser"))?;
+        Ok(true)
     }
 }
 
@@ -174,6 +440,50 @@ fn browser_error(message: &'static str) -> impl FnOnce(anyhow::Error) -> ErrorDa
             Some(json!({ "error": error.to_string() })),
         )
     }
+}
+
+fn json_error(message: &'static str) -> impl FnOnce(serde_json::Error) -> ErrorData {
+    move |error| {
+        ErrorData::new(
+            ErrorCode::INTERNAL_ERROR,
+            message,
+            Some(json!({ "error": error.to_string() })),
+        )
+    }
+}
+
+fn no_active_browser_error() -> ErrorData {
+    ErrorData::new(
+        ErrorCode::INTERNAL_ERROR,
+        "Error: No browser session active",
+        None,
+    )
+}
+
+fn optional_str<'a>(arguments: Option<&'a Map<String, Value>>, key: &str) -> Option<&'a str> {
+    arguments
+        .and_then(|args| args.get(key))
+        .and_then(Value::as_str)
+}
+
+fn optional_bool(arguments: Option<&Map<String, Value>>, key: &str) -> Option<bool> {
+    arguments
+        .and_then(|args| args.get(key))
+        .and_then(Value::as_bool)
+}
+
+fn required_str<'a>(
+    arguments: Option<&'a Map<String, Value>>,
+    key: &str,
+    tool_name: &str,
+) -> Result<&'a str, ErrorData> {
+    optional_str(arguments, key).ok_or_else(|| {
+        ErrorData::new(
+            ErrorCode::INVALID_PARAMS,
+            format!("{tool_name} requires a string {key} argument"),
+            None,
+        )
+    })
 }
 
 /// Runs the browser-use MCP server over stdio.
@@ -427,11 +737,91 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn low_level_tools_use_live_browser_without_dom_serializer() -> anyhow::Result<()> {
+        let server = BrowserUseMcpServer::new();
+
+        server
+            .call_browser_tool(call(
+                "browser_navigate",
+                json!({"url": "data:text/html,<title>Low Tools</title><main id='app'>OK</main><div style='height:2000px'></div>"}),
+            ))
+            .await?;
+
+        let html = server
+            .call_browser_tool(call("browser_get_html", json!({"selector": "#app"})))
+            .await?;
+        assert_eq!(text_content(&html), "<main id=\"app\">OK</main>");
+
+        let screenshot = server
+            .call_browser_tool(call("browser_screenshot", json!({"full_page": false})))
+            .await?;
+        assert_eq!(screenshot.content.len(), 2);
+        assert!(text_content(&screenshot).contains("\"size_bytes\""));
+        assert!(matches!(
+            screenshot.content.get(1),
+            Some(rmcp::model::ContentBlock::Image(image))
+                if image.mime_type == "image/png" && !image.data.is_empty()
+        ));
+
+        assert_eq!(
+            text_content(
+                &server
+                    .call_browser_tool(call("browser_scroll", json!({"direction": "down"})))
+                    .await?
+            ),
+            "Scrolled down"
+        );
+
+        server
+            .call_browser_tool(call(
+                "browser_navigate",
+                json!({"url": "data:text/html,<title>Second</title>"}),
+            ))
+            .await?;
+        assert_eq!(
+            text_content(
+                &server
+                    .call_browser_tool(call("browser_go_back", json!({})))
+                    .await?
+            ),
+            "Navigated back"
+        );
+
+        let tabs = server
+            .call_browser_tool(call("browser_list_tabs", json!({})))
+            .await?;
+        assert!(text_content(&tabs).contains("Low Tools"));
+
+        let sessions = server
+            .call_browser_tool(call("browser_list_sessions", json!({})))
+            .await?;
+        assert!(text_content(&sessions).contains("default"));
+
+        let closed = server
+            .call_browser_tool(call(
+                "browser_close_session",
+                json!({"session_id": "default"}),
+            ))
+            .await?;
+        assert_eq!(text_content(&closed), "Successfully closed session default");
+
+        Ok(())
+    }
+
     fn call(name: &'static str, arguments: Value) -> CallToolRequestParams {
         let Value::Object(arguments) = arguments else {
             unreachable!("test arguments are object literals")
         };
 
         CallToolRequestParams::new(name).with_arguments(Map::from_iter(arguments))
+    }
+
+    fn text_content(result: &rmcp::model::CallToolResult) -> &str {
+        match result.content.first() {
+            Some(rmcp::model::ContentBlock::Text(text)) => text.text.as_str(),
+            other => panic!("expected first text content block, got {other:?}"),
+        }
     }
 }

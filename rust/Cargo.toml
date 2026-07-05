@@ -20,6 +20,7 @@ license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1"
+base64 = "0.22"
 chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
 futures-util = "0.3"
 rmcp = { version = "2.1", features = ["transport-io"] }

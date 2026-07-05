@@ -10,7 +10,9 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use chromiumoxide::{
     browser::{Browser, BrowserConfig},
+    cdp::browser_protocol::page::CaptureScreenshotFormat,
     page::Page,
+    page::ScreenshotParams,
 };
 use futures_util::StreamExt;
 use tokio::{sync::Mutex, task::JoinHandle};
@@ -50,6 +52,21 @@ pub struct PageState {
     pub url: String,
     /// Current page title.
     pub title: String,
+}
+
+/// Metadata for an open browser tab/page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabInfo {
+    /// Browser Use short tab id, matching the Python MCP server convention.
+    pub id: String,
+    /// Full Chromium target id.
+    pub target_id: String,
+    /// Current page URL.
+    pub url: String,
+    /// Current page title.
+    pub title: String,
+    /// Whether this tab is the active MCP tab.
+    pub active: bool,
 }
 
 /// A launched Chromium session.
@@ -125,6 +142,79 @@ impl BrowserSession {
 
         Ok(BrowserPage { page })
     }
+
+    /// Returns metadata for all open pages.
+    pub async fn tabs(&self, active_page: Option<&BrowserPage>) -> Result<Vec<TabInfo>> {
+        let pages = self
+            .browser
+            .lock()
+            .await
+            .pages()
+            .await
+            .context("failed to list Chromium pages")?;
+        let active_target_id = active_page.map(BrowserPage::target_id);
+
+        let mut tabs = Vec::with_capacity(pages.len());
+        for page in pages {
+            let browser_page = BrowserPage { page };
+            let state = browser_page.state().await?;
+            let target_id = browser_page.target_id();
+            tabs.push(TabInfo {
+                id: short_tab_id(&target_id),
+                active: active_target_id.as_ref() == Some(&target_id),
+                target_id,
+                url: state.url,
+                title: state.title,
+            });
+        }
+
+        Ok(tabs)
+    }
+
+    /// Activates and returns a page selected by short id, full target id, or index.
+    pub async fn switch_tab(&self, tab_ref: &str) -> Result<BrowserPage> {
+        let page = self.resolve_tab(tab_ref).await?;
+        page.page
+            .activate()
+            .await
+            .with_context(|| format!("failed to activate tab {tab_ref}"))?;
+        Ok(page)
+    }
+
+    /// Closes a page selected by short id, full target id, or index.
+    pub async fn close_tab(&self, tab_ref: &str) -> Result<()> {
+        let page = self.resolve_tab(tab_ref).await?;
+        page.page
+            .close()
+            .await
+            .with_context(|| format!("failed to close tab {tab_ref}"))?;
+        Ok(())
+    }
+
+    /// Closes the Chromium browser.
+    pub async fn close(&self) -> Result<()> {
+        self.browser
+            .lock()
+            .await
+            .close()
+            .await
+            .context("failed to close Chromium browser")?;
+        Ok(())
+    }
+
+    async fn resolve_tab(&self, tab_ref: &str) -> Result<BrowserPage> {
+        let pages = self
+            .browser
+            .lock()
+            .await
+            .pages()
+            .await
+            .context("failed to list Chromium pages")?;
+        let page =
+            page_by_ref(pages, tab_ref).with_context(|| format!("tab {tab_ref} not found"))?;
+
+        Ok(BrowserPage { page })
+    }
 }
 
 impl Drop for BrowserSession {
@@ -177,6 +267,79 @@ impl BrowserPage {
             .context("failed to read page content")
     }
 
+    /// Returns full page HTML, or one selected element's outer HTML.
+    pub async fn html(&self, selector: Option<&str>) -> Result<String> {
+        if let Some(selector) = selector {
+            return self
+                .page
+                .find_element(selector)
+                .await
+                .with_context(|| format!("no element found for selector: {selector}"))?
+                .outer_html()
+                .await
+                .context("failed to read element outer HTML")?
+                .with_context(|| format!("no element found for selector: {selector}"));
+        }
+
+        self.content().await
+    }
+
+    /// Captures a PNG screenshot.
+    pub async fn screenshot_png(&self, full_page: bool) -> Result<Vec<u8>> {
+        self.page
+            .screenshot(
+                ScreenshotParams::builder()
+                    .format(CaptureScreenshotFormat::Png)
+                    .full_page(full_page)
+                    .build(),
+            )
+            .await
+            .context("failed to capture page screenshot")
+    }
+
+    /// Scrolls the page by one standard MCP increment.
+    pub async fn scroll(&self, direction: &str) -> Result<()> {
+        let amount = match direction {
+            "up" => -500,
+            "down" => 500,
+            other => return Err(anyhow!("unsupported scroll direction: {other}")),
+        };
+        let script = format!("window.scrollBy(0, {amount})");
+        self.page
+            .evaluate(script)
+            .await
+            .context("failed to scroll page")?;
+        Ok(())
+    }
+
+    /// Returns the current vertical scroll offset.
+    pub async fn scroll_y(&self) -> Result<f64> {
+        self.page
+            .evaluate("window.scrollY")
+            .await
+            .context("failed to read scroll position")?
+            .into_value()
+            .context("failed to decode scroll position")
+    }
+
+    /// Navigates back in browser history.
+    pub async fn go_back(&self) -> Result<()> {
+        self.page
+            .evaluate("window.history.back()")
+            .await
+            .context("failed to navigate back")?;
+        self.page
+            .wait_for_navigation()
+            .await
+            .context("failed waiting for back navigation")?;
+        Ok(())
+    }
+
+    /// Returns this page's full Chromium target id.
+    pub fn target_id(&self) -> String {
+        self.page.target_id().as_ref().to_string()
+    }
+
     /// Returns whether the current DOM has at least one match for `selector`.
     pub async fn query_selector_exists(&self, selector: &str) -> Result<bool> {
         let script = format!(
@@ -191,6 +354,35 @@ impl BrowserPage {
             .into_value()
             .context("failed to decode selector query result")
     }
+}
+
+fn short_tab_id(target_id: &str) -> String {
+    target_id
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+
+fn page_by_ref(pages: Vec<Page>, tab_ref: &str) -> Option<Page> {
+    if let Ok(index) = tab_ref.parse::<usize>() {
+        if let Some(page) = pages.get(index).cloned() {
+            return Some(page);
+        }
+        if index > 0 {
+            if let Some(page) = pages.get(index - 1).cloned() {
+                return Some(page);
+            }
+        }
+    }
+
+    pages.into_iter().find(|page| {
+        let target_id = page.target_id().as_ref();
+        target_id == tab_ref || short_tab_id(target_id) == tab_ref
+    })
 }
 
 fn headless_from_env() -> bool {
@@ -280,6 +472,71 @@ mod live_tests {
         let state = page.state().await?;
         assert_eq!(state.title, "Rust CDP");
         assert!(state.url.starts_with("data:text/html"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn page_helpers_return_html_screenshot_scroll_and_history() -> anyhow::Result<()> {
+        let session = BrowserSession::launch_headless().await?;
+        let page = session.new_page().await?;
+
+        page.navigate(
+            "data:text/html,<title>First</title><main id='app'><p>one</p></main><div style='height:2000px'></div>",
+        )
+        .await?;
+        let html = page.html(Some("#app")).await?;
+        assert_eq!(html, "<main id=\"app\"><p>one</p></main>");
+
+        let screenshot = page.screenshot_png(false).await?;
+        assert!(screenshot.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+        page.scroll("down").await?;
+        let scroll_y = page.scroll_y().await?;
+        assert!(scroll_y > 0.0);
+
+        page.navigate("data:text/html,<title>Second</title><main>two</main>")
+            .await?;
+        page.go_back().await?;
+
+        let state = page.state().await?;
+        assert_eq!(state.title, "First");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn manages_pages_as_tabs() -> anyhow::Result<()> {
+        let session = BrowserSession::launch_headless().await?;
+        let first = session.new_page().await?;
+        first
+            .navigate("data:text/html,<title>First Tab</title>")
+            .await?;
+        let second = session.new_page().await?;
+        second
+            .navigate("data:text/html,<title>Second Tab</title>")
+            .await?;
+
+        let tabs = session.tabs(Some(&first)).await?;
+        assert!(tabs
+            .iter()
+            .any(|tab| tab.title == "First Tab" && tab.active));
+        assert!(tabs
+            .iter()
+            .any(|tab| tab.title == "Second Tab" && !tab.active));
+
+        let second_id = tabs
+            .iter()
+            .find(|tab| tab.title == "Second Tab")
+            .expect("second tab should be listed")
+            .id
+            .clone();
+        let switched = session.switch_tab(&second_id).await?;
+        assert_eq!(switched.state().await?.title, "Second Tab");
+
+        session.close_tab(&second_id).await?;
+        let tabs = session.tabs(Some(&first)).await?;
+        assert!(!tabs.iter().any(|tab| tab.title == "Second Tab"));
 
         Ok(())
     }
