@@ -319,9 +319,10 @@ pub struct BrowserPage {
 impl BrowserPage {
     /// Navigates this page to `url`.
     pub async fn navigate(&self, url: &str) -> Result<()> {
-        self.page
-            .goto(url)
+        // Bound navigation so a stalled/streaming page cannot hang the actor.
+        tokio::time::timeout(std::time::Duration::from_secs(30), self.page.goto(url))
             .await
+            .with_context(|| format!("navigation to {url} timed out"))?
             .with_context(|| format!("failed to navigate to {url}"))?;
         Ok(())
     }
@@ -414,10 +415,14 @@ impl BrowserPage {
             .evaluate("window.history.back()")
             .await
             .context("failed to navigate back")?;
-        self.page
-            .wait_for_navigation()
-            .await
-            .context("failed waiting for back navigation")?;
+        // Back navigation may not fire a lifecycle event (SPA hash routes, data:
+        // URLs, no history entry); wait briefly but never hang or hard-fail if it
+        // doesn't. (Review item 1.6 — robust go_back.)
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.page.wait_for_navigation(),
+        )
+        .await;
         Ok(())
     }
 
