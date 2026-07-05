@@ -1,87 +1,61 @@
 //! Autonomous browser-use agent loop.
+//!
+//! Perceive (DOM + optional screenshot) -> decide (LLM, multi-action + reasoning)
+//! -> act (browser actor). Mirrors the Python MCP `retry_with_browser_use_agent`
+//! tool: same report wording, `use_vision`, and provider-agnostic LLM backend.
 
+mod action;
+mod report;
+
+use action::{parse_output, AgentAction};
 use bu_actor::ActorHandle;
 use bu_dom::extract_clean_markdown;
-use bu_llm::{message, OpenAiChatClient};
-use serde::Deserialize;
+use bu_llm::{message, message_with_image, LlmProvider};
 use serde_json::json;
 
-/// Summary returned by an autonomous agent run.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentRunReport {
-    /// Number of model-directed steps attempted.
-    pub steps: usize,
-    /// Whether the model marked the task as successful.
-    pub success: bool,
-    /// Final model-provided task result, if any.
-    pub final_result: String,
-    /// Per-step errors encountered during the run.
-    pub errors: Vec<String>,
-    /// URLs observed while the agent was running.
-    pub urls_visited: Vec<String>,
-}
+pub use report::AgentRunReport;
 
-impl AgentRunReport {
-    /// Formats this report with the Python MCP retry tool wording.
-    pub fn to_python_report(&self) -> String {
-        format!(
-            "Task completed in {steps} steps\nSuccess: {success}\nFinal result: {result}\nErrors encountered: {errors}\nURLs visited: {urls}",
-            steps = self.steps,
-            success = self.success,
-            result = self.final_result,
-            errors = serde_json::to_string(&self.errors).unwrap_or_else(|_| "[]".to_owned()),
-            urls = self.urls_visited.join(",")
-        )
-    }
-}
+use report::push_unique_url;
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-enum AgentAction {
-    Navigate { url: String },
-    Click { index: usize },
-    Type { index: usize, text: String },
-    Scroll { direction: ScrollDirection },
-    Extract { query: String },
-    Done { success: bool, result: String },
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ScrollDirection {
-    Down,
-    Up,
-}
-
-impl ScrollDirection {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Down => "down",
-            Self::Up => "up",
-        }
-    }
-}
+const AGENT_SYSTEM_PROMPT: &str = r#"You drive a browser to complete the user's task.
+Reply with exactly ONE JSON object and no prose, in this shape:
+{"evaluation_previous_goal":"...","memory":"...","next_goal":"...","actions":[ ... ]}
+- evaluation_previous_goal: did the previous step achieve its goal? (brief)
+- memory: durable facts to carry across steps (what you have found/done so far).
+- next_goal: what you intend to accomplish with these actions.
+- actions: an ordered list of one or more actions to run this step. You may batch
+  independent actions (e.g. several "type"s), but the batch stops after any
+  navigation or click, so put those last.
+Each action is one of:
+{"action":"navigate","url":"https://example.com"}
+{"action":"click","index":0}
+{"action":"type","index":0,"text":"text"}
+{"action":"scroll","direction":"down"}
+{"action":"scroll","direction":"up"}
+{"action":"extract","query":"question"}
+{"action":"done","success":true,"result":"final answer"}
+Indices refer to interactive_elements in the current state. When the task is
+complete (or impossible), return a single "done" action with the result."#;
 
 /// Runs an autonomous agent task against an existing browser actor.
+///
+/// When `use_vision` is set, each step attaches the page screenshot to the model
+/// prompt (multimodal), matching the Python agent's default behaviour.
 pub async fn run_task(
     task: impl Into<String>,
     max_steps: usize,
     actor: ActorHandle,
-    llm: OpenAiChatClient,
+    llm: &LlmProvider,
+    use_vision: bool,
 ) -> AgentRunReport {
     let task = task.into();
-    let mut report = AgentRunReport {
-        steps: 0,
-        success: false,
-        final_result: String::new(),
-        errors: Vec::new(),
-        urls_visited: Vec::new(),
-    };
+    let mut report = AgentRunReport::default();
+    let mut agent_memory = String::new();
 
     for _ in 0..max_steps {
         report.steps += 1;
 
-        let snapshot = match actor.get_state(false).await {
+        let snapshot = match actor.get_state(use_vision).await {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 report.errors.push(format!("get_state failed: {error}"));
@@ -90,10 +64,11 @@ pub async fn run_task(
         };
         push_unique_url(&mut report.urls_visited, snapshot.page.url.clone());
 
+        let screenshot = snapshot.screenshot.clone();
         let state = json!({
             "url": snapshot.page.url,
             "title": snapshot.page.title,
-            "interactive_elements": snapshot.elements.into_iter().map(|element| {
+            "interactive_elements": snapshot.elements.iter().map(|element| {
                 json!({
                     "index": element.index,
                     "tag": element.tag,
@@ -101,17 +76,18 @@ pub async fn run_task(
                 })
             }).collect::<Vec<_>>()
         });
+        let user_text = format!(
+            "<task>\n{task}\n</task>\n\n<memory>\n{memory}\n</memory>\n\n<current_state>\n{state}\n</current_state>",
+            memory = agent_memory,
+            state = serde_json::to_string_pretty(&state).unwrap_or_else(|_| state.to_string()),
+        );
+        let user_message = match (use_vision, screenshot.as_deref()) {
+            (true, Some(png)) => message_with_image("user", user_text, png),
+            _ => message("user", user_text),
+        };
+
         let response = match llm
-            .chat(vec![
-                message("system", AGENT_SYSTEM_PROMPT),
-                message(
-                    "user",
-                    format!(
-                        "<task>\n{task}\n</task>\n\n<current_state>\n{}\n</current_state>",
-                        serde_json::to_string_pretty(&state).unwrap_or_else(|_| state.to_string())
-                    ),
-                ),
-            ])
+            .chat(vec![message("system", AGENT_SYSTEM_PROMPT), user_message])
             .await
         {
             Ok(response) => response,
@@ -121,77 +97,126 @@ pub async fn run_task(
             }
         };
 
-        let action = match parse_action(&response) {
-            Ok(action) => action,
+        let output = match parse_output(&response) {
+            Ok(output) => output,
             Err(error) => {
                 report.errors.push(format!("invalid agent action: {error}"));
                 break;
             }
         };
 
-        match execute_action(action, &actor, &llm).await {
-            ActionExecution::Continue => {}
-            ActionExecution::Done { success, result } => {
-                report.success = success;
-                report.final_result = result;
-                break;
+        tracing::debug!(
+            evaluation = %output.evaluation_previous_goal,
+            next_goal = %output.next_goal,
+            actions = output.actions.len(),
+            "agent step"
+        );
+
+        let mut observations = Vec::new();
+        let mut batch_done = false;
+        for action in output.actions {
+            match execute_action(action, &actor, llm).await {
+                Step::Continue {
+                    rerender,
+                    observation,
+                } => {
+                    if let Some(observation) = observation {
+                        observations.push(observation);
+                    }
+                    if rerender {
+                        break;
+                    }
+                }
+                Step::Done { success, result } => {
+                    report.success = success;
+                    report.final_result = result;
+                    batch_done = true;
+                    break;
+                }
+                Step::Error(error) => {
+                    report.errors.push(error);
+                    break;
+                }
             }
-            ActionExecution::Error(error) => {
-                report.errors.push(error);
-            }
+        }
+
+        // Carry the model's memory + any extraction results into the next prompt.
+        agent_memory = [output.memory]
+            .into_iter()
+            .chain(observations)
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if batch_done {
+            break;
         }
     }
 
     report
 }
 
-const AGENT_SYSTEM_PROMPT: &str = r#"You drive a browser to complete the user's task.
-You MUST reply with exactly one JSON object and no prose.
-Choose one action:
-{"action":"navigate","url":"https://example.com"}
-{"action":"click","index":0}
-{"action":"type","index":0,"text":"text"}
-{"action":"scroll","direction":"down"}
-{"action":"scroll","direction":"up"}
-{"action":"extract","query":"question"}
-{"action":"done","success":true,"result":"final answer"}"#;
-
-enum ActionExecution {
-    Continue,
-    Done { success: bool, result: String },
+enum Step {
+    /// Action succeeded. `rerender` forces re-observation before the next action
+    /// (navigation/click may invalidate element indices); `observation` carries
+    /// extraction text back into the agent's memory.
+    Continue {
+        rerender: bool,
+        observation: Option<String>,
+    },
+    Done {
+        success: bool,
+        result: String,
+    },
     Error(String),
 }
 
-async fn execute_action(
-    action: AgentAction,
-    actor: &ActorHandle,
-    llm: &OpenAiChatClient,
-) -> ActionExecution {
-    let result = match action {
-        AgentAction::Navigate { url } => actor.navigate(url, false).await,
-        AgentAction::Click { index } => actor.click(index, false).await.map(|_| ()),
-        AgentAction::Type { index, text } => actor.type_text(index, text).await,
-        AgentAction::Scroll { direction } => actor.scroll(direction.as_str().to_owned()).await,
-        AgentAction::Extract { query } => {
-            return match extract_with_llm(actor, llm, &query).await {
-                Ok(_) => ActionExecution::Continue,
-                Err(error) => ActionExecution::Error(format!("extract failed: {error}")),
-            };
+async fn execute_action(action: AgentAction, actor: &ActorHandle, llm: &LlmProvider) -> Step {
+    match action {
+        AgentAction::Navigate { url } => match actor.navigate(url, false).await {
+            Ok(()) => Step::Continue {
+                rerender: true,
+                observation: None,
+            },
+            Err(error) => Step::Error(format!("navigate failed: {error}")),
+        },
+        AgentAction::Click { index } => match actor.click(index, false).await {
+            Ok(_) => Step::Continue {
+                rerender: true,
+                observation: None,
+            },
+            Err(error) => Step::Error(format!("click failed: {error}")),
+        },
+        AgentAction::Type { index, text } => match actor.type_text(index, text).await {
+            Ok(()) => Step::Continue {
+                rerender: false,
+                observation: None,
+            },
+            Err(error) => Step::Error(format!("type failed: {error}")),
+        },
+        AgentAction::Scroll { direction } => {
+            match actor.scroll(direction.as_str().to_owned()).await {
+                Ok(()) => Step::Continue {
+                    rerender: false,
+                    observation: None,
+                },
+                Err(error) => Step::Error(format!("scroll failed: {error}")),
+            }
         }
-        AgentAction::Done { success, result } => {
-            return ActionExecution::Done { success, result };
-        }
-    };
-
-    match result {
-        Ok(()) => ActionExecution::Continue,
-        Err(error) => ActionExecution::Error(format!("action failed: {error}")),
+        AgentAction::Extract { query } => match extract_with_llm(actor, llm, &query).await {
+            Ok(result) => Step::Continue {
+                rerender: false,
+                observation: Some(format!("extract({query}): {result}")),
+            },
+            Err(error) => Step::Error(format!("extract failed: {error}")),
+        },
+        AgentAction::Done { success, result } => Step::Done { success, result },
     }
 }
 
 async fn extract_with_llm(
     actor: &ActorHandle,
-    llm: &OpenAiChatClient,
+    llm: &LlmProvider,
     query: &str,
 ) -> anyhow::Result<String> {
     let html = actor.get_html(None).await?;
@@ -209,33 +234,6 @@ async fn extract_with_llm(
     .await
 }
 
-fn parse_action(response: &str) -> anyhow::Result<AgentAction> {
-    let stripped = strip_code_fence(response.trim());
-    Ok(serde_json::from_str(stripped)?)
-}
-
-fn strip_code_fence(text: &str) -> &str {
-    let Some(after_opening) = text.strip_prefix("```") else {
-        return text;
-    };
-    let after_language = after_opening
-        .strip_prefix("json")
-        .or_else(|| after_opening.strip_prefix("JSON"))
-        .unwrap_or(after_opening)
-        .trim_start_matches(['\r', '\n']);
-    after_language
-        .strip_suffix("```")
-        .map(str::trim)
-        .unwrap_or(text)
-}
-
-fn push_unique_url(urls: &mut Vec<String>, url: String) {
-    if url.is_empty() || urls.iter().any(|seen| seen == &url) {
-        return;
-    }
-    urls.push(url);
-}
-
 #[cfg(all(test, feature = "live-chrome"))]
 mod tests {
     use std::{
@@ -245,7 +243,7 @@ mod tests {
     };
 
     use bu_actor::ActorHandle;
-    use bu_llm::{OpenAiChatClient, OpenAiChatConfig};
+    use bu_llm::{LlmProvider, OpenAiChatClient, OpenAiChatConfig};
     use serde_json::{json, Value};
 
     #[tokio::test]
@@ -261,11 +259,13 @@ mod tests {
             model: "mock-model".to_owned(),
             temperature: None,
         })?;
+        let provider = LlmProvider::OpenAi(llm);
         let actor = ActorHandle::spawn();
         let page = "data:text/html,<title>Agent Test</title><button onclick='document.body.dataset.clicked=\"yes\"'>Flip</button>";
         actor.navigate(page.to_owned(), false).await?;
 
-        let report = crate::run_task("Click the Flip button", 4, actor.clone(), llm).await;
+        let report =
+            crate::run_task("Click the Flip button", 4, actor.clone(), &provider, false).await;
 
         assert_eq!(report.steps, 2);
         assert!(report.success);
@@ -296,6 +296,45 @@ mod tests {
                         && content.contains("interactive_elements"))),
             "{requests:#?}"
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_task_attaches_screenshot_when_vision_enabled() -> anyhow::Result<()> {
+        let llm_server = ScriptedLlmServer::spawn(vec![
+            json!({"action": "done", "success": true, "result": "seen"}).to_string(),
+        ]);
+        let provider = LlmProvider::OpenAi(OpenAiChatClient::new(OpenAiChatConfig {
+            api_key: "test-key".to_owned(),
+            base_url: llm_server.base_url(),
+            model: "mock-model".to_owned(),
+            temperature: None,
+        })?);
+        let actor = ActorHandle::spawn();
+        actor
+            .navigate(
+                "data:text/html,<title>Vision</title><main>hi</main>".to_owned(),
+                false,
+            )
+            .await?;
+
+        let report = crate::run_task("Describe the page", 2, actor.clone(), &provider, true).await;
+        assert!(report.success, "{:?}", report.errors);
+
+        let requests = llm_server.join();
+        assert_eq!(requests.len(), 1);
+        // With vision, the user message content is a multimodal parts array with an image_url.
+        let parts = &requests[0]["messages"][1]["content"];
+        assert!(
+            parts.is_array(),
+            "vision content should be an array: {parts:#?}"
+        );
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert!(parts[1]["image_url"]["url"]
+            .as_str()
+            .is_some_and(|url| url.starts_with("data:image/png;base64,")));
 
         Ok(())
     }

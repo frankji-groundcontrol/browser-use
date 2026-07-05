@@ -12,6 +12,7 @@ bu-llm = { path = "../bu-llm" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [features]
 live-chrome = ["bu-actor/live-chrome"]

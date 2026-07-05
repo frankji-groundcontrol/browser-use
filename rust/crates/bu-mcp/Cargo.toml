@@ -17,3 +17,5 @@ tokio.workspace = true
 
 [features]
 live-chrome = ["bu-actor/live-chrome", "bu-agent/live-chrome"]
+# AWS Bedrock agent provider (MODEL_PROVIDER=bedrock). Forwards to bu-llm.
+bedrock = ["bu-llm/bedrock"]

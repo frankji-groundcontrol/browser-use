@@ -264,10 +264,11 @@ impl BrowserUseMcpServer {
             .unwrap_or(100)
             .max(1) as usize;
         let model = optional_str(arguments.as_ref(), "model").map(str::to_owned);
-        let config =
-            bu_llm::OpenAiChatConfig::from_env_with_model_override(model).map_err(llm_error)?;
-        let llm = OpenAiChatClient::new(config).map_err(llm_error)?;
-        let report = bu_agent::run_task(task, max_steps, self.actor.clone(), llm).await;
+        // Python's retry tool defaults use_vision to true.
+        let use_vision = optional_bool(arguments.as_ref(), "use_vision").unwrap_or(true);
+        let provider = build_agent_llm(model).await?;
+        let report =
+            bu_agent::run_task(task, max_steps, self.actor.clone(), &provider, use_vision).await;
         Ok(CallToolResult::success(vec![ContentBlock::text(
             report.to_python_report(),
         )]))
@@ -529,6 +530,29 @@ fn llm_error(error: anyhow::Error) -> ErrorData {
         "browser_extract_content failed",
         Some(json!({ "error": error.to_string() })),
     )
+}
+
+/// Builds the agent LLM backend, mirroring Python's provider selection: AWS
+/// Bedrock when `MODEL_PROVIDER=bedrock` (requires the `bedrock` build feature),
+/// otherwise an OpenAI-compatible client.
+async fn build_agent_llm(model: Option<String>) -> Result<bu_llm::LlmProvider, ErrorData> {
+    #[cfg(feature = "bedrock")]
+    {
+        let is_bedrock = std::env::var("MODEL_PROVIDER")
+            .map(|value| value.eq_ignore_ascii_case("bedrock"))
+            .unwrap_or(false);
+        if is_bedrock {
+            let client = bu_llm::BedrockChatClient::from_env_with_model_override(model)
+                .await
+                .map_err(llm_error)?;
+            return Ok(bu_llm::LlmProvider::Bedrock(client));
+        }
+    }
+
+    let config =
+        bu_llm::OpenAiChatConfig::from_env_with_model_override(model).map_err(llm_error)?;
+    let client = OpenAiChatClient::new(config).map_err(llm_error)?;
+    Ok(bu_llm::LlmProvider::OpenAi(client))
 }
 
 fn optional_str<'a>(arguments: Option<&'a Map<String, Value>>, key: &str) -> Option<&'a str> {
