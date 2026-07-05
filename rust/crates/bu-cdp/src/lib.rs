@@ -10,7 +10,14 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use chromiumoxide::{
     browser::{Browser, BrowserConfig},
-    cdp::browser_protocol::page::CaptureScreenshotFormat,
+    cdp::browser_protocol::{
+        dom::{BackendNodeId, FocusParams, GetBoxModelParams, GetDocumentParams, Node},
+        input::{
+            DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams,
+            DispatchMouseEventType, InsertTextParams, MouseButton,
+        },
+        page::CaptureScreenshotFormat,
+    },
     page::Page,
     page::ScreenshotParams,
 };
@@ -67,6 +74,37 @@ pub struct TabInfo {
     pub title: String,
     /// Whether this tab is the active MCP tab.
     pub active: bool,
+}
+
+/// One interactive element in the current live DOM selector map.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectorMapElement {
+    /// Stable only for the current selector-map snapshot.
+    pub index: usize,
+    /// Chromium backend node id used for follow-up DOM operations.
+    pub backend_node_id: BackendNodeId,
+    /// Lowercase tag name.
+    pub tag: String,
+    /// Short label or visible descendant text.
+    pub text: String,
+    /// Center X coordinate in CSS pixels relative to the viewport.
+    pub x: f64,
+    /// Center Y coordinate in CSS pixels relative to the viewport.
+    pub y: f64,
+}
+
+#[derive(Debug)]
+struct SelectorCandidate {
+    backend_node_id: BackendNodeId,
+    tag: String,
+    text: String,
+}
+
+impl SelectorMapElement {
+    /// Returns the raw CDP backend node id.
+    pub fn backend_node_id_value(&self) -> i64 {
+        *self.backend_node_id.inner()
+    }
 }
 
 /// A launched Chromium session.
@@ -354,6 +392,248 @@ impl BrowserPage {
             .into_value()
             .context("failed to decode selector query result")
     }
+
+    /// Builds a first-cut selector map from Chromium's live flattened DOM.
+    pub async fn selector_map(&self) -> Result<Vec<SelectorMapElement>> {
+        let root = self
+            .page
+            .execute(GetDocumentParams::builder().depth(-1).pierce(true).build())
+            .await
+            .context("failed to read flattened DOM")?
+            .result
+            .root;
+
+        let mut candidates = Vec::new();
+        collect_interactive_candidates(&root, &mut candidates);
+
+        let mut elements = Vec::new();
+        for candidate in candidates {
+            if let Some((x, y)) = self.box_center(candidate.backend_node_id).await? {
+                elements.push(SelectorMapElement {
+                    index: elements.len(),
+                    backend_node_id: candidate.backend_node_id,
+                    tag: candidate.tag,
+                    text: candidate.text,
+                    x,
+                    y,
+                });
+            }
+        }
+
+        Ok(elements)
+    }
+
+    /// Clicks an element from the current selector map by index.
+    pub async fn click_element(&self, index: usize) -> Result<()> {
+        let element = self
+            .selector_map()
+            .await?
+            .into_iter()
+            .find(|element| element.index == index)
+            .with_context(|| format!("interactive element index {index} not found"))?;
+
+        self.dispatch_mouse_event(DispatchMouseEventType::MousePressed, &element)
+            .await?;
+        self.dispatch_mouse_event(DispatchMouseEventType::MouseReleased, &element)
+            .await?;
+        Ok(())
+    }
+
+    /// Focuses an indexed element and types text into it.
+    pub async fn type_into_element(&self, index: usize, text: &str) -> Result<()> {
+        let element = self
+            .selector_map()
+            .await?
+            .into_iter()
+            .find(|element| element.index == index)
+            .with_context(|| format!("interactive element index {index} not found"))?;
+
+        self.page
+            .execute(
+                FocusParams::builder()
+                    .backend_node_id(element.backend_node_id)
+                    .build(),
+            )
+            .await
+            .with_context(|| format!("failed to focus interactive element index {index}"))?;
+
+        if let Err(insert_error) = self.page.execute(InsertTextParams::new(text)).await {
+            self.dispatch_text_as_key_events(text)
+                .await
+                .with_context(|| {
+                    format!("failed to type text after insertText failed: {insert_error}")
+                })?;
+        }
+
+        Ok(())
+    }
+
+    async fn box_center(&self, backend_node_id: BackendNodeId) -> Result<Option<(f64, f64)>> {
+        let box_model = match self
+            .page
+            .execute(
+                GetBoxModelParams::builder()
+                    .backend_node_id(backend_node_id)
+                    .build(),
+            )
+            .await
+        {
+            Ok(response) => response.result.model,
+            Err(_) => return Ok(None),
+        };
+        let border = box_model.border.inner();
+        if border.len() < 8 || box_model.width <= 0 || box_model.height <= 0 {
+            return Ok(None);
+        }
+
+        let x = (border[0] + border[2] + border[4] + border[6]) / 4.0;
+        let y = (border[1] + border[3] + border[5] + border[7]) / 4.0;
+        Ok(Some((x, y)))
+    }
+
+    async fn dispatch_mouse_event(
+        &self,
+        event_type: DispatchMouseEventType,
+        element: &SelectorMapElement,
+    ) -> Result<()> {
+        let buttons = if event_type == DispatchMouseEventType::MousePressed {
+            1
+        } else {
+            0
+        };
+        self.page
+            .execute(
+                DispatchMouseEventParams::builder()
+                    .r#type(event_type)
+                    .x(element.x)
+                    .y(element.y)
+                    .button(MouseButton::Left)
+                    .buttons(buttons)
+                    .click_count(1)
+                    .build()
+                    .map_err(|error| anyhow!("failed to build mouse event: {error}"))?,
+            )
+            .await
+            .context("failed to dispatch mouse event")?;
+        Ok(())
+    }
+
+    async fn dispatch_text_as_key_events(&self, text: &str) -> Result<()> {
+        for ch in text.chars() {
+            let text = ch.to_string();
+            self.page
+                .execute(
+                    DispatchKeyEventParams::builder()
+                        .r#type(DispatchKeyEventType::Char)
+                        .text(text.clone())
+                        .unmodified_text(text)
+                        .build()
+                        .map_err(|error| anyhow!("failed to build key event: {error}"))?,
+                )
+                .await
+                .context("failed to dispatch key event")?;
+        }
+
+        Ok(())
+    }
+}
+
+fn collect_interactive_candidates(node: &Node, candidates: &mut Vec<SelectorCandidate>) {
+    if is_interactive_node(node) {
+        candidates.push(SelectorCandidate {
+            backend_node_id: node.backend_node_id,
+            tag: node_tag(node),
+            text: short_text(node_label(node)),
+        });
+    }
+
+    for child in node.children.iter().flatten() {
+        collect_interactive_candidates(child, candidates);
+    }
+    for shadow_root in node.shadow_roots.iter().flatten() {
+        collect_interactive_candidates(shadow_root, candidates);
+    }
+    if let Some(content_document) = &node.content_document {
+        collect_interactive_candidates(content_document, candidates);
+    }
+    if let Some(template_content) = &node.template_content {
+        collect_interactive_candidates(template_content, candidates);
+    }
+}
+
+fn is_interactive_node(node: &Node) -> bool {
+    if node.node_type != 1 {
+        return false;
+    }
+
+    matches!(
+        node_tag(node).as_str(),
+        "a" | "button" | "input" | "select" | "textarea"
+    ) || attr_value(node, "role").is_some_and(|role| role.eq_ignore_ascii_case("button"))
+        || has_attr(node, "onclick")
+        || has_attr(node, "contenteditable")
+}
+
+fn node_tag(node: &Node) -> String {
+    let tag = if node.local_name.is_empty() {
+        &node.node_name
+    } else {
+        &node.local_name
+    };
+    tag.to_ascii_lowercase()
+}
+
+fn node_label(node: &Node) -> String {
+    ["aria-label", "title", "placeholder", "value", "alt"]
+        .into_iter()
+        .filter_map(|name| attr_value(node, name))
+        .find(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| descendant_text(node))
+}
+
+fn descendant_text(node: &Node) -> String {
+    let mut parts = Vec::new();
+    collect_text(node, &mut parts);
+    parts.join(" ")
+}
+
+fn collect_text(node: &Node, parts: &mut Vec<String>) {
+    if node.node_type == 3 {
+        let text = node.node_value.trim();
+        if !text.is_empty() {
+            parts.push(text.to_owned());
+        }
+    }
+
+    for child in node.children.iter().flatten() {
+        collect_text(child, parts);
+    }
+    for shadow_root in node.shadow_roots.iter().flatten() {
+        collect_text(shadow_root, parts);
+    }
+}
+
+fn short_text(text: String) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_CHARS: usize = 80;
+    if compact.chars().count() <= MAX_CHARS {
+        return compact;
+    }
+
+    compact.chars().take(MAX_CHARS).collect()
+}
+
+fn attr_value<'a>(node: &'a Node, name: &str) -> Option<&'a str> {
+    node.attributes.as_ref()?.chunks_exact(2).find_map(|chunk| {
+        chunk[0]
+            .eq_ignore_ascii_case(name)
+            .then_some(chunk[1].as_str())
+    })
+}
+
+fn has_attr(node: &Node, name: &str) -> bool {
+    attr_value(node, name).is_some()
 }
 
 fn short_tab_id(target_id: &str) -> String {

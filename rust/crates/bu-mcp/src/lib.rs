@@ -57,6 +57,8 @@ impl BrowserUseMcpServer {
         match request.name.as_ref() {
             "browser_navigate" => self.navigate(request.arguments).await,
             "browser_get_state" => self.get_state().await,
+            "browser_click" => self.click(request.arguments).await,
+            "browser_type" => self.type_text(request.arguments).await,
             "browser_get_html" => self.get_html(request.arguments).await,
             "browser_screenshot" => self.screenshot(request.arguments).await,
             "browser_scroll" => self.scroll(request.arguments).await,
@@ -110,15 +112,60 @@ impl BrowserUseMcpServer {
             .state()
             .await
             .map_err(browser_error("browser_get_state failed"))?;
+        let elements = page
+            .selector_map()
+            .await
+            .map_err(browser_error("browser_get_state failed"))?
+            .into_iter()
+            .map(|element| {
+                json!({
+                    "index": element.index,
+                    "tag": element.tag,
+                    "text": element.text
+                })
+            })
+            .collect::<Vec<_>>();
         let tabs = self.tab_values().await?;
 
         let payload = json!({
             "url": state.url,
             "title": state.title,
+            "elements": elements,
             "tabs": tabs
         });
 
         Ok(CallToolResult::structured(payload))
+    }
+
+    async fn click(
+        &self,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let index = required_usize(arguments.as_ref(), "index", "browser_click")?;
+        let page = self.shared_page().await?;
+        page.click_element(index)
+            .await
+            .map_err(browser_error("browser_click failed"))?;
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Clicked element {index}"
+        ))]))
+    }
+
+    async fn type_text(
+        &self,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let index = required_usize(arguments.as_ref(), "index", "browser_type")?;
+        let text = required_str(arguments.as_ref(), "text", "browser_type")?;
+        let page = self.shared_page().await?;
+        page.type_into_element(index, text)
+            .await
+            .map_err(browser_error("browser_type failed"))?;
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Typed text into element {index}"
+        ))]))
     }
 
     async fn get_html(
@@ -486,6 +533,28 @@ fn required_str<'a>(
     })
 }
 
+fn required_usize(
+    arguments: Option<&Map<String, Value>>,
+    key: &str,
+    tool_name: &str,
+) -> Result<usize, ErrorData> {
+    arguments
+        .and_then(|args| args.get(key))
+        .and_then(|value| match value {
+            Value::Number(number) => number
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok()),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                format!("{tool_name} requires an unsigned integer {key} argument"),
+                None,
+            )
+        })
+}
+
 /// Runs the browser-use MCP server over stdio.
 pub async fn run_stdio_server() -> anyhow::Result<()> {
     let service = BrowserUseMcpServer::new().serve(stdio()).await?;
@@ -680,8 +749,12 @@ fn schema_object(value: Value) -> Arc<Map<String, Value>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{low_level_tools, BrowserUseMcpServer};
+    use super::low_level_tools;
+    #[cfg(feature = "live-chrome")]
+    use super::BrowserUseMcpServer;
+    #[cfg(feature = "live-chrome")]
     use rmcp::model::CallToolRequestParams;
+    #[cfg(feature = "live-chrome")]
     use serde_json::{json, Map, Value};
 
     #[test]
@@ -810,6 +883,45 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn selector_map_powers_state_click_and_type() -> anyhow::Result<()> {
+        let server = BrowserUseMcpServer::new();
+
+        server
+            .call_browser_tool(call(
+                "browser_navigate",
+                json!({
+                    "url": "data:text/html,<title>Selectors</title><button id=b onclick='this.dataset.clicked=\"yes\"'>Go</button><input id=i>"
+                }),
+            ))
+            .await?;
+
+        let state = server
+            .call_browser_tool(call("browser_get_state", json!({})))
+            .await?
+            .structured_content
+            .expect("browser_get_state should return structured JSON");
+        let elements = state["elements"]
+            .as_array()
+            .expect("state should include interactive elements");
+        let button_index = indexed_element(elements, "button", "Go");
+        let input_index = indexed_element(elements, "input", "");
+
+        server
+            .call_browser_tool(call("browser_click", json!({"index": button_index})))
+            .await?;
+        server
+            .call_browser_tool(call(
+                "browser_type",
+                json!({"index": input_index, "text": "typed"}),
+            ))
+            .await?;
+
+        Ok(())
+    }
+
+    #[cfg(feature = "live-chrome")]
     fn call(name: &'static str, arguments: Value) -> CallToolRequestParams {
         let Value::Object(arguments) = arguments else {
             unreachable!("test arguments are object literals")
@@ -818,10 +930,20 @@ mod tests {
         CallToolRequestParams::new(name).with_arguments(Map::from_iter(arguments))
     }
 
+    #[cfg(feature = "live-chrome")]
     fn text_content(result: &rmcp::model::CallToolResult) -> &str {
         match result.content.first() {
             Some(rmcp::model::ContentBlock::Text(text)) => text.text.as_str(),
             other => panic!("expected first text content block, got {other:?}"),
         }
+    }
+
+    #[cfg(feature = "live-chrome")]
+    fn indexed_element(elements: &[Value], tag: &str, text: &str) -> i64 {
+        elements
+            .iter()
+            .find(|element| element["tag"] == tag && element["text"] == text)
+            .and_then(|element| element["index"].as_i64())
+            .unwrap_or_else(|| panic!("missing indexed {tag} element with text {text:?}"))
     }
 }
