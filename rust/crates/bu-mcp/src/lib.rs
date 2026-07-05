@@ -921,6 +921,110 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn selector_map_detects_modern_interactive_elements_and_filters_hidden(
+    ) -> anyhow::Result<()> {
+        let server = BrowserUseMcpServer::new();
+        let html = r##"
+            <title>Modern Selectors</title>
+            <a id="semantic" href="/semantic-destination">Semantic Link</a>
+            <div id="inline" onclick="document.body.dataset.inline = 'yes'">Inline Listener</div>
+            <div id="listener">Registered Listener</div>
+            <button id="transparent" style="opacity:0" onclick="document.body.dataset.hidden = 'opacity'">Transparent</button>
+            <button id="gone" style="display:none" onclick="document.body.dataset.hidden = 'display'">Gone</button>
+            <script>
+                document.getElementById('listener').addEventListener('click', () => {
+                    document.body.dataset.registered = 'yes';
+                });
+            </script>
+        "##;
+
+        server
+            .call_browser_tool(call(
+                "browser_navigate",
+                json!({"url": format!("data:text/html,{html}")}),
+            ))
+            .await?;
+
+        let state = server
+            .call_browser_tool(call("browser_get_state", json!({})))
+            .await?
+            .structured_content
+            .expect("browser_get_state should return structured JSON");
+        let elements = state["elements"]
+            .as_array()
+            .expect("elements should be an array");
+
+        assert!(
+            has_element(elements, "a", "Semantic Link"),
+            "semantic links must remain in the selector map: {elements:?}"
+        );
+        assert!(
+            has_element(elements, "div", "Inline Listener"),
+            "div onclick elements must be detected: {elements:?}"
+        );
+        assert!(
+            has_element(elements, "div", "Registered Listener"),
+            "div addEventListener('click') elements must be detected: {elements:?}"
+        );
+        assert!(
+            !has_element(elements, "button", "Transparent"),
+            "opacity:0 elements must be hidden from selector map: {elements:?}"
+        );
+        assert!(
+            !has_element(elements, "button", "Gone"),
+            "display:none elements must be hidden from selector map: {elements:?}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "live-chrome")]
+    async fn indexed_click_after_scroll_uses_viewport_normalized_coordinates() -> anyhow::Result<()>
+    {
+        let server = BrowserUseMcpServer::new();
+        // NB: inline styles only — a data: URL treats '#' as a fragment delimiter,
+        // so `<style>#id{}</style>` would truncate the page (id selectors need '#').
+        let html = r#"<title>Scrolled Click</title><body style="margin:0"><div style="height:900px"></div><button style="display:block;width:180px;height:80px;margin-left:32px" onclick="document.body.dataset.clicked = 'target'">Scrolled Target</button></body>"#;
+
+        server
+            .call_browser_tool(call(
+                "browser_navigate",
+                json!({"url": format!("data:text/html,{html}")}),
+            ))
+            .await?;
+        server
+            .call_browser_tool(call("browser_scroll", json!({"direction": "down"})))
+            .await?;
+
+        let state = server
+            .call_browser_tool(call("browser_get_state", json!({})))
+            .await?
+            .structured_content
+            .expect("browser_get_state should return structured JSON");
+        let target_index = indexed_element(
+            state["elements"]
+                .as_array()
+                .expect("elements should be an array"),
+            "button",
+            "Scrolled Target",
+        );
+
+        server
+            .call_browser_tool(call("browser_click", json!({"index": target_index})))
+            .await?;
+
+        let clicked = server
+            .actor()
+            .evaluate("document.body.dataset.clicked")
+            .await?;
+        assert_eq!(clicked, json!("target"));
+
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[cfg(feature = "live-chrome")]
     async fn concurrent_get_state_requests_share_one_browser_launch() -> anyhow::Result<()> {
@@ -1215,6 +1319,13 @@ mod tests {
             .find(|element| element["tag"] == tag && element["text"] == text)
             .and_then(|element| element["index"].as_i64())
             .unwrap_or_else(|| panic!("missing indexed {tag} element with text {text:?}"))
+    }
+
+    #[cfg(feature = "live-chrome")]
+    fn has_element(elements: &[Value], tag: &str, text: &str) -> bool {
+        elements
+            .iter()
+            .any(|element| element["tag"] == tag && element["text"] == text)
     }
 
     #[cfg(feature = "live-chrome")]

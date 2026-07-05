@@ -1,6 +1,7 @@
 //! Thin Chromium DevTools Protocol wrapper for the first Rust browser tools.
 
 use std::{
+    collections::{HashMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
     sync::{
@@ -14,18 +15,32 @@ use anyhow::{anyhow, Context, Result};
 use chromiumoxide::{
     browser::{Browser, BrowserConfig},
     cdp::browser_protocol::{
-        dom::{BackendNodeId, FocusParams, GetBoxModelParams, GetDocumentParams, Node},
+        accessibility::{AxNode, AxValue, GetFullAxTreeParams},
+        dom::{BackendNodeId, FocusParams, GetDocumentParams, Node, ResolveNodeParams},
+        dom_debugger::GetEventListenersParams,
+        dom_snapshot::{
+            ArrayOfStrings, CaptureSnapshotParams, CaptureSnapshotReturns, Rectangle, StringIndex,
+        },
         input::{
             DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams,
             DispatchMouseEventType, InsertTextParams, MouseButton,
         },
         page::CaptureScreenshotFormat,
     },
+    cdp::js_protocol::runtime::ReleaseObjectParams,
     page::Page,
     page::ScreenshotParams,
 };
 use futures_util::StreamExt;
 use tokio::{sync::Mutex, task::JoinHandle};
+
+const REQUIRED_COMPUTED_STYLES: &[&str] = &[
+    "display",
+    "visibility",
+    "opacity",
+    "cursor",
+    "pointer-events",
+];
 
 /// Browser launch options used by the thin CDP session wrapper.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,12 +113,26 @@ pub struct SelectorMapElement {
     pub y: f64,
 }
 
-#[derive(Debug)]
-struct SelectorCandidate {
-    backend_node_id: BackendNodeId,
+#[derive(Debug, Clone, Default)]
+struct EnhancedNode {
+    backend_node_id: Option<BackendNodeId>,
     tag: String,
+    attributes: HashMap<String, String>,
     text: String,
-    href: Option<String>,
+    ax_role: Option<String>,
+    ax_name: Option<String>,
+    ax_properties: HashMap<String, serde_json::Value>,
+    computed_styles: HashMap<String, String>,
+    bounds: Option<Rect>,
+    has_js_click_listener: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct Rect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
 }
 
 impl SelectorMapElement {
@@ -412,6 +441,16 @@ impl BrowserPage {
             .context("failed to decode scroll position")
     }
 
+    /// Returns the current horizontal scroll offset.
+    pub async fn scroll_x(&self) -> Result<f64> {
+        self.page
+            .evaluate("window.scrollX")
+            .await
+            .context("failed to read scroll position")?
+            .into_value()
+            .context("failed to decode scroll position")
+    }
+
     /// Navigates back in browser history.
     pub async fn go_back(&self) -> Result<()> {
         self.page
@@ -462,35 +501,138 @@ impl BrowserPage {
         Ok(result.into_value().unwrap_or(serde_json::Value::Null))
     }
 
-    /// Builds a first-cut selector map from Chromium's live flattened DOM.
+    /// Builds a selector map from fused DOM, DOMSnapshot, and AX trees.
     pub async fn selector_map(&self) -> Result<Vec<SelectorMapElement>> {
-        let root = self
+        let dom_tree = self
             .page
             .execute(GetDocumentParams::builder().depth(-1).pierce(true).build())
             .await
             .context("failed to read flattened DOM")?
             .result
             .root;
-
-        let mut candidates = Vec::new();
-        collect_interactive_candidates(&root, &mut candidates);
-
-        let mut elements = Vec::new();
-        for candidate in candidates {
-            if let Some((x, y)) = self.box_center(candidate.backend_node_id).await? {
-                elements.push(SelectorMapElement {
-                    index: elements.len(),
-                    backend_node_id: candidate.backend_node_id,
-                    tag: candidate.tag,
-                    text: candidate.text,
-                    href: candidate.href,
-                    x,
-                    y,
-                });
+        let snapshot = self
+            .page
+            .execute(
+                CaptureSnapshotParams::builder()
+                    .computed_styles(REQUIRED_COMPUTED_STYLES.iter().copied())
+                    .include_paint_order(true)
+                    .include_dom_rects(true)
+                    .build()
+                    .map_err(|error| anyhow!("failed to build DOM snapshot request: {error}"))?,
+            )
+            .await
+            .context("failed to capture DOM snapshot")?;
+        // The Accessibility domain must be enabled before getFullAXTree, and some
+        // targets don't support it — enable best-effort and degrade gracefully:
+        // AX roles refine detection, but JS listeners + tags/attrs still classify
+        // elements, so a missing AX tree must not fail get_state.
+        let _ = self
+            .page
+            .execute(chromiumoxide::cdp::browser_protocol::accessibility::EnableParams::default())
+            .await;
+        let ax_nodes = self
+            .page
+            .execute(GetFullAxTreeParams::builder().build())
+            .await
+            .map(|tree| tree.nodes.clone())
+            .unwrap_or_else(|err| {
+                tracing::warn!(%err, "accessibility tree unavailable; continuing without AX roles");
+                Vec::new()
+            });
+        let scroll_x = self.scroll_x().await.unwrap_or(0.0);
+        let scroll_y = self.scroll_y().await.unwrap_or(0.0);
+        let mut enhanced_nodes = HashMap::new();
+        collect_enhanced_dom_nodes(&dom_tree, &mut enhanced_nodes);
+        merge_snapshot(&snapshot, scroll_x, scroll_y, &mut enhanced_nodes);
+        merge_ax_tree(&ax_nodes, &mut enhanced_nodes);
+        let listener_probe_ids = visible_backend_node_ids(&enhanced_nodes);
+        let js_click_listener_backend_ids = self
+            .js_click_listener_backend_ids(&listener_probe_ids)
+            .await;
+        for backend_node_id in js_click_listener_backend_ids {
+            if let Some(node) = enhanced_nodes.get_mut(&backend_node_id) {
+                node.has_js_click_listener = true;
             }
         }
 
+        let mut elements = Vec::new();
+        collect_interactive_elements(&dom_tree, &enhanced_nodes, &mut elements);
+
         Ok(elements)
+    }
+
+    async fn js_click_listener_backend_ids(
+        &self,
+        backend_node_ids: &[BackendNodeId],
+    ) -> HashSet<i64> {
+        let mut ids = HashSet::new();
+
+        for &backend_node_id in backend_node_ids {
+            let Ok(resolved) = self
+                .page
+                .execute(
+                    ResolveNodeParams::builder()
+                        .backend_node_id(backend_node_id)
+                        .object_group("browser-use-selector-map")
+                        .build(),
+                )
+                .await
+            else {
+                continue;
+            };
+
+            let Some(object_id) = resolved.object.object_id.clone() else {
+                continue;
+            };
+
+            let listeners = self
+                .page
+                .execute(
+                    GetEventListenersParams::builder()
+                        .object_id(object_id.clone())
+                        .build()
+                        .expect("event listener params are valid"),
+                )
+                .await;
+            let _ = self.page.execute(ReleaseObjectParams::new(object_id)).await;
+
+            let Ok(listeners) = listeners else {
+                continue;
+            };
+
+            let mut has_click_listener = false;
+            for listener in &listeners.listeners {
+                if is_click_like_event(&listener.r#type) {
+                    has_click_listener = true;
+                    if let Some(listener_backend_node_id) = listener.backend_node_id {
+                        ids.insert(*listener_backend_node_id.inner());
+                    }
+                }
+            }
+
+            if has_click_listener {
+                ids.insert(*backend_node_id.inner());
+            }
+        }
+
+        ids
+    }
+
+    fn element_for_backend_node_id_from_map(
+        elements: Vec<SelectorMapElement>,
+        backend_node_id: i64,
+    ) -> Result<SelectorMapElement> {
+        elements
+            .into_iter()
+            .find(|element| element.backend_node_id_value() == backend_node_id)
+            .with_context(|| format!("backend node id {backend_node_id} not found or not visible"))
+    }
+
+    async fn current_element_by_backend_node_id(
+        &self,
+        backend_node_id: i64,
+    ) -> Result<SelectorMapElement> {
+        Self::element_for_backend_node_id_from_map(self.selector_map().await?, backend_node_id)
     }
 
     /// Clicks an element from the current selector map by index.
@@ -510,7 +652,9 @@ impl BrowserPage {
 
     /// Clicks an element by stable Chromium backend node id.
     pub async fn click_backend_node_id(&self, backend_node_id: i64) -> Result<()> {
-        let element = self.element_for_backend_node_id(backend_node_id).await?;
+        let element = self
+            .current_element_by_backend_node_id(backend_node_id)
+            .await?;
         self.click_coordinates(element.x, element.y).await?;
         Ok(())
     }
@@ -542,7 +686,9 @@ impl BrowserPage {
 
     /// Focuses an element by stable Chromium backend node id and types text into it.
     pub async fn type_into_backend_node_id(&self, backend_node_id: i64, text: &str) -> Result<()> {
-        let element = self.element_for_backend_node_id(backend_node_id).await?;
+        let element = self
+            .current_element_by_backend_node_id(backend_node_id)
+            .await?;
 
         self.page
             .execute(
@@ -566,7 +712,9 @@ impl BrowserPage {
 
     /// Clears an element by stable Chromium backend node id, dispatching input/change events.
     pub async fn clear_backend_node_id(&self, backend_node_id: i64) -> Result<()> {
-        let element = self.element_for_backend_node_id(backend_node_id).await?;
+        let element = self
+            .current_element_by_backend_node_id(backend_node_id)
+            .await?;
 
         self.page
             .execute(
@@ -612,52 +760,6 @@ impl BrowserPage {
             .context("failed to resolve URL")?
             .into_value()
             .context("failed to decode resolved URL")
-    }
-
-    async fn element_for_backend_node_id(
-        &self,
-        backend_node_id: i64,
-    ) -> Result<SelectorMapElement> {
-        let backend_node_id = BackendNodeId::new(backend_node_id);
-        let (x, y) = self.box_center(backend_node_id).await?.with_context(|| {
-            format!(
-                "backend node id {} not found or not visible",
-                *backend_node_id.inner()
-            )
-        })?;
-
-        Ok(SelectorMapElement {
-            index: 0,
-            backend_node_id,
-            tag: String::new(),
-            text: String::new(),
-            href: None,
-            x,
-            y,
-        })
-    }
-
-    async fn box_center(&self, backend_node_id: BackendNodeId) -> Result<Option<(f64, f64)>> {
-        let box_model = match self
-            .page
-            .execute(
-                GetBoxModelParams::builder()
-                    .backend_node_id(backend_node_id)
-                    .build(),
-            )
-            .await
-        {
-            Ok(response) => response.result.model,
-            Err(_) => return Ok(None),
-        };
-        let border = box_model.border.inner();
-        if border.len() < 8 || box_model.width <= 0 || box_model.height <= 0 {
-            return Ok(None);
-        }
-
-        let x = (border[0] + border[2] + border[4] + border[6]) / 4.0;
-        let y = (border[1] + border[3] + border[5] + border[7]) / 4.0;
-        Ok(Some((x, y)))
     }
 
     async fn dispatch_mouse_event(
@@ -708,41 +810,364 @@ impl BrowserPage {
     }
 }
 
-fn collect_interactive_candidates(node: &Node, candidates: &mut Vec<SelectorCandidate>) {
-    if is_interactive_node(node) {
-        candidates.push(SelectorCandidate {
-            backend_node_id: node.backend_node_id,
-            tag: node_tag(node),
-            text: short_text(node_label(node)),
-            href: attr_value(node, "href").map(ToOwned::to_owned),
-        });
+fn collect_enhanced_dom_nodes(node: &Node, nodes: &mut HashMap<i64, EnhancedNode>) {
+    let backend_node_id = *node.backend_node_id.inner();
+    let tag = node_tag(node);
+    let attributes = node_attributes(node);
+    let text = if node.node_type == 1 {
+        short_text(node_label(node))
+    } else if node.node_type == 3 {
+        short_text(node.node_value.trim().to_owned())
+    } else {
+        String::new()
+    };
+
+    let enhanced = nodes.entry(backend_node_id).or_default();
+    enhanced.backend_node_id = Some(node.backend_node_id);
+    if !tag.is_empty() {
+        enhanced.tag = tag;
+    }
+    if !attributes.is_empty() {
+        enhanced.attributes = attributes;
+    }
+    if !text.is_empty() {
+        enhanced.text = text;
     }
 
     for child in node.children.iter().flatten() {
-        collect_interactive_candidates(child, candidates);
+        collect_enhanced_dom_nodes(child, nodes);
     }
     for shadow_root in node.shadow_roots.iter().flatten() {
-        collect_interactive_candidates(shadow_root, candidates);
+        collect_enhanced_dom_nodes(shadow_root, nodes);
     }
     if let Some(content_document) = &node.content_document {
-        collect_interactive_candidates(content_document, candidates);
+        collect_enhanced_dom_nodes(content_document, nodes);
     }
     if let Some(template_content) = &node.template_content {
-        collect_interactive_candidates(template_content, candidates);
+        collect_enhanced_dom_nodes(template_content, nodes);
     }
 }
 
-fn is_interactive_node(node: &Node) -> bool {
-    if node.node_type != 1 {
+fn merge_snapshot(
+    snapshot: &CaptureSnapshotReturns,
+    fallback_scroll_x: f64,
+    fallback_scroll_y: f64,
+    nodes: &mut HashMap<i64, EnhancedNode>,
+) {
+    for document in &snapshot.documents {
+        // DOMSnapshot often omits (or zeroes) the per-document scroll offset; fall
+        // back to the live main-frame scroll so bounds normalize to the viewport —
+        // otherwise a scrolled-into-view element is wrongly filtered as off-screen.
+        let scroll_x = document
+            .scroll_offset_x
+            .filter(|value| *value != 0.0)
+            .unwrap_or(fallback_scroll_x);
+        let scroll_y = document
+            .scroll_offset_y
+            .filter(|value| *value != 0.0)
+            .unwrap_or(fallback_scroll_y);
+
+        let Some(backend_node_ids) = &document.nodes.backend_node_id else {
+            continue;
+        };
+
+        for (node_index, backend_node_id) in backend_node_ids.iter().enumerate() {
+            let backend_node_id_value = *backend_node_id.inner();
+            let enhanced = nodes.entry(backend_node_id_value).or_default();
+            enhanced.backend_node_id = Some(*backend_node_id);
+
+            if enhanced.tag.is_empty() {
+                if let Some(tag) = document
+                    .nodes
+                    .node_name
+                    .as_ref()
+                    .and_then(|names| names.get(node_index))
+                    .and_then(|index| snapshot_string(snapshot, *index))
+                {
+                    enhanced.tag = tag.to_ascii_lowercase();
+                }
+            }
+
+            if enhanced.text.is_empty() {
+                if let Some(text) = document
+                    .nodes
+                    .node_value
+                    .as_ref()
+                    .and_then(|values| values.get(node_index))
+                    .and_then(|index| snapshot_string(snapshot, *index))
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    enhanced.text = short_text(text.trim().to_owned());
+                }
+            }
+
+            if enhanced.attributes.is_empty() {
+                if let Some(attributes) = document
+                    .nodes
+                    .attributes
+                    .as_ref()
+                    .and_then(|attributes| attributes.get(node_index))
+                {
+                    enhanced.attributes = snapshot_attributes(snapshot, attributes);
+                }
+            }
+        }
+
+        for (layout_index, node_index) in document.layout.node_index.iter().enumerate() {
+            let Ok(node_index) = usize::try_from(*node_index) else {
+                continue;
+            };
+            let Some(backend_node_id) = backend_node_ids.get(node_index) else {
+                continue;
+            };
+
+            let enhanced = nodes.entry(*backend_node_id.inner()).or_default();
+            enhanced.backend_node_id = Some(*backend_node_id);
+
+            if let Some(styles) = document.layout.styles.get(layout_index) {
+                enhanced.computed_styles = snapshot_computed_styles(snapshot, styles);
+            }
+
+            if let Some(bounds) = document
+                .layout
+                .bounds
+                .get(layout_index)
+                .and_then(rect_from_snapshot)
+            {
+                enhanced.bounds = Some(Rect {
+                    x: bounds.x - scroll_x,
+                    y: bounds.y - scroll_y,
+                    width: bounds.width,
+                    height: bounds.height,
+                });
+            }
+
+            if enhanced.text.is_empty() {
+                if let Some(text) = document
+                    .layout
+                    .text
+                    .get(layout_index)
+                    .and_then(|index| snapshot_string(snapshot, *index))
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    enhanced.text = short_text(text.trim().to_owned());
+                }
+            }
+        }
+    }
+}
+
+fn merge_ax_tree(ax_nodes: &[AxNode], nodes: &mut HashMap<i64, EnhancedNode>) {
+    for ax_node in ax_nodes {
+        let Some(backend_node_id) = ax_node.backend_dom_node_id else {
+            continue;
+        };
+
+        let enhanced = nodes.entry(*backend_node_id.inner()).or_default();
+        enhanced.backend_node_id = Some(backend_node_id);
+        enhanced.ax_role = ax_node.role.as_ref().and_then(ax_value_string);
+        enhanced.ax_name = ax_node.name.as_ref().and_then(ax_value_string);
+
+        if enhanced.text.is_empty() {
+            if let Some(name) = &enhanced.ax_name {
+                enhanced.text = short_text(name.clone());
+            }
+        }
+
+        if let Some(properties) = &ax_node.properties {
+            enhanced.ax_properties = properties
+                .iter()
+                .map(|property| {
+                    (
+                        property.name.as_ref().to_owned(),
+                        property
+                            .value
+                            .value
+                            .clone()
+                            .unwrap_or(serde_json::Value::Null),
+                    )
+                })
+                .collect();
+        }
+    }
+}
+
+fn visible_backend_node_ids(nodes: &HashMap<i64, EnhancedNode>) -> Vec<BackendNodeId> {
+    nodes
+        .values()
+        .filter(|node| is_visible_enhanced_node(node))
+        .filter_map(|node| node.backend_node_id)
+        .collect()
+}
+
+fn collect_interactive_elements(
+    node: &Node,
+    enhanced_nodes: &HashMap<i64, EnhancedNode>,
+    elements: &mut Vec<SelectorMapElement>,
+) {
+    if node.node_type == 1 {
+        if let Some(enhanced) = enhanced_nodes.get(node.backend_node_id.inner()) {
+            if is_visible_enhanced_node(enhanced) && is_interactive_enhanced_node(enhanced) {
+                if let (Some(backend_node_id), Some(bounds)) =
+                    (enhanced.backend_node_id, enhanced.bounds)
+                {
+                    elements.push(SelectorMapElement {
+                        index: elements.len(),
+                        backend_node_id,
+                        tag: enhanced.tag.clone(),
+                        text: enhanced.text.clone(),
+                        href: enhanced.attributes.get("href").cloned(),
+                        x: bounds.x + bounds.width / 2.0,
+                        y: bounds.y + bounds.height / 2.0,
+                    });
+                }
+            }
+        }
+    }
+
+    for child in node.children.iter().flatten() {
+        collect_interactive_elements(child, enhanced_nodes, elements);
+    }
+    for shadow_root in node.shadow_roots.iter().flatten() {
+        collect_interactive_elements(shadow_root, enhanced_nodes, elements);
+    }
+    if let Some(content_document) = &node.content_document {
+        collect_interactive_elements(content_document, enhanced_nodes, elements);
+    }
+    if let Some(template_content) = &node.template_content {
+        collect_interactive_elements(template_content, enhanced_nodes, elements);
+    }
+}
+
+fn is_click_like_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "click" | "mousedown" | "mouseup" | "pointerdown" | "pointerup"
+    )
+}
+
+fn is_interactive_enhanced_node(node: &EnhancedNode) -> bool {
+    node.has_js_click_listener
+        || node.ax_role.as_deref().is_some_and(is_interactive_ax_role)
+        || is_interactive_tag(&node.tag)
+        || node.attributes.contains_key("onclick")
+        || node.attributes.contains_key("contenteditable")
+        || node
+            .attributes
+            .get("tabindex")
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .is_some_and(|tabindex| tabindex >= 0)
+}
+
+fn is_visible_enhanced_node(node: &EnhancedNode) -> bool {
+    if node
+        .computed_styles
+        .get("display")
+        .is_some_and(|display| display.eq_ignore_ascii_case("none"))
+    {
         return false;
     }
 
+    if node
+        .computed_styles
+        .get("visibility")
+        .is_some_and(|visibility| visibility.eq_ignore_ascii_case("hidden"))
+    {
+        return false;
+    }
+
+    if node
+        .computed_styles
+        .get("opacity")
+        .and_then(|opacity| opacity.parse::<f64>().ok())
+        .is_some_and(|opacity| opacity <= 0.0)
+    {
+        return false;
+    }
+
+    node.bounds
+        .is_some_and(|bounds| bounds.width > 0.0 && bounds.height > 0.0)
+}
+
+fn is_interactive_ax_role(role: &str) -> bool {
     matches!(
-        node_tag(node).as_str(),
-        "a" | "button" | "input" | "select" | "textarea"
-    ) || attr_value(node, "role").is_some_and(|role| role.eq_ignore_ascii_case("button"))
-        || has_attr(node, "onclick")
-        || has_attr(node, "contenteditable")
+        role.to_ascii_lowercase().as_str(),
+        "link"
+            | "button"
+            | "menuitem"
+            | "option"
+            | "radio"
+            | "checkbox"
+            | "tab"
+            | "textbox"
+            | "combobox"
+            | "slider"
+            | "spinbutton"
+            | "listbox"
+            | "switch"
+    )
+}
+
+fn is_interactive_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "a" | "button" | "input" | "select" | "textarea" | "summary" | "label"
+    )
+}
+
+fn snapshot_string(snapshot: &CaptureSnapshotReturns, index: StringIndex) -> Option<&str> {
+    let index = usize::try_from(*index.inner()).ok()?;
+    snapshot.strings.get(index).map(String::as_str)
+}
+
+fn snapshot_attributes(
+    snapshot: &CaptureSnapshotReturns,
+    attributes: &ArrayOfStrings,
+) -> HashMap<String, String> {
+    attributes
+        .inner()
+        .chunks_exact(2)
+        .filter_map(|chunk| {
+            let name = snapshot_string(snapshot, chunk[0])?.to_ascii_lowercase();
+            let value = snapshot_string(snapshot, chunk[1])?.to_owned();
+            Some((name, value))
+        })
+        .collect()
+}
+
+fn snapshot_computed_styles(
+    snapshot: &CaptureSnapshotReturns,
+    styles: &ArrayOfStrings,
+) -> HashMap<String, String> {
+    REQUIRED_COMPUTED_STYLES
+        .iter()
+        .zip(styles.inner())
+        .filter_map(|(name, value_index)| {
+            Some((
+                (*name).to_owned(),
+                snapshot_string(snapshot, *value_index)?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+fn rect_from_snapshot(rectangle: &Rectangle) -> Option<Rect> {
+    let values = rectangle.inner();
+    Some(Rect {
+        x: *values.first()?,
+        y: *values.get(1)?,
+        width: *values.get(2)?,
+        height: *values.get(3)?,
+    })
+}
+
+fn ax_value_string(value: &AxValue) -> Option<String> {
+    match value.value.as_ref()? {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
 }
 
 fn node_tag(node: &Node) -> String {
@@ -752,6 +1177,17 @@ fn node_tag(node: &Node) -> String {
         &node.local_name
     };
     tag.to_ascii_lowercase()
+}
+
+fn node_attributes(node: &Node) -> HashMap<String, String> {
+    let Some(attributes) = &node.attributes else {
+        return HashMap::new();
+    };
+
+    attributes
+        .chunks_exact(2)
+        .map(|chunk| (chunk[0].to_ascii_lowercase(), chunk[1].clone()))
+        .collect()
 }
 
 fn node_label(node: &Node) -> String {
@@ -801,10 +1237,6 @@ fn attr_value<'a>(node: &'a Node, name: &str) -> Option<&'a str> {
             .eq_ignore_ascii_case(name)
             .then_some(chunk[1].as_str())
     })
-}
-
-fn has_attr(node: &Node, name: &str) -> bool {
-    attr_value(node, name).is_some()
 }
 
 fn short_tab_id(target_id: &str) -> String {
