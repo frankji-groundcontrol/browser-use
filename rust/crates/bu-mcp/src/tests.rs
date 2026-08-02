@@ -19,11 +19,13 @@ use tokio::task::JoinSet;
 use tokio::time::{timeout, Duration};
 
 #[test]
-fn tools_list_returns_16_low_level_tools() {
+fn tools_list_returns_17_low_level_tools() {
     let tools = low_level_tools();
     let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
 
-    assert_eq!(tools.len(), 16);
+    // 16 are byte-identical to Python's set; browser_set_viewport is this fork's
+    // deliberate addition (Python has no responsive-viewport tool).
+    assert_eq!(tools.len(), 17);
     assert_eq!(
         names,
         [
@@ -34,6 +36,7 @@ fn tools_list_returns_16_low_level_tools() {
             "browser_extract_content",
             "browser_get_html",
             "browser_screenshot",
+            "browser_set_viewport",
             "browser_scroll",
             "browser_go_back",
             "browser_list_tabs",
@@ -130,6 +133,98 @@ async fn navigate_then_get_state_uses_live_browser() -> anyhow::Result<()> {
     assert_eq!(state["title"], "MCP Live");
     assert!(state["url"].as_str().unwrap().starts_with("data:text/html"));
     assert_eq!(state["tabs"].as_array().unwrap().len(), 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn set_viewport_changes_css_width_and_clears() -> anyhow::Result<()> {
+    // The page reports window.innerWidth at load, so the viewport is set BEFORE
+    // navigating: that reads the applied override deterministically instead of
+    // racing the resize event.
+    const REPORTER: &str = "browser_navigate";
+    let width_page = json!({
+        "url": "data:text/html,<title>VP</title><div id=w>?</div><script>document.getElementById('w').textContent=window.innerWidth</script>"
+    });
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call(REPORTER, width_page.clone()))
+        .await?;
+
+    let applied = server
+        .call_browser_tool(call(
+            "browser_set_viewport",
+            json!({"width": 377, "height": 844}),
+        ))
+        .await?;
+    assert_eq!(text_content(&applied), "Viewport set to 377x844");
+
+    server
+        .call_browser_tool(call(REPORTER, width_page.clone()))
+        .await?;
+    let html = server
+        .call_browser_tool(call("browser_get_html", json!({"selector": "#w"})))
+        .await?;
+    assert!(
+        text_content(&html).contains("377"),
+        "viewport override should drive window.innerWidth, got {}",
+        text_content(&html)
+    );
+
+    // mobile=true is real device emulation: a page WITHOUT <meta viewport> gets
+    // Chrome's 980px fallback layout viewport (same as a real phone), and only a
+    // width=device-width page lays out at the requested width. Pin both so the
+    // 980 surprise is documented rather than rediscovered.
+    let mobile_page = json!({
+        "url": "data:text/html,<meta name=viewport content='width=device-width'><div id=w>?</div><script>document.getElementById('w').textContent=window.innerWidth</script>"
+    });
+    server
+        .call_browser_tool(call(
+            "browser_set_viewport",
+            json!({"width": 377, "height": 844, "mobile": true}),
+        ))
+        .await?;
+    server
+        .call_browser_tool(call(REPORTER, width_page.clone()))
+        .await?;
+    assert!(
+        text_content(
+            &server
+                .call_browser_tool(call("browser_get_html", json!({"selector": "#w"})))
+                .await?
+        )
+        .contains("980"),
+        "mobile emulation of a non-responsive page should fall back to 980px"
+    );
+    server.call_browser_tool(call(REPORTER, mobile_page)).await?;
+    assert!(
+        text_content(
+            &server
+                .call_browser_tool(call("browser_get_html", json!({"selector": "#w"})))
+                .await?
+        )
+        .contains("377"),
+        "mobile emulation of a width=device-width page should use the set width"
+    );
+
+    let cleared = server
+        .call_browser_tool(call(
+            "browser_set_viewport",
+            json!({"width": 0, "height": 0}),
+        ))
+        .await?;
+    assert_eq!(text_content(&cleared), "Viewport override cleared");
+
+    server.call_browser_tool(call(REPORTER, width_page)).await?;
+    let restored = server
+        .call_browser_tool(call("browser_get_html", json!({"selector": "#w"})))
+        .await?;
+    assert!(
+        !text_content(&restored).contains("377"),
+        "clearing the override should restore the window width, got {}",
+        text_content(&restored)
+    );
 
     Ok(())
 }

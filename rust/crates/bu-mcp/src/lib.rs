@@ -90,6 +90,7 @@ impl BrowserUseMcpServer {
             "browser_get_html" => self.get_html(request.arguments).await,
             "browser_extract_content" => self.extract_content(request.arguments).await,
             "browser_screenshot" => self.screenshot(request.arguments).await,
+            "browser_set_viewport" => self.set_viewport(request.arguments).await,
             "browser_scroll" => self.scroll(request.arguments).await,
             "browser_go_back" => self.go_back().await,
             "browser_list_tabs" => self.list_tabs().await,
@@ -383,6 +384,41 @@ impl BrowserUseMcpServer {
             ContentBlock::text(metadata),
             ContentBlock::image(BASE64_STANDARD.encode(png), "image/png"),
         ]))
+    }
+
+    async fn set_viewport(
+        &self,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let width = optional_i64(arguments.as_ref(), "width").ok_or_else(|| {
+            ErrorData::new(ErrorCode::INVALID_PARAMS, "browser_set_viewport requires width", None)
+        })?;
+        let height = optional_i64(arguments.as_ref(), "height").ok_or_else(|| {
+            ErrorData::new(ErrorCode::INVALID_PARAMS, "browser_set_viewport requires height", None)
+        })?;
+        let mobile = optional_bool(arguments.as_ref(), "mobile").unwrap_or(false);
+        if width < 0 || height < 0 {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "browser_set_viewport width/height must not be negative",
+                None,
+            ));
+        }
+
+        if let Err(error) = self
+            .actor
+            .set_viewport(width as u32, height as u32, mobile)
+            .await
+        {
+            return Ok(browser_tool_error("browser_set_viewport failed", error));
+        }
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            if width == 0 && height == 0 {
+                "Viewport override cleared".to_owned()
+            } else {
+                format!("Viewport set to {width}x{height}{}", if mobile { " (mobile)" } else { "" })
+            },
+        )]))
     }
 
     async fn scroll(

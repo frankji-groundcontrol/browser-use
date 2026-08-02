@@ -121,6 +121,29 @@ pub fn low_level_tools() -> Vec<Tool> {
             }),
         ),
         tool(
+            "browser_set_viewport",
+            "Set the CSS viewport (width/height in pixels) of the current page, for checking responsive behaviour at a specific size. Applies to the existing browser, so the session and any login are preserved. Pass width=0 and height=0 to clear the override and return to the window size.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "width": {
+                        "type": "integer",
+                        "description": "Viewport width in CSS pixels. 0 clears the override."
+                    },
+                    "height": {
+                        "type": "integer",
+                        "description": "Viewport height in CSS pixels. 0 clears the override."
+                    },
+                    "mobile": {
+                        "type": "boolean",
+                        "description": "Emulate a mobile device (affects meta viewport handling)",
+                        "default": false
+                    }
+                },
+                "required": ["width", "height"]
+            }),
+        ),
+        tool(
             "browser_scroll",
             "Scroll the page",
             json!({

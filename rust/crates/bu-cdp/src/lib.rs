@@ -18,6 +18,7 @@ use chromiumoxide::{
         dom::{BackendNodeId, FocusParams, GetDocumentParams, ResolveNodeParams},
         dom_debugger::GetEventListenersParams,
         dom_snapshot::CaptureSnapshotParams,
+        emulation::{ClearDeviceMetricsOverrideParams, SetDeviceMetricsOverrideParams},
         input::{
             DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams,
             DispatchMouseEventType, InsertTextParams, MouseButton,
@@ -151,18 +152,18 @@ impl BrowserSession {
 
     /// Launches Chromium using explicit options.
     pub async fn launch_with_options(options: BrowserLaunchOptions) -> Result<Self> {
-        let executable_path = options
-            .executable_path
-            .or_else(find_playwright_chromium)
-            .context("could not find Chromium executable")?;
+        let executable_path = options.executable_path.or_else(find_playwright_chromium);
 
         let user_data_dir = unique_user_data_dir()?;
 
         let mut config = BrowserConfig::builder()
-            .chrome_executable(executable_path)
             .user_data_dir(&user_data_dir)
             .no_sandbox()
             .arg("--disable-dev-shm-usage");
+
+        if let Some(executable_path) = executable_path {
+            config = config.chrome_executable(executable_path);
+        }
 
         if !options.headless {
             config = config.with_head();
@@ -404,6 +405,43 @@ impl BrowserPage {
             )
             .await
             .context("failed to capture page screenshot")
+    }
+
+    /// Overrides the page's device metrics (CSS viewport).
+    ///
+    /// Responsive behaviour can only be checked at a real width, and the MCP had
+    /// no way to set one — every screenshot came back at the launch size. This
+    /// applies `Emulation.setDeviceMetricsOverride` to the ACTIVE page, so the
+    /// browser (and therefore the session and its cookies) is preserved; a caller
+    /// can resize, capture, and resize back without logging in again.
+    ///
+    /// `width`/`height` of 0 clears the override and restores the window size.
+    ///
+    /// Clearing goes through `Emulation.clearDeviceMetricsOverride`, NOT a 0x0
+    /// `setDeviceMetricsOverride`: despite the protocol docs saying 0 disables a
+    /// dimension, a 0x0 set leaves the previous override in force (verified — the
+    /// page stayed at the emulated width), and leaves `mobile` applied too.
+    pub async fn set_viewport(&self, width: u32, height: u32, mobile: bool) -> Result<()> {
+        if width == 0 && height == 0 {
+            self.page
+                .execute(ClearDeviceMetricsOverrideParams::default())
+                .await
+                .context("failed to clear device metrics override")?;
+            return Ok(());
+        }
+
+        let params = SetDeviceMetricsOverrideParams::builder()
+            .mobile(mobile)
+            .width(width as i64)
+            .height(height as i64)
+            .device_scale_factor(1.0)
+            .build()
+            .map_err(|error| anyhow!("invalid device metrics: {error}"))?;
+        self.page
+            .execute(params)
+            .await
+            .context("failed to set device metrics override")?;
+        Ok(())
     }
 
     /// Scrolls the page by one standard MCP increment.

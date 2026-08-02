@@ -167,6 +167,12 @@ impl ActorHandle {
             .await
     }
 
+    /// Sets the CSS viewport of the active page (0x0 clears the override).
+    pub async fn set_viewport(&self, width: u32, height: u32, mobile: bool) -> Result<()> {
+        self.request(|reply| Command::SetViewport { width, height, mobile, reply })
+            .await
+    }
+
     /// Returns HTML for the active page or a selected element.
     pub async fn get_html(&self, selector: Option<String>) -> Result<String> {
         self.request(|reply| Command::GetHtml { selector, reply })
@@ -273,6 +279,12 @@ enum Command {
     Screenshot {
         full_page: bool,
         reply: Reply<Vec<u8>>,
+    },
+    SetViewport {
+        width: u32,
+        height: u32,
+        mobile: bool,
+        reply: Reply<()>,
     },
     GetHtml {
         selector: Option<String>,
@@ -395,6 +407,9 @@ impl BrowserActor {
             }
             Command::Screenshot { full_page, reply } => {
                 let _ = reply.send(self.screenshot(full_page).await);
+            }
+            Command::SetViewport { width, height, mobile, reply } => {
+                let _ = reply.send(self.set_viewport(width, height, mobile).await);
             }
             Command::GetHtml { selector, reply } => {
                 let _ = reply.send(self.get_html(selector.as_deref()).await);
@@ -553,6 +568,11 @@ impl BrowserActor {
     async fn screenshot(&mut self, full_page: bool) -> Result<Vec<u8>> {
         self.guard_active_url().await;
         self.active_page().await?.screenshot_png(full_page).await
+    }
+
+    async fn set_viewport(&mut self, width: u32, height: u32, mobile: bool) -> Result<()> {
+        self.guard_active_url().await;
+        self.active_page().await?.set_viewport(width, height, mobile).await
     }
 
     async fn get_html(&mut self, selector: Option<&str>) -> Result<String> {
