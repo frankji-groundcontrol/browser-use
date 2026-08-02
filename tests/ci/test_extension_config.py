@@ -121,3 +121,52 @@ class TestDisableExtensionsEnvVar:
 				os.environ['BROWSER_USE_DISABLE_EXTENSIONS'] = original
 			else:
 				os.environ.pop('BROWSER_USE_DISABLE_EXTENSIONS', None)
+
+
+class TestExtensionDownloadTimeout:
+	"""Extension downloads must be bounded so a stalled network can't hang launch."""
+
+	def test_download_extension_gives_up_instead_of_hanging(self, tmp_path, monkeypatch):
+		"""A server that accepts and never replies must raise, not block forever.
+
+		`_download_extension` runs inside `get_args()` during browser launch, so an
+		unbounded `urlopen` wedges the whole launch (and any test that starts a
+		browser) until the OS gives up. The caller already downgrades a raised
+		error to a warning and continues without extensions, so bounding the wait
+		is all that's needed.
+		"""
+		import socket
+		import threading
+		import time
+
+		from browser_use.browser import profile as profile_module
+		from browser_use.browser.profile import BrowserProfile
+
+		listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		listener.bind(('127.0.0.1', 0))
+		listener.listen(1)
+		port = listener.getsockname()[1]
+		accepted = []
+
+		def accept_and_stall():
+			try:
+				connection, _ = listener.accept()
+				accepted.append(connection)  # held open, never answered
+			except OSError:
+				pass
+
+		thread = threading.Thread(target=accept_and_stall, daemon=True)
+		thread.start()
+
+		monkeypatch.setattr(profile_module, 'EXTENSION_DOWNLOAD_TIMEOUT_SECONDS', 0.5)
+		started = time.monotonic()
+		try:
+			with pytest.raises(Exception, match='Failed to download extension'):
+				BrowserProfile()._download_extension(
+					f'http://127.0.0.1:{port}/ext.crx', tmp_path / 'ext.crx'
+				)
+			assert time.monotonic() - started < 10, 'download should be bounded by the timeout'
+		finally:
+			for connection in accepted:
+				connection.close()
+			listener.close()

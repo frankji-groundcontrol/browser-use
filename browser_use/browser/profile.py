@@ -16,6 +16,13 @@ from browser_use.config import CONFIG
 from browser_use.utils import _log_pretty_path, logger
 
 
+# Extension downloads happen inside get_args() during browser launch, so an
+# unbounded fetch wedges the launch itself on a stalled or unreachable network.
+# The caller already downgrades a failed download to a warning and launches
+# without extensions, so bounding the wait is enough.
+EXTENSION_DOWNLOAD_TIMEOUT_SECONDS = 15.0
+
+
 def _get_enable_default_extensions_default() -> bool:
 	"""Get the default value for enable_default_extensions from env var or True."""
 	env_val = os.getenv('BROWSER_USE_DISABLE_EXTENSIONS')
@@ -1172,7 +1179,7 @@ async function initialize(checkInitialized, magic) {{
 		import urllib.request
 
 		try:
-			with urllib.request.urlopen(url) as response:
+			with urllib.request.urlopen(url, timeout=EXTENSION_DOWNLOAD_TIMEOUT_SECONDS) as response:
 				with open(output_path, 'wb') as f:
 					f.write(response.read())
 		except Exception as e:
