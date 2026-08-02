@@ -6,6 +6,7 @@
 
 mod message;
 mod openai;
+mod responses;
 
 #[cfg(feature = "bedrock")]
 mod bedrock;
@@ -13,7 +14,7 @@ mod bedrock;
 pub use message::{
     message, message_with_image, ChatMessage, ContentPart, ImageUrl, MessageContent,
 };
-pub use openai::{OpenAiChatClient, OpenAiChatConfig};
+pub use openai::{OpenAiApiStyle, OpenAiChatClient, OpenAiChatConfig};
 
 #[cfg(feature = "bedrock")]
 pub use bedrock::{BedrockChatClient, BedrockChatConfig};

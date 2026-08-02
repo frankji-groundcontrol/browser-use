@@ -396,6 +396,7 @@ mod tests {
             base_url: llm_server.base_url(),
             model: "mock-model".to_owned(),
             temperature: None,
+            api_style: Default::default(),
         })?;
         let provider = LlmProvider::OpenAi(llm);
         let actor = ActorHandle::spawn();
@@ -428,7 +429,7 @@ mod tests {
         assert!(
             requests
                 .iter()
-                .all(|request| request["messages"][1]["content"]
+                .all(|request| request["input"][1]["content"][0]["text"]
                     .as_str()
                     .is_some_and(|content| content.contains("Click the Flip button")
                         && content.contains("interactive_elements"))),
@@ -448,6 +449,7 @@ mod tests {
             base_url: llm_server.base_url(),
             model: "mock-model".to_owned(),
             temperature: None,
+            api_style: Default::default(),
         })?);
         let actor = ActorHandle::spawn();
         actor
@@ -462,15 +464,17 @@ mod tests {
 
         let requests = llm_server.join();
         assert_eq!(requests.len(), 1);
-        // With vision, the user message content is a multimodal parts array with an image_url.
-        let parts = &requests[0]["messages"][1]["content"];
+        // With vision the user turn is a multimodal parts array. Responses types
+        // these input_text/input_image and takes a bare image_url string, unlike
+        // chat completions' text/image_url with a nested {"url": ...}.
+        let parts = &requests[0]["input"][1]["content"];
         assert!(
             parts.is_array(),
             "vision content should be an array: {parts:#?}"
         );
-        assert_eq!(parts[0]["type"], "text");
-        assert_eq!(parts[1]["type"], "image_url");
-        assert!(parts[1]["image_url"]["url"]
+        assert_eq!(parts[0]["type"], "input_text");
+        assert_eq!(parts[1]["type"], "input_image");
+        assert!(parts[1]["image_url"]
             .as_str()
             .is_some_and(|url| url.starts_with("data:image/jpeg;base64,")));
 
@@ -493,6 +497,7 @@ mod tests {
             base_url: llm_server.base_url(),
             model: "mock-model".to_owned(),
             temperature: None,
+            api_style: Default::default(),
         })?);
 
         let actor = ActorHandle::spawn_with_command_timeout(std::time::Duration::from_secs(2));
@@ -513,7 +518,7 @@ mod tests {
             1,
             "the model must still be asked to act after a failed capture, got {requests:#?}"
         );
-        let prompt = requests[0]["messages"][1]["content"]
+        let prompt = requests[0]["input"][1]["content"][0]["text"]
             .as_str()
             .expect("user message should be text")
             .to_owned();
@@ -557,9 +562,13 @@ mod tests {
                         .nth(1)
                         .expect("request should include body");
                     requests.push(serde_json::from_str(body).expect("request body is JSON"));
+                    // Responses-API shape: the agent's client defaults to it.
                     let response_body = json!({
-                        "choices": [
-                            {"message": {"content": response}}
+                        "status": "completed",
+                        "output": [
+                            {"type": "message", "content": [
+                                {"type": "output_text", "text": response}
+                            ]}
                         ]
                     })
                     .to_string();

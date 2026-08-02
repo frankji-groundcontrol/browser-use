@@ -1034,14 +1034,16 @@ async fn failing_navigate_returns_tool_error_not_transport_error() -> anyhow::Re
 #[cfg(feature = "live-chrome")]
 async fn extract_content_posts_chat_request_and_returns_framed_answer() -> anyhow::Result<()> {
     let llm_server = MockHttpServer::spawn_json(
+        // Responses-API shape: that is what the client now posts by default.
         serde_json::json!({
-            "id": "chatcmpl-test",
-            "object": "chat.completion",
-            "choices": [
+            "id": "resp-test",
+            "object": "response",
+            "status": "completed",
+            "output": [
                 {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "Alpha is the useful fact."},
-                    "finish_reason": "stop"
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Alpha is the useful fact."}]
                 }
             ]
         })
@@ -1097,7 +1099,10 @@ async fn extract_content_posts_chat_request_and_returns_framed_answer() -> anyho
             )
         );
     let request = llm_server.received_request().await?;
-    assert_eq!(request.path, "/chat/completions");
+    assert_eq!(
+        request.path, "/responses",
+        "OpenAI-style calls use the Responses API"
+    );
     assert_eq!(
         request.header("authorization"),
         Some("Bearer test-key"),
@@ -1113,8 +1118,8 @@ async fn extract_content_posts_chat_request_and_returns_framed_answer() -> anyho
 
     let body: Value = serde_json::from_slice(&request.body)?;
     assert_eq!(body["model"], "test-model");
-    assert_eq!(body["messages"][0]["role"], "system");
-    assert_eq!(body["messages"][1]["role"], "user");
+    assert_eq!(body["input"][0]["role"], "system");
+    assert_eq!(body["input"][1]["role"], "user");
     // Defaults to Python's 0.7 (stored as f32, so compare with tolerance).
     let temperature = body["temperature"]
         .as_f64()
@@ -1123,9 +1128,9 @@ async fn extract_content_posts_chat_request_and_returns_framed_answer() -> anyho
         (temperature - 0.7).abs() < 1e-6,
         "temperature should default to 0.7, got {temperature}"
     );
-    let user_prompt = body["messages"][1]["content"]
+    let user_prompt = body["input"][1]["content"][0]["text"]
         .as_str()
-        .expect("user message content should be a string");
+        .expect("user input part should carry text");
     assert!(user_prompt.contains("<query>\nWhat is Alpha?\n</query>"));
     assert!(user_prompt.contains("<webpage_content>"));
     assert!(user_prompt.contains("Alpha is the useful fact."));

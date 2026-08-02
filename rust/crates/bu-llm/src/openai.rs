@@ -6,11 +6,15 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::message::ChatMessage;
+use crate::responses::{parse_responses_body, ResponsesRequest};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 // Matches Python's retry-path default (`llm_config.get('model', 'gpt-4o')`); a
 // deployment against a gateway sets BROWSER_USE_LLM_MODEL to override this.
 const DEFAULT_MODEL: &str = "gpt-4o";
+// Used when credentials came from the ANTHROPIC_* fallback, where "gpt-4o" would
+// be rejected outright. Override with BROWSER_USE_LLM_MODEL.
+const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-5";
 // Python's ChatOpenAI default sampling temperature for the agent.
 const DEFAULT_TEMPERATURE: f32 = 0.7;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
@@ -24,6 +28,36 @@ pub struct OpenAiChatClient {
     config: OpenAiChatConfig,
 }
 
+/// Which OpenAI request shape to send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpenAiApiStyle {
+    /// `POST {base}/responses` — OpenAI's current API. The default.
+    #[default]
+    Responses,
+    /// `POST {base}/chat/completions` — the older route, for gateways that
+    /// only implement it.
+    ChatCompletions,
+}
+
+impl OpenAiApiStyle {
+    /// Parses `BROWSER_USE_OPENAI_API`. Unknown values are an error rather than
+    /// a silent default, so a typo does not quietly change which API is used.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "responses" => Some(Self::Responses),
+            "chat_completions" | "chat" => Some(Self::ChatCompletions),
+            _ => None,
+        }
+    }
+
+    fn path(self) -> &'static str {
+        match self {
+            Self::Responses => "responses",
+            Self::ChatCompletions => "chat/completions",
+        }
+    }
+}
+
 /// Runtime configuration loaded from environment variables.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenAiChatConfig {
@@ -35,6 +69,8 @@ pub struct OpenAiChatConfig {
     pub model: String,
     /// Optional sampling temperature.
     pub temperature: Option<f32>,
+    /// Request shape to send. Defaults to [`OpenAiApiStyle::Responses`].
+    pub api_style: OpenAiApiStyle,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -68,6 +104,67 @@ struct ChatChoiceMessage {
     content: Option<String>,
 }
 
+/// Where to send chat completions, and which model to assume there.
+#[derive(Debug, PartialEq)]
+struct ResolvedEndpoint {
+    api_key: String,
+    base_url: String,
+    default_model: &'static str,
+}
+
+/// Resolves credentials from the environment, preferring explicit `OPENAI_*` and
+/// falling back to the `ANTHROPIC_*` variables a Claude Code gateway already
+/// exports.
+///
+/// The fallback exists so a working gateway needs no configuration and, more to
+/// the point, no copy of the token into an MCP config file. It is sound because
+/// these gateways serve BOTH protocols: `/v1/chat/completions` on an
+/// `ANTHROPIC_BASE_URL` host returns an ordinary OpenAI-shaped completion
+/// (verified), so the existing client works unchanged — no Anthropic-native
+/// provider is needed.
+///
+/// Takes a lookup closure rather than reading the environment directly so the
+/// precedence rules are testable without mutating process-global state.
+fn resolve_endpoint(lookup: impl Fn(&str) -> Option<String>) -> Option<ResolvedEndpoint> {
+    let read = |key: &str| {
+        lookup(key)
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    };
+
+    if let Some(api_key) = read("OPENAI_API_KEY") {
+        return Some(ResolvedEndpoint {
+            api_key,
+            base_url: read("OPENAI_BASE_URL").unwrap_or_else(|| DEFAULT_BASE_URL.to_owned()),
+            default_model: DEFAULT_MODEL,
+        });
+    }
+
+    // Claude Code exports ANTHROPIC_AUTH_TOKEN for gateways and ANTHROPIC_API_KEY
+    // for the real API; accept either.
+    let api_key = read("ANTHROPIC_AUTH_TOKEN").or_else(|| read("ANTHROPIC_API_KEY"))?;
+    let base_url = read("ANTHROPIC_BASE_URL").map(|base| ensure_api_path(&base))?;
+    Some(ResolvedEndpoint {
+        api_key,
+        base_url,
+        default_model: DEFAULT_ANTHROPIC_MODEL,
+    })
+}
+
+/// Appends `/v1` when the base URL is a bare host. The client POSTs to
+/// `{base_url}/chat/completions`, so a host without the API path would hit the
+/// gateway's landing page and "fail to parse" — the single most common
+/// misconfiguration for this deployment.
+fn ensure_api_path(base: &str) -> String {
+    let trimmed = base.trim_end_matches('/');
+    match trimmed.rsplit('/').next() {
+        Some(last) if last.starts_with('v') && last[1..].chars().all(|c| c.is_ascii_digit()) => {
+            trimmed.to_owned()
+        }
+        _ => format!("{trimmed}/v1"),
+    }
+}
+
 impl OpenAiChatConfig {
     /// Loads OpenAI-compatible chat configuration from the process environment.
     pub fn from_env() -> Result<Self> {
@@ -76,15 +173,10 @@ impl OpenAiChatConfig {
 
     /// Loads OpenAI-compatible chat configuration and applies an optional model override.
     pub fn from_env_with_model_override(model_override: Option<String>) -> Result<Self> {
-        let api_key = env::var("OPENAI_API_KEY")
-            .map(|value| value.trim().to_owned())
-            .ok()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow!("OPENAI_API_KEY is not set"))?;
-        let base_url = env::var("OPENAI_BASE_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
+        let endpoint = resolve_endpoint(|key| env::var(key).ok())
+            .ok_or_else(|| anyhow!("no LLM credentials: set OPENAI_API_KEY (with OPENAI_BASE_URL for a custom or Anthropic-compatible gateway), or ANTHROPIC_AUTH_TOKEN/ANTHROPIC_API_KEY with ANTHROPIC_BASE_URL"))?;
+        let api_key = endpoint.api_key;
+        let base_url = endpoint.base_url;
         let model = model_override
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
@@ -93,7 +185,7 @@ impl OpenAiChatConfig {
                     .ok()
                     .filter(|value| !value.trim().is_empty())
             })
-            .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+            .unwrap_or_else(|| endpoint.default_model.to_owned());
         let temperature = match env::var("BROWSER_USE_LLM_TEMPERATURE") {
             Ok(value) if !value.trim().is_empty() => Some(
                 value
@@ -105,16 +197,28 @@ impl OpenAiChatConfig {
             _ => Some(DEFAULT_TEMPERATURE),
         };
 
+        let api_style = match env::var("BROWSER_USE_OPENAI_API") {
+            Ok(value) if !value.trim().is_empty() => OpenAiApiStyle::parse(&value).ok_or_else(|| {
+                anyhow!("invalid BROWSER_USE_OPENAI_API={value:?}; expected \"responses\" or \"chat_completions\"")
+            })?,
+            _ => OpenAiApiStyle::default(),
+        };
+
         Ok(Self {
             api_key,
             base_url,
             model,
             temperature,
+            api_style,
         })
     }
 
-    fn chat_completions_url(&self) -> String {
-        format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+    fn endpoint_url(&self) -> String {
+        format!(
+            "{}/{}",
+            self.base_url.trim_end_matches('/'),
+            self.api_style.path()
+        )
     }
 }
 
@@ -147,19 +251,27 @@ impl OpenAiChatClient {
     /// `max_retries=5`. A `null`/empty assistant `content` returns an empty
     /// string rather than erroring (matching Python's `content or ''`).
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String> {
-        let request = ChatCompletionRequest {
-            model: self.config.model.clone(),
-            messages,
-            temperature: self.config.temperature,
-        };
+        let body = match self.config.api_style {
+            OpenAiApiStyle::Responses => serde_json::to_value(ResponsesRequest::new(
+                self.config.model.clone(),
+                messages,
+                self.config.temperature,
+            )),
+            OpenAiApiStyle::ChatCompletions => serde_json::to_value(ChatCompletionRequest {
+                model: self.config.model.clone(),
+                messages,
+                temperature: self.config.temperature,
+            }),
+        }
+        .context("failed to serialize LLM request")?;
 
         let mut attempt = 0;
         loop {
             let send_result = self
                 .http
-                .post(self.config.chat_completions_url())
+                .post(self.config.endpoint_url())
                 .bearer_auth(&self.config.api_key)
-                .json(&request)
+                .json(&body)
                 .send()
                 .await;
 
@@ -178,11 +290,14 @@ impl OpenAiChatClient {
 
             let status = response.status();
             if status.is_success() {
-                let body = response
+                let text = response
                     .text()
                     .await
                     .context("failed to read LLM response body")?;
-                return parse_chat_body(&body);
+                return match self.config.api_style {
+                    OpenAiApiStyle::Responses => parse_responses_body(&text),
+                    OpenAiApiStyle::ChatCompletions => parse_chat_body(&text),
+                };
             }
 
             // 429 (rate limit) and 5xx are transient; retry with backoff.
@@ -276,6 +391,64 @@ mod tests {
     }
 
     #[test]
+    fn openai_vars_win_and_anthropic_gateway_vars_are_the_fallback() {
+        use super::{resolve_endpoint, DEFAULT_ANTHROPIC_MODEL, DEFAULT_MODEL};
+        use std::collections::HashMap;
+
+        let env = |pairs: &[(&str, &str)]| {
+            let map: HashMap<String, String> = pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect();
+            move |key: &str| map.get(key).cloned()
+        };
+
+        // Nothing set at all is the "no credentials" case, not a panic.
+        assert!(resolve_endpoint(env(&[])).is_none());
+
+        // OPENAI_* wins outright, even alongside a gateway.
+        let resolved = resolve_endpoint(env(&[
+            ("OPENAI_API_KEY", "sk-openai"),
+            ("OPENAI_BASE_URL", "https://gw.example/v1"),
+            ("ANTHROPIC_AUTH_TOKEN", "sk-anthropic"),
+            ("ANTHROPIC_BASE_URL", "http://host:8080"),
+        ]))
+        .expect("explicit OpenAI config resolves");
+        assert_eq!(resolved.api_key, "sk-openai");
+        assert_eq!(resolved.base_url, "https://gw.example/v1");
+        assert_eq!(resolved.default_model, DEFAULT_MODEL);
+
+        // Claude Code's gateway vars alone are enough, and a bare host gains /v1
+        // (the client POSTs {base}/chat/completions).
+        let resolved = resolve_endpoint(env(&[
+            ("ANTHROPIC_AUTH_TOKEN", " sk-anthropic "),
+            ("ANTHROPIC_BASE_URL", "http://100.77.181.75:8080"),
+        ]))
+        .expect("gateway fallback resolves");
+        assert_eq!(resolved.api_key, "sk-anthropic");
+        assert_eq!(resolved.base_url, "http://100.77.181.75:8080/v1");
+        assert_eq!(
+            resolved.default_model, DEFAULT_ANTHROPIC_MODEL,
+            "gpt-4o would be rejected by an Anthropic gateway"
+        );
+
+        // An explicit API path is respected, not doubled.
+        assert_eq!(
+            resolve_endpoint(env(&[
+                ("ANTHROPIC_API_KEY", "k"),
+                ("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1/"),
+            ]))
+            .unwrap()
+            .base_url,
+            "https://api.anthropic.com/v1"
+        );
+
+        // A token with no base URL cannot be pointed anywhere; not a silent
+        // fallthrough to api.openai.com with an Anthropic key.
+        assert!(resolve_endpoint(env(&[("ANTHROPIC_AUTH_TOKEN", "k")])).is_none());
+    }
+
+    #[test]
     fn truncated_output_is_an_error_not_a_chopped_prefix() {
         // finish_reason "length" means the model hit its output cap mid-token, so
         // the content is a prefix. Callers either JSON-parse it (the agent) or show
@@ -300,7 +473,7 @@ mod tests {
 
 #[cfg(test)]
 mod http_tests {
-    use super::{OpenAiChatClient, OpenAiChatConfig};
+    use super::{OpenAiApiStyle, OpenAiChatClient, OpenAiChatConfig};
     use crate::message::message;
     use std::{
         io::{Read, Write},
@@ -343,6 +516,8 @@ mod http_tests {
             base_url,
             model: "m".to_owned(),
             temperature: None,
+            // Mock serves the older shape; this also keeps the legacy route covered.
+            api_style: OpenAiApiStyle::ChatCompletions,
         })
         .unwrap();
         let out = client.chat(vec![message("user", "hi")]).await.unwrap();
