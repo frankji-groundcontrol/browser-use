@@ -254,7 +254,7 @@ async fn low_level_tools_use_live_browser_without_dom_serializer() -> anyhow::Re
     assert!(matches!(
         screenshot.content.get(1),
         Some(rmcp::model::ContentBlock::Image(image))
-            if image.mime_type == "image/png" && !image.data.is_empty()
+            if image.mime_type == "image/jpeg" && !image.data.is_empty()
     ));
 
     assert_eq!(
@@ -1633,5 +1633,86 @@ async fn navigating_a_page_that_never_finishes_loading_still_succeeds() -> anyho
         text_content(&html)
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn screenshot_saves_to_path_in_requested_format() -> anyhow::Result<()> {
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call(
+            "browser_navigate",
+            json!({"url": "data:text/html,<title>Shot</title><h1 style='color:teal'>Saved</h1>"}),
+        ))
+        .await?;
+
+    // Parent directory deliberately does not exist yet — the tool creates it.
+    let dir = std::env::temp_dir().join(format!("bu-shot-{}", std::process::id()));
+    let jpeg_path = dir.join("default.jpg");
+
+    // Default format is JPEG.
+    let result = server
+        .call_browser_tool(call(
+            "browser_screenshot",
+            json!({"path": jpeg_path.to_str().unwrap()}),
+        ))
+        .await?;
+    let metadata: serde_json::Value = serde_json::from_str(text_content(&result))?;
+    let saved_to = metadata["saved_to"].as_str().expect("saved_to reported");
+    let bytes = std::fs::read(saved_to)?;
+    assert!(
+        bytes.starts_with(b"\xff\xd8\xff"),
+        "default save must be JPEG bytes"
+    );
+    assert_eq!(
+        bytes.len() as u64,
+        metadata["size_bytes"].as_u64().unwrap(),
+        "file on disk must be the same bytes as reported"
+    );
+    assert!(matches!(
+        result.content.get(1),
+        Some(rmcp::model::ContentBlock::Image(image)) if image.mime_type == "image/jpeg"
+    ));
+
+    // PNG stays available as an explicit option.
+    let png_path = dir.join("lossless.png");
+    let result = server
+        .call_browser_tool(call(
+            "browser_screenshot",
+            json!({"path": png_path.to_str().unwrap(), "format": "png"}),
+        ))
+        .await?;
+    let metadata: serde_json::Value = serde_json::from_str(text_content(&result))?;
+    let bytes = std::fs::read(metadata["saved_to"].as_str().unwrap())?;
+    assert!(
+        bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "format=png must save PNG bytes"
+    );
+    assert!(matches!(
+        result.content.get(1),
+        Some(rmcp::model::ContentBlock::Image(image)) if image.mime_type == "image/png"
+    ));
+
+    // A typo'd format is an explicit INVALID_PARAMS, not a silent default.
+    let error = server
+        .call_browser_tool(call(
+            "browser_screenshot",
+            json!({"format": "webp"}),
+        ))
+        .await
+        .expect_err("unknown format must be rejected");
+    assert!(error.message.contains("jpeg"), "{}", error.message);
+
+    // An unwritable path (under a regular file) is a tool error, not a panic.
+    let blocked = server
+        .call_browser_tool(call(
+            "browser_screenshot",
+            json!({"path": jpeg_path.join("under-a-file.jpg").to_str().unwrap()}),
+        ))
+        .await?;
+    assert_eq!(blocked.is_error, Some(true));
+
+    std::fs::remove_dir_all(&dir).ok();
     Ok(())
 }

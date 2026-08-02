@@ -82,6 +82,39 @@ impl Default for BrowserLaunchOptions {
     }
 }
 
+/// Screenshot encoding. JPEG is the default: Chromium encodes both natively,
+/// and screenshots flow inline to MCP clients and vision prompts as base64,
+/// where PNG of a web page is routinely 5-10x the bytes for no legibility
+/// gain. PNG stays available for lossless captures (pixel diffing, assets).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScreenshotFormat {
+    /// Lossy JPEG at quality 85 — keeps small text readable.
+    #[default]
+    Jpeg,
+    /// Lossless PNG.
+    Png,
+}
+
+impl ScreenshotFormat {
+    /// Parses the MCP tool argument; unknown values are an explicit error so a
+    /// typo ("jpg2000") fails loudly instead of silently picking a default.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "jpeg" | "jpg" => Some(Self::Jpeg),
+            "png" => Some(Self::Png),
+            _ => None,
+        }
+    }
+
+    /// The image MIME type for content blocks and data URLs.
+    pub fn mime(self) -> &'static str {
+        match self {
+            Self::Jpeg => "image/jpeg",
+            Self::Png => "image/png",
+        }
+    }
+}
+
 /// Current page metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageState {
@@ -421,15 +454,22 @@ impl BrowserPage {
         self.content().await
     }
 
-    /// Captures a PNG screenshot.
-    pub async fn screenshot_png(&self, full_page: bool) -> Result<Vec<u8>> {
+    /// Captures a screenshot in the requested [`ScreenshotFormat`].
+    pub async fn screenshot_image(
+        &self,
+        full_page: bool,
+        format: ScreenshotFormat,
+    ) -> Result<Vec<u8>> {
+        let mut params = ScreenshotParams::builder().full_page(full_page);
+        params = match format {
+            // Quality only applies to lossy formats; Chromium rejects it on PNG.
+            ScreenshotFormat::Jpeg => params
+                .format(CaptureScreenshotFormat::Jpeg)
+                .quality(85),
+            ScreenshotFormat::Png => params.format(CaptureScreenshotFormat::Png),
+        };
         self.page
-            .screenshot(
-                ScreenshotParams::builder()
-                    .format(CaptureScreenshotFormat::Png)
-                    .full_page(full_page)
-                    .build(),
-            )
+            .screenshot(params.build())
             .await
             .context("failed to capture page screenshot")
     }

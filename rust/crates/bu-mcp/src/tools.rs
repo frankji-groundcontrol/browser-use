@@ -117,9 +117,15 @@ pub fn low_level_tools() -> Vec<Tool> {
                         "description": "Whether to capture the full scrollable page or just the visible viewport",
                         "default": false
                     },
+                    "format": {
+                        "type": "string",
+                        "enum": ["jpeg", "png"],
+                        "description": "Image encoding. jpeg (default) is much smaller inline; png is lossless for pixel-exact captures.",
+                        "default": "jpeg"
+                    },
                     "path": {
                         "type": "string",
-                        "description": "Optional absolute file path to also write the PNG to, for keeping a durable artefact of what was on screen."
+                        "description": "Optional absolute file path to also write the screenshot to (encoded per `format`), for keeping a durable artefact of what was on screen."
                     }
                 }
             }),

@@ -40,6 +40,16 @@ pub struct ImageUrl {
     pub url: String,
 }
 
+/// Returns the MIME type for known image magic bytes, defaulting to JPEG (the
+/// screenshot pipeline's default encoding) for anything unrecognized.
+fn sniff_image_mime(image: &[u8]) -> &'static str {
+    if image.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else {
+        "image/jpeg"
+    }
+}
+
 impl MessageContent {
     /// Returns the concatenated text of the message, ignoring images.
     pub fn as_text(&self) -> String {
@@ -65,14 +75,15 @@ pub fn message(role: impl Into<String>, content: impl Into<String>) -> ChatMessa
     }
 }
 
-/// Builds a chat message with a PNG screenshot attached after the text, encoded
-/// as an `image/png` base64 data URL.
+/// Builds a chat message with a screenshot attached after the text as a base64
+/// data URL. The MIME type is sniffed from the image magic bytes (JPEG or PNG),
+/// so it cannot drift from whatever encoding the capture actually used.
 pub fn message_with_image(
     role: impl Into<String>,
     text: impl Into<String>,
-    png: &[u8],
+    image: &[u8],
 ) -> ChatMessage {
-    let data_url = format!("data:image/png;base64,{}", STANDARD.encode(png));
+    let data_url = format!("data:{};base64,{}", sniff_image_mime(image), STANDARD.encode(image));
     ChatMessage {
         role: role.into(),
         content: MessageContent::Parts(vec![
@@ -96,6 +107,14 @@ mod tests {
     }
 
     #[test]
+    fn image_mime_is_sniffed_from_magic_bytes() {
+        assert_eq!(sniff_image_mime(b"\x89PNG\r\n\x1a\nrest"), "image/png");
+        assert_eq!(sniff_image_mime(b"\xff\xd8\xffrest"), "image/jpeg");
+        // Unknown bytes fall back to the pipeline default.
+        assert_eq!(sniff_image_mime(&[1, 2, 3]), "image/jpeg");
+    }
+
+    #[test]
     fn image_message_serializes_as_openai_parts() {
         let value = serde_json::to_value(message_with_image("user", "look", &[1, 2, 3])).unwrap();
         assert_eq!(value["role"], "user");
@@ -103,7 +122,7 @@ mod tests {
         assert_eq!(value["content"][1]["type"], "image_url");
         assert_eq!(
             value["content"][1]["image_url"]["url"],
-            "data:image/png;base64,AQID"
+            "data:image/jpeg;base64,AQID"
         );
     }
 }

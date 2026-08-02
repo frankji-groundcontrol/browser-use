@@ -12,6 +12,7 @@ use anyhow::{anyhow, Context, Result};
 use bu_cdp::{BrowserPage, BrowserSession, PageState, SelectorMapElement, TabInfo, UrlPolicy};
 use tokio::sync::{mpsc, oneshot};
 
+pub use bu_cdp::ScreenshotFormat;
 pub use bu_cdp::UrlPolicy as BrowserUrlPolicy;
 
 const SESSION_ID: &str = "default";
@@ -39,7 +40,7 @@ pub struct BrowserStateSnapshot {
     pub elements: Vec<SelectorMapElement>,
     /// Open browser tabs.
     pub tabs: Vec<TabInfo>,
-    /// Optional PNG screenshot bytes.
+    /// Optional screenshot bytes (JPEG: state captures feed vision prompts).
     pub screenshot: Option<Vec<u8>>,
 }
 
@@ -163,9 +164,17 @@ impl ActorHandle {
     }
 
     /// Captures a screenshot of the active page.
-    pub async fn screenshot(&self, full_page: bool) -> Result<Vec<u8>> {
-        self.request(|reply| Command::Screenshot { full_page, reply })
-            .await
+    pub async fn screenshot(
+        &self,
+        full_page: bool,
+        format: ScreenshotFormat,
+    ) -> Result<Vec<u8>> {
+        self.request(|reply| Command::Screenshot {
+            full_page,
+            format,
+            reply,
+        })
+        .await
     }
 
     /// Sets the CSS viewport of the active page (0x0 clears the override).
@@ -289,6 +298,7 @@ enum Command {
     },
     Screenshot {
         full_page: bool,
+        format: ScreenshotFormat,
         reply: Reply<Vec<u8>>,
     },
     SetViewport {
@@ -455,8 +465,12 @@ impl BrowserActor {
             Command::GoBack { reply } => {
                 let _ = reply.send(self.go_back().await);
             }
-            Command::Screenshot { full_page, reply } => {
-                let _ = reply.send(self.screenshot(full_page).await);
+            Command::Screenshot {
+                full_page,
+                format,
+                reply,
+            } => {
+                let _ = reply.send(self.screenshot(full_page, format).await);
             }
             Command::SetViewport { width, height, mobile, reply } => {
                 let _ = reply.send(self.set_viewport(width, height, mobile).await);
@@ -576,7 +590,8 @@ impl BrowserActor {
         self.selector_cache.replace(&elements);
         let tabs = self.tabs().await?;
         let screenshot = if include_screenshot {
-            screenshot_or_none(SCREENSHOT_BUDGET, page.screenshot_png(false)).await
+            screenshot_or_none(SCREENSHOT_BUDGET, page.screenshot_image(false, ScreenshotFormat::Jpeg))
+                .await
         } else {
             None
         };
@@ -622,9 +637,12 @@ impl BrowserActor {
         page.type_into_backend_node_id(backend_node_id, text).await
     }
 
-    async fn screenshot(&mut self, full_page: bool) -> Result<Vec<u8>> {
+    async fn screenshot(&mut self, full_page: bool, format: ScreenshotFormat) -> Result<Vec<u8>> {
         self.guard_active_url().await;
-        self.active_page().await?.screenshot_png(full_page).await
+        self.active_page()
+            .await?
+            .screenshot_image(full_page, format)
+            .await
     }
 
     async fn set_viewport(&mut self, width: u32, height: u32, mobile: bool) -> Result<()> {

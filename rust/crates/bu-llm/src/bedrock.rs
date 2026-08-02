@@ -147,7 +147,7 @@ fn content_blocks(content: &MessageContent) -> Result<Vec<ContentBlock>> {
                 ContentPart::ImageUrl { image_url } => {
                     let bytes = decode_data_url(&image_url.url)?;
                     let image = ImageBlock::builder()
-                        .format(ImageFormat::Png)
+                        .format(data_url_format(&image_url.url))
                         .source(ImageSource::Bytes(Blob::new(bytes)))
                         .build()
                         .map_err(|error| anyhow!("failed to build Bedrock image block: {error}"))?;
@@ -155,6 +155,16 @@ fn content_blocks(content: &MessageContent) -> Result<Vec<ContentBlock>> {
                 }
             })
             .collect(),
+    }
+}
+
+/// Maps the data URL's mime prefix to Bedrock's image format. The screenshot
+/// pipeline emits JPEG; PNG is kept for any caller passing its own data URL.
+fn data_url_format(url: &str) -> ImageFormat {
+    if url.starts_with("data:image/png") {
+        ImageFormat::Png
+    } else {
+        ImageFormat::Jpeg
     }
 }
 
@@ -190,5 +200,17 @@ mod tests {
             decode_data_url("data:image/png;base64,AQID").unwrap(),
             vec![1, 2, 3]
         );
+    }
+
+    #[test]
+    fn data_url_format_follows_the_mime_prefix() {
+        assert!(matches!(
+            data_url_format("data:image/jpeg;base64,AQID"),
+            ImageFormat::Jpeg
+        ));
+        assert!(matches!(
+            data_url_format("data:image/png;base64,AQID"),
+            ImageFormat::Png
+        ));
     }
 }

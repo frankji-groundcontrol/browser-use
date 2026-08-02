@@ -6,7 +6,7 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use bu_actor::{ActorHandle, ClickOutcome};
+use bu_actor::{ActorHandle, ClickOutcome, ScreenshotFormat};
 use bu_dom::extract_clean_markdown;
 use bu_llm::{message, OpenAiChatClient};
 use rmcp::{
@@ -194,7 +194,7 @@ impl BrowserUseMcpServer {
         if let Some(screenshot) = snapshot.screenshot {
             result.content.push(ContentBlock::image(
                 BASE64_STANDARD.encode(screenshot),
-                "image/png",
+                "image/jpeg",
             ));
         }
         Ok(result)
@@ -381,8 +381,21 @@ impl BrowserUseMcpServer {
         arguments: Option<Map<String, Value>>,
     ) -> Result<CallToolResult, ErrorData> {
         let full_page = optional_bool(arguments.as_ref(), "full_page").unwrap_or(false);
-        let png = match self.actor.screenshot(full_page).await {
-            Ok(png) => png,
+        let format = match optional_str(arguments.as_ref(), "format") {
+            None => ScreenshotFormat::default(),
+            Some(raw) => match ScreenshotFormat::parse(raw) {
+                Some(format) => format,
+                None => {
+                    return Err(ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        format!("browser_screenshot format must be \"jpeg\" or \"png\", got {raw:?}"),
+                        None,
+                    ))
+                }
+            },
+        };
+        let image = match self.actor.screenshot(full_page, format).await {
+            Ok(image) => image,
             Err(error) => return Ok(browser_tool_error("browser_screenshot failed", error)),
         };
         // Optionally persist the capture. The tool result carries the image for
@@ -390,24 +403,24 @@ impl BrowserUseMcpServer {
         // be attached to a test log or uploaded later.
         let mut saved: Option<String> = None;
         if let Some(path) = optional_str(arguments.as_ref(), "path") {
-            match std::fs::write(path, &png) {
-                Ok(()) => saved = Some(path.to_owned()),
+            match write_screenshot(path, &image) {
+                Ok(saved_to) => saved = Some(saved_to),
                 Err(error) => {
                     return Ok(browser_tool_error(
                         "browser_screenshot could not write path",
-                        anyhow::anyhow!("{path}: {error}"),
+                        error,
                     ))
                 }
             }
         }
         let metadata = match &saved {
-            Some(path) => json!({ "size_bytes": png.len(), "saved_to": path }).to_string(),
-            None => json!({ "size_bytes": png.len() }).to_string(),
+            Some(path) => json!({ "size_bytes": image.len(), "saved_to": path }).to_string(),
+            None => json!({ "size_bytes": image.len() }).to_string(),
         };
 
         Ok(CallToolResult::success(vec![
             ContentBlock::text(metadata),
-            ContentBlock::image(BASE64_STANDARD.encode(png), "image/png"),
+            ContentBlock::image(BASE64_STANDARD.encode(image), format.mime()),
         ]))
     }
 
@@ -661,6 +674,23 @@ async fn build_agent_llm(model: Option<String>) -> Result<bu_llm::LlmProvider, E
         bu_llm::OpenAiChatConfig::from_env_with_model_override(model).map_err(llm_error)?;
     let client = OpenAiChatClient::new(config).map_err(llm_error)?;
     Ok(bu_llm::LlmProvider::OpenAi(client))
+}
+
+/// Writes screenshot bytes to `path`, creating parent directories, and returns
+/// the absolute path actually written. Relative paths resolve against the MCP
+/// server's cwd — opaque to the caller — so the reply must name where the file
+/// really landed rather than echo the argument back.
+fn write_screenshot(path: &str, image: &[u8]) -> anyhow::Result<String> {
+    let path = std::path::Path::new(path);
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| anyhow::anyhow!("creating {}: {error}", parent.display()))?;
+    }
+    std::fs::write(path, image).map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))?;
+    let absolute = path
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(path));
+    Ok(absolute.display().to_string())
 }
 
 fn optional_str<'a>(arguments: Option<&'a Map<String, Value>>, key: &str) -> Option<&'a str> {

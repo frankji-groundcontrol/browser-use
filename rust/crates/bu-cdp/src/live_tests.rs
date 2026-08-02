@@ -27,8 +27,10 @@ async fn page_helpers_return_html_screenshot_scroll_and_history() -> anyhow::Res
     let html = page.html(Some("#app")).await?;
     assert_eq!(html, "<main id=\"app\"><p>one</p></main>");
 
-    let screenshot = page.screenshot_png(false).await?;
-    assert!(screenshot.starts_with(b"\x89PNG\r\n\x1a\n"));
+    let screenshot = page
+        .screenshot_image(false, crate::ScreenshotFormat::Jpeg)
+        .await?;
+    assert!(screenshot.starts_with(b"\xff\xd8\xff"));
 
     page.scroll("down").await?;
     let scroll_y = page.scroll_y().await?;

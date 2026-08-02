@@ -472,7 +472,7 @@ mod tests {
         assert_eq!(parts[1]["type"], "image_url");
         assert!(parts[1]["image_url"]["url"]
             .as_str()
-            .is_some_and(|url| url.starts_with("data:image/png;base64,")));
+            .is_some_and(|url| url.starts_with("data:image/jpeg;base64,")));
 
         Ok(())
     }
