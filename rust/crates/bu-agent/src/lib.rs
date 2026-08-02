@@ -57,33 +57,63 @@ pub async fn run_task(
     let mut read_state: Vec<String> = Vec::new();
     let mut consecutive_failures = 0usize;
     let mut done = false;
+    // Last URL seen by a successful capture, so a failed one can still tell the
+    // model where it is.
+    let mut last_url = String::from("about:blank");
 
     for step in 0..max_steps {
         report.steps += 1;
         let is_last_step = step + 1 == max_steps;
 
+        // A failed capture used to end the whole run. The model can usually
+        // recover a wedged page itself (navigate, go back, wait), so give it a
+        // minimal state that names the failure and explicitly voids every index
+        // instead of abandoning the task on one bad step. Still bounded by
+        // MAX_CONSECUTIVE_FAILURES. Mirrors Python's state_error summary.
         let snapshot = match actor.get_state(use_vision).await {
-            Ok(snapshot) => snapshot,
+            Ok(snapshot) => Some(snapshot),
             Err(error) => {
                 report.errors.push(format!("get_state failed: {error}"));
-                break;
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    report.errors.push(format!(
+                        "aborting after {consecutive_failures} consecutive failed steps"
+                    ));
+                    break;
+                }
+                None
             }
         };
-        push_unique_url(&mut report.urls_visited, snapshot.page.url.clone());
-        let pre_url = snapshot.page.url.clone();
 
-        let screenshot = snapshot.screenshot.clone();
-        let state = json!({
-            "url": snapshot.page.url,
-            "title": snapshot.page.title,
-            "interactive_elements": snapshot.elements.iter().map(|element| {
+        let (state, screenshot) = match &snapshot {
+            Some(snapshot) => {
+                push_unique_url(&mut report.urls_visited, snapshot.page.url.clone());
+                last_url = snapshot.page.url.clone();
+                (
+                    json!({
+                        "url": snapshot.page.url,
+                        "title": snapshot.page.title,
+                        "interactive_elements": snapshot.elements.iter().map(|element| {
+                            json!({
+                                "index": element.index,
+                                "tag": element.tag,
+                                "text": element.text
+                            })
+                        }).collect::<Vec<_>>()
+                    }),
+                    snapshot.screenshot.clone(),
+                )
+            }
+            None => (
                 json!({
-                    "index": element.index,
-                    "tag": element.tag,
-                    "text": element.text
-                })
-            }).collect::<Vec<_>>()
-        });
+                    "url": last_url,
+                    "interactive_elements": [],
+                    "state_error": "Browser state capture failed, so no element indices are available and none are safe to use. Recover with navigation, waiting, or another non-indexed action."
+                }),
+                None,
+            ),
+        };
+        let pre_url = last_url.clone();
         let final_hint = if is_last_step {
             "\n\nThis is the FINAL step: return a single \"done\" action with your best answer."
         } else {
