@@ -132,16 +132,31 @@ Requests use the **Responses API** (`POST {base}/responses`). Set
 `BROWSER_USE_OPENAI_API=chat_completions` for gateways that only implement the
 older route.
 
-> **Likely gap, UNVERIFIED.** The `ANTHROPIC_*` fallback is only known to work
-> against *gateways* that expose the OpenAI routes — that is what it was tested
-> against (`/v1/responses` on the gateway returns 200). Pointing it at the real
-> `api.anthropic.com` probably fails, since Anthropic documents
-> `POST /v1/messages` with `x-api-key` + `anthropic-version` headers while this
-> client posts `{base}/responses` with `Authorization: Bearer`. That was not
-> confirmed: an attempt to probe it returned the same 403 edge block on every
-> path, including `/v1/messages`, so the check proved nothing. No native
-> Anthropic provider exists; if you need api.anthropic.com directly, that is
-> the work to do.
+> **What the fallback actually requires.** `ANTHROPIC_BASE_URL` must point at an
+> endpoint that serves the **OpenAI routes**, because this client posts
+> `{base}/responses` (or `/chat/completions`) with `Authorization: Bearer`. It
+> never speaks Anthropic's native protocol.
+>
+> That is not a stretch in practice: an Anthropic gateway typically serves the
+> OpenAI routes too. Measured on the gateway this was tested against — the
+> variables are Anthropic's, the wire protocol used is OpenAI's:
+>
+> | Route | Result |
+> | --- | --- |
+> | `/v1/messages` | Anthropic JSON (`content[].text`, `stop_reason`) |
+> | `/v1/chat/completions`, `/v1/responses`, `/responses` | OpenAI JSON |
+> | `/messages` | **HTTP 200 with an HTML landing page — not the API** |
+>
+> Note the asymmetry: the OpenAI routes answer at both roots, the Anthropic one
+> only under `/v1`. A wrong base URL therefore does not fail cleanly, it returns
+> 200 and HTML; this client reports it as a parse failure rather than silently
+> returning nothing, but check the route your gateway actually serves.
+>
+> The real `api.anthropic.com` documents only `POST /v1/messages` with
+> `x-api-key` + `anthropic-version`, so it would very likely NOT work — though
+> that is inference, not measurement: probing it returned the same 403 edge
+> block on every path, including one that certainly exists. Supporting it would
+> mean writing a native Anthropic provider, which does not exist.
 
 Whichever base URL you use, check the route it actually serves — some gateways
 expose the OpenAI routes at the root (`/responses`) and others under `/v1`.
