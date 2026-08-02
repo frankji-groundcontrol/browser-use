@@ -33,6 +33,10 @@ pub(crate) struct EnhancedNode {
     pub(crate) bounds: Option<Rect>,
     pub(crate) paint_order: Option<i64>,
     pub(crate) has_js_click_listener: bool,
+    /// Frame that owns the DOMSnapshot document this node's `bounds` came from.
+    /// `bounds` are frame-LOCAL, so only rects sharing this id share a coordinate
+    /// space and may be compared geometrically.
+    pub(crate) document_frame_id: Option<String>,
 }
 #[derive(Debug, Clone)]
 pub(crate) struct SelectorMapCandidate {
@@ -120,11 +124,13 @@ pub(crate) fn merge_snapshot(
         let Some(backend_node_ids) = &document.nodes.backend_node_id else {
             continue;
         };
+        let document_frame_id = snapshot_string(snapshot, document.frame_id).map(str::to_owned);
 
         for (node_index, backend_node_id) in backend_node_ids.iter().enumerate() {
             let backend_node_id_value = *backend_node_id.inner();
             let enhanced = nodes.entry(backend_node_id_value).or_default();
             enhanced.backend_node_id = Some(*backend_node_id);
+            enhanced.document_frame_id = document_frame_id.clone();
 
             if enhanced.tag.is_empty() {
                 if let Some(tag) = document
@@ -303,24 +309,35 @@ pub(crate) fn apply_paint_order_occlusion_filter(
     enhanced: &HashMap<i64, EnhancedNode>,
 ) {
     // Opaque occluders sorted front-to-back (highest paint order first).
-    let mut occluders: Vec<(i64, Rect)> = enhanced
+    let mut occluders: Vec<(i64, Option<&str>, Rect)> = enhanced
         .values()
         .filter(|node| is_opaque_enhanced_node(node))
-        .filter_map(|node| Some((node.paint_order?, node.bounds?)))
-        .filter(|(_, rect)| !rect.is_empty())
+        .filter_map(|node| {
+            Some((
+                node.paint_order?,
+                node.document_frame_id.as_deref(),
+                node.bounds?,
+            ))
+        })
+        .filter(|(_, _, rect)| !rect.is_empty())
         .collect();
     occluders.sort_by(|a, b| b.0.cmp(&a.0));
 
     candidates.retain(|candidate| {
-        let candidate_paint = enhanced
-            .get(&candidate.backend_node_id_value())
-            .and_then(|node| node.paint_order)
-            .unwrap_or(i64::MIN);
+        let node = enhanced.get(&candidate.backend_node_id_value());
+        let candidate_paint = node.and_then(|node| node.paint_order).unwrap_or(i64::MIN);
+        let candidate_document = node.and_then(|node| node.document_frame_id.as_deref());
         let mut union = RectUnion::default();
-        for (paint_order, rect) in &occluders {
+        for (paint_order, document, rect) in &occluders {
             // Only elements painted strictly above the candidate can occlude it.
             if *paint_order <= candidate_paint {
                 break;
+            }
+            // DOMSnapshot bounds are frame-local, so rects from another document
+            // are in a different coordinate space and overlap only by coincidence.
+            // Without this, a top-document header culls everything in every iframe.
+            if *document != candidate_document {
+                continue;
             }
             union.add(*rect);
             if union.contains(candidate.bounds) {

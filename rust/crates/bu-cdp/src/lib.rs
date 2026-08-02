@@ -15,7 +15,9 @@ use chromiumoxide::{
     browser::{Browser, BrowserConfig},
     cdp::browser_protocol::{
         accessibility::GetFullAxTreeParams,
-        dom::{BackendNodeId, FocusParams, GetDocumentParams, ResolveNodeParams},
+        dom::{
+            BackendNodeId, FocusParams, GetContentQuadsParams, GetDocumentParams, ResolveNodeParams,
+        },
         dom_debugger::GetEventListenersParams,
         dom_snapshot::CaptureSnapshotParams,
         emulation::{ClearDeviceMetricsOverrideParams, SetDeviceMetricsOverrideParams},
@@ -698,12 +700,61 @@ impl BrowserPage {
         Ok(())
     }
 
+    /// Resolves an element's centre in TOP-LEVEL viewport coordinates.
+    ///
+    /// DOMSnapshot bounds are frame-LOCAL: an element inside an iframe reports
+    /// coordinates relative to that iframe's own document, with no offset for
+    /// where the iframe sits in the page. Dispatching a synthetic mouse event at
+    /// those coordinates therefore clicks whatever happens to occupy that spot in
+    /// the MAIN document — verified: an iframe button "click" fired the
+    /// top-document button instead, silently.
+    ///
+    /// `DOM.getContentQuads` returns quads "relative to viewport" with every frame
+    /// offset, scroll, and transform already applied by Chromium, so it is the
+    /// authority for where to click. Returns None when the node has no rendered
+    /// box (display:none, detached), leaving the caller to fall back.
+    async fn viewport_click_point(&self, backend_node_id: i64) -> Option<(f64, f64)> {
+        // Force a synchronous reflow first. Verified: straight after a DOM mutation
+        // getContentQuads returns the element's PRE-mutation box (a reordered
+        // button reported its old slot, so the click landed on whatever had moved
+        // into that slot), and a DOM.getDocument refresh does NOT fix it -- the
+        // stale part is layout, not the node tree. Reading offsetHeight flushes it.
+        let _ = self
+            .page
+            .evaluate("document.documentElement.offsetHeight")
+            .await;
+        let quads = self
+            .page
+            .execute(
+                GetContentQuadsParams::builder()
+                    .backend_node_id(BackendNodeId::new(backend_node_id))
+                    .build(),
+            )
+            .await
+            .ok()?;
+        // A quad is [x1,y1, x2,y2, x3,y3, x4,y4]; inline nodes yield several and
+        // the first is the leading box, which is what a user would click.
+        let points = quads.result.quads.first()?.inner();
+        if points.len() < 8 {
+            return None;
+        }
+        let x = points.iter().step_by(2).take(4).sum::<f64>() / 4.0;
+        let y = points.iter().skip(1).step_by(2).take(4).sum::<f64>() / 4.0;
+        Some((x, y))
+    }
+
     /// Clicks an element by stable Chromium backend node id.
     pub async fn click_backend_node_id(&self, backend_node_id: i64) -> Result<()> {
-        let element = self
-            .current_element_by_backend_node_id(backend_node_id)
-            .await?;
-        self.click_coordinates(element.x, element.y).await?;
+        let (x, y) = match self.viewport_click_point(backend_node_id).await {
+            Some(point) => point,
+            None => {
+                let element = self
+                    .current_element_by_backend_node_id(backend_node_id)
+                    .await?;
+                (element.x, element.y)
+            }
+        };
+        self.click_coordinates(x, y).await?;
         Ok(())
     }
 
@@ -779,7 +830,24 @@ impl BrowserPage {
                 (() => {
                     const el = document.activeElement;
                     if (!el) return false;
-                    if ('value' in el) {
+                    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+                        // React patches the INSTANCE value setter to track values, so a
+                        // direct `el.value = ''` makes its tracker conclude nothing
+                        // changed: the input event is ignored and the controlled
+                        // component keeps the old text. Go through the prototype's
+                        // native setter to get past it.
+                        const proto = el instanceof HTMLTextAreaElement
+                            ? window.HTMLTextAreaElement.prototype
+                            : window.HTMLInputElement.prototype;
+                        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                        try {
+                            desc.set.call(el, '');
+                        } catch (e) {
+                            el.value = '';
+                        }
+                    } else if ('value' in el) {
+                        // Web components and <select> keep their own setter; the
+                        // HTMLInputElement one throws Illegal invocation on them.
                         el.value = '';
                     } else {
                         el.textContent = '';

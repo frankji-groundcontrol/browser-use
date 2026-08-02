@@ -938,6 +938,45 @@ async fn typing_replaces_prefilled_value_and_masks_email_result() -> anyhow::Res
 
 #[tokio::test]
 #[cfg(feature = "live-chrome")]
+async fn clearing_uses_native_setter_so_react_controlled_inputs_actually_clear(
+) -> anyhow::Result<()> {
+    // React patches the INSTANCE value setter to track values. A plain
+    // `el.value = ''` therefore goes through React's setter, its tracker concludes
+    // nothing changed, the input event is ignored, and a controlled component keeps
+    // the old text -- a silent no-op clear. The page below reproduces that exactly:
+    // an instance-level setter that swallows the write. Only a clear that goes
+    // through HTMLInputElement.prototype's native setter gets past it.
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call(
+            "browser_navigate",
+            json!({"url": "data:text/html,<title>Controlled</title><input id=i value='old value'><script>const el=document.getElementById('i');const p=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');Object.defineProperty(el,'value',{configurable:true,get(){return p.get.call(this)},set(v){if(v==='')return;p.set.call(this,v)}})</script>"}),
+        ))
+        .await?;
+    let input_index = input_index(&server).await?;
+
+    server
+        .call_browser_tool(call(
+            "browser_type",
+            json!({"index": input_index, "text": ""}),
+        ))
+        .await?;
+
+    let value = server
+        .actor()
+        .evaluate("document.getElementById('i').value")
+        .await?;
+    assert_eq!(
+        value,
+        json!(""),
+        "clear must bypass the patched instance setter via the prototype's native setter"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
 async fn typing_empty_text_clears_prefilled_input() -> anyhow::Result<()> {
     let server = BrowserUseMcpServer::new();
 
@@ -1417,4 +1456,112 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) -> anyhow::Result
         headers,
         body,
     })
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn top_document_overlay_does_not_occlude_an_iframe_button() -> anyhow::Result<()> {
+    // Paint-order occlusion unions rects from every document together, but
+    // DOMSnapshot bounds are frame-local. The opaque header below occupies
+    // (0,0)-(400,120) in the TOP document; the iframe button's frame-local rect is
+    // (20,20)-(120,50), which sits inside it numerically while being nowhere near
+    // it on screen (the iframe starts 300px down). Unscoped, the button is culled.
+    const PAGE: &str = "data:text/html,<title>Overlay</title><style>body{margin:0}</style><body><script>\
+{\
+var f=document.createElement('iframe');\
+f.setAttribute('style','position:absolute;top:300px;left:50px;width:400px;height:200px;border:0');\
+document.body.appendChild(f);\
+var d=f.contentDocument;\
+d.body.setAttribute('style','margin:0');\
+var b=d.createElement('button');\
+b.textContent='InnerBtn';\
+b.setAttribute('style','position:absolute;top:20px;left:20px;width:100px;height:30px');\
+b.onclick=function(){parent.document.title='INNER'};\
+d.body.appendChild(b);\
+var h=document.createElement('div');\
+h.setAttribute('style','position:absolute;top:0;left:0;width:400px;height:120px;background:white;opacity:1');\
+document.body.appendChild(h);\
+}</script>";
+
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call("browser_navigate", json!({"url": PAGE})))
+        .await?;
+    let state = server
+        .call_browser_tool(call("browser_get_state", json!({})))
+        .await?
+        .structured_content
+        .expect("state");
+
+    assert!(
+        state["interactive_elements"]
+            .as_array()
+            .expect("elements array")
+            .iter()
+            .any(|element| element["text"].as_str() == Some("InnerBtn")),
+        "an opaque top-document header must not occlude a button in a different document, got {}",
+        state["interactive_elements"]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn clicking_a_button_inside_an_offset_iframe_hits_that_button() -> anyhow::Result<()> {
+    // Click dispatches a synthetic mouse event at the element's snapshot centre,
+    // so this pins the coordinate space of iframe content. The layout is chosen so
+    // a frame-LOCAL centre for InnerBtn (~70,35) lands squarely on TopBtn
+    // (10..110 x 10..40): if bounds were frame-local the wrong button would fire,
+    // and the title would read TOP instead of INNER.
+    const PAGE: &str = "data:text/html,<title>IF</title><style>body{margin:0}</style><script>\
+window.onload=function(){\
+var t=document.createElement('button');\
+t.textContent='TopBtn';\
+t.setAttribute('style','position:absolute;top:10px;left:10px;width:100px;height:30px');\
+t.onclick=function(){document.title='TOP'};\
+document.body.appendChild(t);\
+var f=document.createElement('iframe');\
+f.setAttribute('style','position:absolute;top:300px;left:50px;width:400px;height:200px;border:0');\
+document.body.appendChild(f);\
+var d=f.contentDocument;\
+d.body.setAttribute('style','margin:0');\
+var b=d.createElement('button');\
+b.textContent='InnerBtn';\
+b.setAttribute('style','position:absolute;top:20px;left:20px;width:100px;height:30px');\
+b.onclick=function(){parent.document.title='INNER'};\
+d.body.appendChild(b);\
+};</script>";
+
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call("browser_navigate", json!({"url": PAGE})))
+        .await?;
+
+    let state = server
+        .call_browser_tool(call("browser_get_state", json!({})))
+        .await?
+        .structured_content
+        .expect("state");
+    let elements = state["interactive_elements"]
+        .as_array()
+        .expect("elements array");
+    let inner = elements
+        .iter()
+        .find(|element| element["text"].as_str() == Some("InnerBtn"))
+        .expect("the iframe button should be indexed");
+    let inner_index = inner["index"].as_i64().expect("index");
+
+    server
+        .call_browser_tool(call("browser_click", json!({"index": inner_index})))
+        .await?;
+
+    let title = server.actor().evaluate("document.title").await?;
+    assert_eq!(
+        title,
+        json!("INNER"),
+        "clicking the iframe button must hit it, not the top-document button"
+    );
+
+    Ok(())
 }

@@ -378,7 +378,25 @@ impl BrowserUseMcpServer {
             Ok(png) => png,
             Err(error) => return Ok(browser_tool_error("browser_screenshot failed", error)),
         };
-        let metadata = json!({ "size_bytes": png.len() }).to_string();
+        // Optionally persist the capture. The tool result carries the image for
+        // the caller to look at, but that is ephemeral — a saved file is what can
+        // be attached to a test log or uploaded later.
+        let mut saved: Option<String> = None;
+        if let Some(path) = optional_str(arguments.as_ref(), "path") {
+            match std::fs::write(path, &png) {
+                Ok(()) => saved = Some(path.to_owned()),
+                Err(error) => {
+                    return Ok(browser_tool_error(
+                        "browser_screenshot could not write path",
+                        anyhow::anyhow!("{path}: {error}"),
+                    ))
+                }
+            }
+        }
+        let metadata = match &saved {
+            Some(path) => json!({ "size_bytes": png.len(), "saved_to": path }).to_string(),
+            None => json!({ "size_bytes": png.len() }).to_string(),
+        };
 
         Ok(CallToolResult::success(vec![
             ContentBlock::text(metadata),

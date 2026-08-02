@@ -116,6 +116,10 @@ pub fn low_level_tools() -> Vec<Tool> {
                         "type": "boolean",
                         "description": "Whether to capture the full scrollable page or just the visible viewport",
                         "default": false
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Optional absolute file path to also write the PNG to, for keeping a durable artefact of what was on screen."
                     }
                 }
             }),
