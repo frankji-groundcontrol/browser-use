@@ -83,7 +83,11 @@ pub fn message_with_image(
     text: impl Into<String>,
     image: &[u8],
 ) -> ChatMessage {
-    let data_url = format!("data:{};base64,{}", sniff_image_mime(image), STANDARD.encode(image));
+    let data_url = format!(
+        "data:{};base64,{}",
+        sniff_image_mime(image),
+        STANDARD.encode(image)
+    );
     ChatMessage {
         role: role.into(),
         content: MessageContent::Parts(vec![

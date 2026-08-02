@@ -154,6 +154,19 @@ pub fn low_level_tools() -> Vec<Tool> {
             }),
         ),
         tool(
+            "browser_read_clipboard",
+            "Read the browser clipboard as text - use after clicking a page's \"Copy\" button to capture what it copied. This is Chromium's own clipboard, not the operating system's, so it cannot read text you copied in another application.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Optional file path to also write the clipboard text to (UTF-8)."
+                    }
+                }
+            }),
+        ),
+        tool(
             "browser_scroll",
             "Scroll the page",
             json!({

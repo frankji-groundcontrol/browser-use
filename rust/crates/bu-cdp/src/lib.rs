@@ -15,6 +15,7 @@ use chromiumoxide::{
     browser::{Browser, BrowserConfig},
     cdp::browser_protocol::{
         accessibility::GetFullAxTreeParams,
+        browser::{GrantPermissionsParams, PermissionType},
         dom::{
             BackendNodeId, FocusParams, GetContentQuadsParams, GetDocumentParams, ResolveNodeParams,
         },
@@ -28,6 +29,7 @@ use chromiumoxide::{
         page::{CaptureScreenshotFormat, StopLoadingParams},
     },
     cdp::js_protocol::runtime::ReleaseObjectParams,
+    handler::Handler,
     page::Page,
     page::ScreenshotParams,
 };
@@ -46,7 +48,8 @@ pub use security::UrlPolicy;
 const MAX_LISTENER_PROBE_NODES: usize = 500;
 
 use discovery::{
-    chromium_path_from_env, find_playwright_chromium, headless_from_env, unique_user_data_dir,
+    cdp_url_from_env, chromium_path_from_env, find_playwright_chromium, headless_from_env,
+    unique_user_data_dir, user_data_dir_from_env,
 };
 use dom::{
     apply_bounding_box_containment_filter, apply_paint_order_occlusion_filter,
@@ -61,6 +64,12 @@ pub struct BrowserLaunchOptions {
     pub headless: bool,
     /// Optional Chromium executable path. If omitted, Browser Use discovery is used.
     pub executable_path: Option<PathBuf>,
+    /// Profile directory to reuse across runs. `None` means a throwaway profile
+    /// that is deleted on close, so no login survives; set this to keep cookies.
+    pub user_data_dir: Option<PathBuf>,
+    /// DevTools endpoint of an already-running Chromium to attach to instead of
+    /// launching one. Takes precedence over `user_data_dir`.
+    pub cdp_url: Option<String>,
 }
 
 impl BrowserLaunchOptions {
@@ -69,6 +78,8 @@ impl BrowserLaunchOptions {
         Self {
             headless: headless_from_env(),
             executable_path: chromium_path_from_env(),
+            user_data_dir: user_data_dir_from_env(),
+            cdp_url: cdp_url_from_env(),
         }
     }
 }
@@ -78,6 +89,8 @@ impl Default for BrowserLaunchOptions {
         Self {
             headless: true,
             executable_path: None,
+            user_data_dir: None,
+            cdp_url: None,
         }
     }
 }
@@ -171,7 +184,14 @@ pub struct BrowserSession {
     browser: Arc<Mutex<Browser>>,
     handler_task: JoinHandle<()>,
     healthy: Arc<AtomicBool>,
-    user_data_dir: PathBuf,
+    /// Set only for a throwaway profile WE created, which is ours to delete. A
+    /// user-supplied profile holds their logins and must survive. The held lock
+    /// file marks it live so a concurrent session's startup sweep skips it; the
+    /// OS releases it even if this process is killed.
+    scratch_user_data_dir: Option<(PathBuf, std::fs::File)>,
+    /// True when attached to a browser someone else launched: it is not ours to
+    /// close, and killing it would take their windows down with it.
+    attached: bool,
 }
 
 impl BrowserSession {
@@ -185,16 +205,42 @@ impl BrowserSession {
         Self::launch_with_options(BrowserLaunchOptions::from_env()).await
     }
 
-    /// Launches Chromium using explicit options.
+    /// Launches Chromium using explicit options, or attaches to a running one.
     pub async fn launch_with_options(options: BrowserLaunchOptions) -> Result<Self> {
+        if let Some(cdp_url) = options.cdp_url.as_deref() {
+            return Self::attach(cdp_url).await;
+        }
+
         let executable_path = options.executable_path.or_else(find_playwright_chromium);
 
-        let user_data_dir = unique_user_data_dir()?;
+        // A caller-supplied profile is theirs: reuse it and never delete it, so
+        // cookies (and therefore logins) survive across runs. Otherwise take a
+        // throwaway dir that Drop cleans up.
+        let (user_data_dir, scratch_user_data_dir) = match options.user_data_dir {
+            Some(dir) => {
+                fs::create_dir_all(&dir).with_context(|| {
+                    format!("failed to create Chromium user data dir {}", dir.display())
+                })?;
+                (dir, None)
+            }
+            None => {
+                let (dir, lock) = unique_user_data_dir()?;
+                (dir.clone(), Some((dir, lock)))
+            }
+        };
 
         let mut config = BrowserConfig::builder()
             .user_data_dir(&user_data_dir)
             .no_sandbox()
             .arg("--disable-dev-shm-usage");
+
+        // Privacy default: with no caller-supplied profile, run the whole browser
+        // off-the-record so a login lives in memory only and never reaches disk.
+        // This is the `--incognito` FLAG, not CDP's createBrowserContext: the MCP
+        // adopts Chromium's initial tab, which stays in the default context, so a
+        // CDP incognito context is created and then never used — verified, the
+        // on-disk cookie store was byte-identical with and without it.
+        // Setting user_data_dir is an explicit opt-in to persistence.
 
         if let Some(executable_path) = executable_path {
             config = config.chrome_executable(executable_path);
@@ -204,7 +250,7 @@ impl BrowserSession {
             config = config.with_head();
         }
 
-        let (browser, mut handler) = Browser::launch(
+        let (browser, handler) = Browser::launch(
             config
                 .build()
                 .map_err(|err| anyhow!("failed to build Chromium config: {err}"))?,
@@ -212,6 +258,22 @@ impl BrowserSession {
         .await
         .context("failed to launch Chromium")?;
 
+        Ok(Self::from_parts(
+            browser,
+            handler,
+            scratch_user_data_dir,
+            false,
+        ))
+    }
+
+    /// Wires a connected browser to its background event pump. Shared by the
+    /// launch and attach paths so both get identical health tracking.
+    fn from_parts(
+        browser: Browser,
+        mut handler: Handler,
+        scratch_user_data_dir: Option<(PathBuf, std::fs::File)>,
+        attached: bool,
+    ) -> Self {
         let healthy = Arc::new(AtomicBool::new(true));
         let handler_healthy = healthy.clone();
         let handler_task = tokio::spawn(async move {
@@ -227,12 +289,27 @@ impl BrowserSession {
             tracing::warn!("chromiumoxide handler ended; browser is unavailable");
         });
 
-        Ok(Self {
+        Self {
             browser: Arc::new(Mutex::new(browser)),
             handler_task,
             healthy,
-            user_data_dir,
-        })
+            scratch_user_data_dir,
+            attached,
+        }
+    }
+
+    /// Attaches to an already-running Chromium over its DevTools endpoint.
+    ///
+    /// The browser keeps whatever profile it was started with, so every login
+    /// already in it is available — this is the escape hatch for "use my real
+    /// Chrome". Accepts an `http://host:port` DevTools URL or a raw websocket
+    /// URL. The browser is NOT ours: we never close it and never touch its
+    /// profile directory.
+    pub async fn attach(cdp_url: &str) -> Result<Self> {
+        let (browser, handler) = Browser::connect(cdp_url.to_owned())
+            .await
+            .with_context(|| format!("failed to attach to Chromium at {cdp_url}"))?;
+        Ok(Self::from_parts(browser, handler, None, true))
     }
 
     /// Returns whether the Chromium handler task still reports a live browser.
@@ -336,13 +413,27 @@ impl BrowserSession {
     }
 
     /// Closes the Chromium browser.
+    ///
+    /// A no-op when attached: that browser belongs to the user, and closing it
+    /// would take their windows (and their logged-in session) down with it.
     pub async fn close(&self) -> Result<()> {
-        self.browser
-            .lock()
-            .await
+        if self.attached {
+            tracing::debug!("attached browser left running; close is a no-op");
+            return Ok(());
+        }
+        let mut browser = self.browser.lock().await;
+        browser
             .close()
             .await
             .context("failed to close Chromium browser")?;
+        // Wait for the process to actually exit, not just for the close request
+        // to be acknowledged. Chromium holds a SingletonLock on its profile, so a
+        // persistent profile cannot be reused until the previous instance is
+        // really gone — relaunching too early silently yields a browser with none
+        // of the stored cookies. Also reaps the child instead of leaving a zombie.
+        if let Err(error) = browser.wait().await {
+            tracing::warn!(%error, "failed to reap Chromium after close");
+        }
         Ok(())
     }
 
@@ -364,7 +455,14 @@ impl BrowserSession {
 impl Drop for BrowserSession {
     fn drop(&mut self) {
         self.handler_task.abort();
-        let _ = fs::remove_dir_all(&self.user_data_dir);
+        // Only a throwaway profile is ours to delete; a caller-supplied one holds
+        // their cookies, and an attached browser's profile is never ours at all.
+        // Best effort: Chromium may still hold the profile here, since it is only
+        // reaped in the background. Whatever survives is swept by the next
+        // session's startup GC, which is what actually bounds the leak.
+        if let Some((dir, _lock)) = &self.scratch_user_data_dir {
+            let _ = fs::remove_dir_all(dir);
+        }
     }
 }
 
@@ -463,9 +561,7 @@ impl BrowserPage {
         let mut params = ScreenshotParams::builder().full_page(full_page);
         params = match format {
             // Quality only applies to lossy formats; Chromium rejects it on PNG.
-            ScreenshotFormat::Jpeg => params
-                .format(CaptureScreenshotFormat::Jpeg)
-                .quality(85),
+            ScreenshotFormat::Jpeg => params.format(CaptureScreenshotFormat::Jpeg).quality(85),
             ScreenshotFormat::Png => params.format(CaptureScreenshotFormat::Png),
         };
         self.page
@@ -594,6 +690,61 @@ impl BrowserPage {
         // A void/undefined result (e.g. calling a function that returns nothing)
         // has no remote value; treat it as JSON null rather than an error.
         Ok(result.into_value().unwrap_or(serde_json::Value::Null))
+    }
+
+    /// Reads the browser clipboard as text.
+    ///
+    /// This is Chromium's clipboard, which is what a page's "Copy" button writes
+    /// to — the point being to capture text a site hands you without a human
+    /// pressing Cmd-V. Headless Chromium keeps this clipboard in-process, so it
+    /// is NOT the OS clipboard; reading what you copied in another app needs a
+    /// system tool (`pbpaste`), not this.
+    pub async fn read_clipboard(&self) -> Result<String> {
+        // Without the grant, readText() rejects with NotAllowedError.
+        self.page
+            .execute(
+                GrantPermissionsParams::builder()
+                    .permission(PermissionType::ClipboardReadWrite)
+                    .build()
+                    .map_err(|error| anyhow!("invalid clipboard permission request: {error}"))?,
+            )
+            .await
+            .context("failed to grant clipboard permission")?;
+
+        // readText() returns a Promise, so this resolves it in-page and reports a
+        // rejection as a value rather than letting it surface as an eval error.
+        let value: serde_json::Value = self
+            .page
+            .evaluate(
+                r#"
+                (async () => {
+                    try {
+                        return { ok: true, text: await navigator.clipboard.readText() };
+                    } catch (error) {
+                        return { ok: false, error: String(error) };
+                    }
+                })()
+                "#,
+            )
+            .await
+            .context("failed to read the clipboard")?
+            .into_value()
+            .context("failed to decode the clipboard result")?;
+
+        if value.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+            return Ok(value
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned());
+        }
+        Err(anyhow!(
+            "clipboard read was refused: {}",
+            value
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown error")
+        ))
     }
 
     /// Builds a selector map from fused DOM, DOMSnapshot, and AX trees.

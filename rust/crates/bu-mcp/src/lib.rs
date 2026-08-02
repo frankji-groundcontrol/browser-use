@@ -91,6 +91,7 @@ impl BrowserUseMcpServer {
             "browser_extract_content" => self.extract_content(request.arguments).await,
             "browser_screenshot" => self.screenshot(request.arguments).await,
             "browser_set_viewport" => self.set_viewport(request.arguments).await,
+            "browser_read_clipboard" => self.read_clipboard(request.arguments).await,
             "browser_scroll" => self.scroll(request.arguments).await,
             "browser_go_back" => self.go_back().await,
             "browser_list_tabs" => self.list_tabs().await,
@@ -388,7 +389,9 @@ impl BrowserUseMcpServer {
                 None => {
                     return Err(ErrorData::new(
                         ErrorCode::INVALID_PARAMS,
-                        format!("browser_screenshot format must be \"jpeg\" or \"png\", got {raw:?}"),
+                        format!(
+                            "browser_screenshot format must be \"jpeg\" or \"png\", got {raw:?}"
+                        ),
                         None,
                     ))
                 }
@@ -424,15 +427,55 @@ impl BrowserUseMcpServer {
         ]))
     }
 
+    async fn read_clipboard(
+        &self,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let text = match self.actor.read_clipboard().await {
+            Ok(text) => text,
+            Err(error) => return Ok(browser_tool_error("browser_read_clipboard failed", error)),
+        };
+
+        let mut saved: Option<String> = None;
+        if let Some(path) = optional_str(arguments.as_ref(), "path") {
+            match write_screenshot(path, text.as_bytes()) {
+                Ok(saved_to) => saved = Some(saved_to),
+                Err(error) => {
+                    return Ok(browser_tool_error(
+                        "browser_read_clipboard could not write path",
+                        error,
+                    ))
+                }
+            }
+        }
+
+        let metadata = match &saved {
+            Some(path) => json!({ "chars": text.chars().count(), "saved_to": path }).to_string(),
+            None => json!({ "chars": text.chars().count() }).to_string(),
+        };
+        Ok(CallToolResult::success(vec![
+            ContentBlock::text(metadata),
+            ContentBlock::text(text),
+        ]))
+    }
+
     async fn set_viewport(
         &self,
         arguments: Option<Map<String, Value>>,
     ) -> Result<CallToolResult, ErrorData> {
         let width = optional_i64(arguments.as_ref(), "width").ok_or_else(|| {
-            ErrorData::new(ErrorCode::INVALID_PARAMS, "browser_set_viewport requires width", None)
+            ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "browser_set_viewport requires width",
+                None,
+            )
         })?;
         let height = optional_i64(arguments.as_ref(), "height").ok_or_else(|| {
-            ErrorData::new(ErrorCode::INVALID_PARAMS, "browser_set_viewport requires height", None)
+            ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "browser_set_viewport requires height",
+                None,
+            )
         })?;
         let mobile = optional_bool(arguments.as_ref(), "mobile").unwrap_or(false);
         if width < 0 || height < 0 {
@@ -454,7 +497,10 @@ impl BrowserUseMcpServer {
             if width == 0 && height == 0 {
                 "Viewport override cleared".to_owned()
             } else {
-                format!("Viewport set to {width}x{height}{}", if mobile { " (mobile)" } else { "" })
+                format!(
+                    "Viewport set to {width}x{height}{}",
+                    if mobile { " (mobile)" } else { "" }
+                )
             },
         )]))
     }
@@ -682,7 +728,10 @@ async fn build_agent_llm(model: Option<String>) -> Result<bu_llm::LlmProvider, E
 /// really landed rather than echo the argument back.
 fn write_screenshot(path: &str, image: &[u8]) -> anyhow::Result<String> {
     let path = std::path::Path::new(path);
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         std::fs::create_dir_all(parent)
             .map_err(|error| anyhow::anyhow!("creating {}: {error}", parent.display()))?;
     }

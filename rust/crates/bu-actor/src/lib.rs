@@ -164,11 +164,7 @@ impl ActorHandle {
     }
 
     /// Captures a screenshot of the active page.
-    pub async fn screenshot(
-        &self,
-        full_page: bool,
-        format: ScreenshotFormat,
-    ) -> Result<Vec<u8>> {
+    pub async fn screenshot(&self, full_page: bool, format: ScreenshotFormat) -> Result<Vec<u8>> {
         self.request(|reply| Command::Screenshot {
             full_page,
             format,
@@ -179,8 +175,18 @@ impl ActorHandle {
 
     /// Sets the CSS viewport of the active page (0x0 clears the override).
     pub async fn set_viewport(&self, width: u32, height: u32, mobile: bool) -> Result<()> {
-        self.request(|reply| Command::SetViewport { width, height, mobile, reply })
-            .await
+        self.request(|reply| Command::SetViewport {
+            width,
+            height,
+            mobile,
+            reply,
+        })
+        .await
+    }
+
+    /// Reads the browser clipboard as text.
+    pub async fn read_clipboard(&self) -> Result<String> {
+        self.request(|reply| Command::ReadClipboard { reply }).await
     }
 
     /// Returns HTML for the active page or a selected element.
@@ -306,6 +312,9 @@ enum Command {
         height: u32,
         mobile: bool,
         reply: Reply<()>,
+    },
+    ReadClipboard {
+        reply: Reply<String>,
     },
     GetHtml {
         selector: Option<String>,
@@ -472,8 +481,16 @@ impl BrowserActor {
             } => {
                 let _ = reply.send(self.screenshot(full_page, format).await);
             }
-            Command::SetViewport { width, height, mobile, reply } => {
+            Command::SetViewport {
+                width,
+                height,
+                mobile,
+                reply,
+            } => {
                 let _ = reply.send(self.set_viewport(width, height, mobile).await);
+            }
+            Command::ReadClipboard { reply } => {
+                let _ = reply.send(self.read_clipboard().await);
             }
             Command::GetHtml { selector, reply } => {
                 let _ = reply.send(self.get_html(selector.as_deref()).await);
@@ -590,8 +607,11 @@ impl BrowserActor {
         self.selector_cache.replace(&elements);
         let tabs = self.tabs().await?;
         let screenshot = if include_screenshot {
-            screenshot_or_none(SCREENSHOT_BUDGET, page.screenshot_image(false, ScreenshotFormat::Jpeg))
-                .await
+            screenshot_or_none(
+                SCREENSHOT_BUDGET,
+                page.screenshot_image(false, ScreenshotFormat::Jpeg),
+            )
+            .await
         } else {
             None
         };
@@ -645,9 +665,17 @@ impl BrowserActor {
             .await
     }
 
+    async fn read_clipboard(&mut self) -> Result<String> {
+        self.guard_active_url().await;
+        self.active_page().await?.read_clipboard().await
+    }
+
     async fn set_viewport(&mut self, width: u32, height: u32, mobile: bool) -> Result<()> {
         self.guard_active_url().await;
-        self.active_page().await?.set_viewport(width, height, mobile).await
+        self.active_page()
+            .await?
+            .set_viewport(width, height, mobile)
+            .await
     }
 
     async fn get_html(&mut self, selector: Option<&str>) -> Result<String> {

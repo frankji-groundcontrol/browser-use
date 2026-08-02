@@ -93,7 +93,10 @@ async fn a_capture_that_never_completes_leaves_no_stale_indices() {
     );
 
     let wedged_capture = actor.get_state(false).await;
-    assert!(wedged_capture.is_err(), "capture should time out while wedged");
+    assert!(
+        wedged_capture.is_err(),
+        "capture should time out while wedged"
+    );
     assert_eq!(
         actor.selector_cache_len().await.unwrap(),
         0,

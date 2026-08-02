@@ -526,7 +526,10 @@ mod tests {
             "the task must survive a failed capture: {prompt}"
         );
         assert!(
-            report.errors.iter().any(|error| error.contains("get_state")),
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("get_state")),
             "the failure is still reported: {:?}",
             report.errors
         );

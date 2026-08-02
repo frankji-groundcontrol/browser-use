@@ -19,13 +19,13 @@ use tokio::task::JoinSet;
 use tokio::time::{timeout, Duration};
 
 #[test]
-fn tools_list_returns_17_low_level_tools() {
+fn tools_list_returns_18_low_level_tools() {
     let tools = low_level_tools();
     let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
 
-    // 16 are byte-identical to Python's set; browser_set_viewport is this fork's
-    // deliberate addition (Python has no responsive-viewport tool).
-    assert_eq!(tools.len(), 17);
+    // 16 are byte-identical to Python's set; browser_set_viewport and
+    // browser_read_clipboard are this fork's deliberate additions.
+    assert_eq!(tools.len(), 18);
     assert_eq!(
         names,
         [
@@ -37,6 +37,7 @@ fn tools_list_returns_17_low_level_tools() {
             "browser_get_html",
             "browser_screenshot",
             "browser_set_viewport",
+            "browser_read_clipboard",
             "browser_scroll",
             "browser_go_back",
             "browser_list_tabs",
@@ -197,7 +198,9 @@ async fn set_viewport_changes_css_width_and_clears() -> anyhow::Result<()> {
         .contains("980"),
         "mobile emulation of a non-responsive page should fall back to 980px"
     );
-    server.call_browser_tool(call(REPORTER, mobile_page)).await?;
+    server
+        .call_browser_tool(call(REPORTER, mobile_page))
+        .await?;
     assert!(
         text_content(
             &server
@@ -1696,10 +1699,7 @@ async fn screenshot_saves_to_path_in_requested_format() -> anyhow::Result<()> {
 
     // A typo'd format is an explicit INVALID_PARAMS, not a silent default.
     let error = server
-        .call_browser_tool(call(
-            "browser_screenshot",
-            json!({"format": "webp"}),
-        ))
+        .call_browser_tool(call("browser_screenshot", json!({"format": "webp"})))
         .await
         .expect_err("unknown format must be rejected");
     assert!(error.message.contains("jpeg"), "{}", error.message);
@@ -1714,5 +1714,85 @@ async fn screenshot_saves_to_path_in_requested_format() -> anyhow::Result<()> {
     assert_eq!(blocked.is_error, Some(true));
 
     std::fs::remove_dir_all(&dir).ok();
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn read_clipboard_captures_what_a_copy_button_copied() -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // The real use case: a site puts text on the clipboard behind a "Copy"
+    // button (API keys, share links, generated output) and never renders it
+    // anywhere scrapeable. Clicking the button and reading it back is the only
+    // way to get it without a human pressing Cmd-V.
+    //
+    // Served over http://127.0.0.1 rather than a data: URL because the async
+    // clipboard API only exists in a SECURE CONTEXT; on a data: URL
+    // navigator.clipboard is undefined outright.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind page server");
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut chunk = [0u8; 2048];
+            if stream.read(&mut chunk).unwrap_or(0) == 0 {
+                continue;
+            }
+            let body = "<title>Copy</title><body><button id=c>Copy</button><script>document.getElementById('c').onclick=function(){navigator.clipboard.writeText('sk-secret-value-123')}</script>";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+        }
+    });
+
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call(
+            "browser_navigate",
+            json!({"url": format!("http://127.0.0.1:{port}/")}),
+        ))
+        .await?;
+    let state = server
+        .call_browser_tool(call("browser_get_state", json!({})))
+        .await?
+        .structured_content
+        .expect("state");
+    let index = state["interactive_elements"]
+        .as_array()
+        .expect("elements")
+        .iter()
+        .find(|element| element["text"].as_str() == Some("Copy"))
+        .and_then(|element| element["index"].as_i64())
+        .expect("the copy button should be indexed");
+
+    server
+        .call_browser_tool(call("browser_click", json!({"index": index})))
+        .await?;
+
+    let target = std::env::temp_dir().join(format!("bu-clip-{}/copied.txt", std::process::id()));
+    let result = server
+        .call_browser_tool(call(
+            "browser_read_clipboard",
+            json!({"path": target.to_str().unwrap()}),
+        ))
+        .await?;
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "clipboard read failed: {}",
+        text_content(&result)
+    );
+
+    let metadata: serde_json::Value = serde_json::from_str(text_content(&result))?;
+    let saved_to = metadata["saved_to"].as_str().expect("saved_to reported");
+    assert_eq!(std::fs::read_to_string(saved_to)?, "sk-secret-value-123");
+    assert_eq!(metadata["chars"].as_u64(), Some(19));
+
+    std::fs::remove_dir_all(target.parent().unwrap()).ok();
     Ok(())
 }

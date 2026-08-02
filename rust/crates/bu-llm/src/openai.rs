@@ -282,7 +282,8 @@ mod tests {
         // it verbatim (extract_content), and both are wrong on a prefix: the parse
         // fails with a misleading "expected value" and the agent retries the same
         // oversized prompt. Fail with the real cause instead.
-        let body = r#"{"choices":[{"finish_reason":"length","message":{"content":"{\"action\":\"cli"}}]}"#;
+        let body =
+            r#"{"choices":[{"finish_reason":"length","message":{"content":"{\"action\":\"cli"}}]}"#;
         let error = parse_chat_body(body).expect_err("truncated output must not be returned");
         let error = error.to_string();
         assert!(error.contains("truncated"), "got: {error}");
