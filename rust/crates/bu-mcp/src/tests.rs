@@ -1801,3 +1801,59 @@ async fn read_clipboard_captures_what_a_copy_button_copied() -> anyhow::Result<(
     std::fs::remove_dir_all(target.parent().unwrap()).ok();
     Ok(())
 }
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn delayed_coordinate_copy_is_visible_to_clipboard_reader() -> anyhow::Result<()> {
+    let page = MockHttpServer::spawn_html(
+        r#"<title>Delayed Menu</title><body>
+        <button id=open style='position:absolute;left:40px;top:50px;width:80px;height:40px'>Open</button>
+        <script>
+            document.getElementById('open').onclick = () => setTimeout(() => {
+                const copy = document.createElement('button');
+                copy.textContent = 'Copy';
+                copy.style = 'position:absolute;left:40px;top:110px;width:80px;height:40px';
+                copy.onclick = () => {
+                    document.body.dataset.copyClicked = 'yes';
+                    navigator.clipboard.writeText('new-value');
+                };
+                document.body.append(copy);
+            }, 300);
+        </script>"#,
+    )
+    .await?;
+
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call("browser_navigate", json!({"url": page.base_url()})))
+        .await?;
+
+    server
+        .call_browser_tool(call(
+            "browser_click",
+            json!({"coordinate_x": 80, "coordinate_y": 70}),
+        ))
+        .await?;
+    server
+        .call_browser_tool(call(
+            "browser_click",
+            json!({"coordinate_x": 80, "coordinate_y": 130}),
+        ))
+        .await?;
+    let clicked = server
+        .actor()
+        .evaluate("document.body.dataset.copyClicked")
+        .await?;
+    let copied = server.actor().read_clipboard().await?;
+    assert_eq!(
+        clicked,
+        json!("yes"),
+        "the second click must wait for the delayed menu item"
+    );
+    assert_eq!(
+        copied, "new-value",
+        "a delayed write triggered by the click must replace the old clipboard value"
+    );
+
+    Ok(())
+}

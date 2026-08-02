@@ -47,6 +47,10 @@ pub use security::UrlPolicy;
 /// `selector_map` to keep `get_state` responsive on very large pages.
 const MAX_LISTENER_PROBE_NODES: usize = 500;
 
+/// Match Browser Use's default action settle time so a follow-up command does
+/// not race menus and SPA updates mounted by the click handler.
+const POST_CLICK_SETTLE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
 use discovery::{
     cdp_url_from_env, chromium_path_from_env, find_playwright_chromium, headless_from_env,
     unique_user_data_dir, user_data_dir_from_env,
@@ -980,6 +984,7 @@ impl BrowserPage {
             .await?;
         self.dispatch_mouse_event(DispatchMouseEventType::MouseReleased, x, y)
             .await?;
+        tokio::time::sleep(POST_CLICK_SETTLE_DELAY).await;
         Ok(())
     }
 
