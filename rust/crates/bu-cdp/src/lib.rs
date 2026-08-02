@@ -25,7 +25,7 @@ use chromiumoxide::{
             DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams,
             DispatchMouseEventType, InsertTextParams, MouseButton,
         },
-        page::CaptureScreenshotFormat,
+        page::{CaptureScreenshotFormat, StopLoadingParams},
     },
     cdp::js_protocol::runtime::ReleaseObjectParams,
     page::Page,
@@ -343,13 +343,38 @@ pub struct BrowserPage {
 
 impl BrowserPage {
     /// Navigates this page to `url`.
-    pub async fn navigate(&self, url: &str) -> Result<()> {
-        // Bound navigation so a stalled/streaming page cannot hang the actor.
-        tokio::time::timeout(std::time::Duration::from_secs(30), self.page.goto(url))
-            .await
-            .with_context(|| format!("navigation to {url} timed out"))?
-            .with_context(|| format!("failed to navigate to {url}"))?;
-        Ok(())
+    ///
+    /// Returns `Ok(None)` when the page reached `load` within the readiness
+    /// budget, or `Ok(Some(status))` when it did not. A readiness timeout is NOT
+    /// a navigation failure: the document is committed and the DOM is usable, the
+    /// page just never finished fetching every subresource — the everyday case of
+    /// a hanging analytics beacon or a long-poll. Treating that as an error made
+    /// `browser_navigate` fail after 30s on a page the agent could have worked
+    /// with. Only a real failure (bad host, blocked scheme) is still `Err`.
+    ///
+    /// Mirrors upstream's `_navigate_and_wait` -> `NavigationCompleteEvent.loading_status`.
+    pub async fn navigate(&self, url: &str) -> Result<Option<String>> {
+        // Upstream waits 3s same-domain / 8s cross-domain; one flat budget is enough.
+        const READINESS_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+
+        match tokio::time::timeout(READINESS_BUDGET, self.page.goto(url)).await {
+            Ok(result) => {
+                result.with_context(|| format!("failed to navigate to {url}"))?;
+                Ok(None)
+            }
+            Err(_) => {
+                // chromiumoxide resolves `goto` only on the `load` lifecycle event
+                // and keeps the watcher armed until its own 30s deadline, queueing
+                // any later navigation behind it. stopLoading makes Chrome emit
+                // frameStoppedLoading, which retires the watcher now. Best effort:
+                // if it does not land we still report the partial load.
+                let _ = self.page.execute(StopLoadingParams::default()).await;
+                Ok(Some(format!(
+                    "page did not finish loading within {}s; the DOM is committed and usable but some subresources are still pending",
+                    READINESS_BUDGET.as_secs()
+                )))
+            }
+        }
     }
 
     /// Returns current URL and title.

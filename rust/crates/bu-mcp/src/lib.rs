@@ -123,15 +123,22 @@ impl BrowserUseMcpServer {
             })?;
         let new_tab = optional_bool(arguments.as_ref(), "new_tab").unwrap_or(false);
 
-        if let Err(error) = self.actor.navigate(url.to_owned(), new_tab).await {
-            return Ok(browser_tool_error("browser_navigate failed", error));
-        }
+        let loading_status = match self.actor.navigate(url.to_owned(), new_tab).await {
+            Ok(status) => status,
+            Err(error) => return Ok(browser_tool_error("browser_navigate failed", error)),
+        };
 
-        let message = if new_tab {
+        let mut message = if new_tab {
             format!("Opened new tab with URL: {url}")
         } else {
             format!("Navigated to: {url}")
         };
+        // Report a partial load rather than hiding it: the navigation succeeded
+        // and the DOM is actionable, but the model should know the page may still
+        // be filling in before it concludes something is missing.
+        if let Some(status) = loading_status {
+            message.push_str(&format!(" (note: {status})"));
+        }
         Ok(CallToolResult::success(vec![ContentBlock::text(message)]))
     }
 

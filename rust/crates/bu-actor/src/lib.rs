@@ -91,8 +91,9 @@ impl ActorHandle {
         Self { tx }
     }
 
-    /// Navigates the active page, optionally opening a new tab first.
-    pub async fn navigate(&self, url: String, new_tab: bool) -> Result<()> {
+    /// Navigates the active (or a new) tab. `Ok(Some(status))` means the page
+    /// committed but never finished loading; the DOM is still usable.
+    pub async fn navigate(&self, url: String, new_tab: bool) -> Result<Option<String>> {
         self.request(|reply| Command::Navigate {
             url,
             new_tab,
@@ -245,7 +246,8 @@ enum Command {
     Navigate {
         url: String,
         new_tab: bool,
-        reply: Reply<()>,
+        /// `Some(status)` when the page committed but never finished loading.
+        reply: Reply<Option<String>>,
     },
     GetState {
         include_screenshot: bool,
@@ -486,7 +488,7 @@ impl BrowserActor {
         self.active_page().await?.state().await
     }
 
-    async fn navigate(&mut self, url: &str, new_tab: bool) -> Result<()> {
+    async fn navigate(&mut self, url: &str, new_tab: bool) -> Result<Option<String>> {
         // Enforcement point #1: block disallowed targets before navigating.
         self.ensure_url_allowed(url)?;
         let page = if new_tab {
@@ -494,7 +496,7 @@ impl BrowserActor {
         } else {
             self.active_page().await?
         };
-        page.navigate(url).await?;
+        let loading_status = page.navigate(url).await?;
         self.selector_cache.clear();
         // Enforcement point #2: catch redirects into a disallowed domain and
         // reset to about:blank (mirrors on_NavigationCompleteEvent).
@@ -509,7 +511,7 @@ impl BrowserActor {
                 ));
             }
         }
-        Ok(())
+        Ok(loading_status)
     }
 
     fn ensure_url_allowed(&self, url: &str) -> Result<()> {

@@ -1565,3 +1565,73 @@ d.body.appendChild(b);\
 
     Ok(())
 }
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn navigating_a_page_that_never_finishes_loading_still_succeeds() -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // Serves the document in full, then never answers the image request. The DOM
+    // is complete and usable but the `load` event never fires -- the everyday case
+    // of an analytics beacon or a hanging subresource. A readiness timeout must
+    // therefore report a partial load, NOT fail the navigation and strand the
+    // agent on a page it could have worked with.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    // Detached: the server parks on incoming() with the hung connection held open,
+    // so it is never joined -- it dies with the test process.
+    std::thread::spawn(move || {
+        let mut hung = Vec::new();
+        for stream in listener.incoming() {
+            let mut stream = match stream {
+                Ok(stream) => stream,
+                Err(_) => break,
+            };
+            let mut chunk = [0u8; 1024];
+            let read = stream.read(&mut chunk).unwrap_or(0);
+            if read == 0 {
+                continue;
+            }
+            let request = String::from_utf8_lossy(&chunk[..read]).to_string();
+            if request.contains("/hang") {
+                // Hold the connection open, unanswered, so `load` never fires.
+                hung.push(stream);
+                continue;
+            }
+            let body = "<title>Partial</title><h1 id=h>ready</h1><img src=\"/hang\">";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            // Keep serving until the test drops the listener.
+            if hung.len() > 4 {
+                break;
+            }
+        }
+    });
+
+    let server_handle = BrowserUseMcpServer::new();
+    let result = server_handle
+        .call_browser_tool(call("browser_navigate", json!({"url": base})))
+        .await?;
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "a page whose subresource hangs must not fail the navigation: {}",
+        text_content(&result)
+    );
+
+    let html = server_handle
+        .call_browser_tool(call("browser_get_html", json!({"selector": "#h"})))
+        .await?;
+    assert!(
+        text_content(&html).contains("ready"),
+        "the committed DOM must be usable, got {}",
+        text_content(&html)
+    );
+
+    Ok(())
+}

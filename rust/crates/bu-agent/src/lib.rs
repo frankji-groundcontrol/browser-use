@@ -279,9 +279,12 @@ enum Step {
 async fn execute_action(action: AgentAction, actor: &ActorHandle, llm: &LlmProvider) -> Step {
     match action {
         AgentAction::Navigate { url } => match actor.navigate(url, false).await {
-            Ok(()) => Step::Continue {
+            // A partial load is fed back as an observation, not an error: the DOM
+            // is usable, and the model should know the page may still be filling
+            // in rather than conclude the content is simply absent.
+            Ok(loading_status) => Step::Continue {
                 rerender: true,
-                observation: None,
+                observation: loading_status,
             },
             Err(error) => Step::Error(format!("navigate failed: {error}")),
         },
