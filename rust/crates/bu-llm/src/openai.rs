@@ -53,6 +53,10 @@ struct ChatCompletionResponse {
 #[derive(Debug, Deserialize)]
 struct ChatChoice {
     message: ChatChoiceMessage,
+    // "length" means the model hit its output cap mid-token, so `content` is a
+    // chopped prefix rather than an answer.
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -231,6 +235,15 @@ fn parse_chat_body(body: &str) -> Result<String> {
         .into_iter()
         .next()
         .ok_or_else(|| anyhow!("LLM chat response had no choices"))?;
+    // Reject a truncated completion before anyone parses or displays it: the
+    // agent JSON-parses this text and extract_content shows it verbatim, so a
+    // prefix is never an acceptable answer. Without this the failure surfaces as
+    // a misleading JSON parse error and the same oversized prompt gets retried.
+    if choice.finish_reason.as_deref() == Some("length") {
+        return Err(anyhow!(
+            "model output was truncated at the model's output token limit; the response is incomplete. Request shorter output or raise the server-side cap."
+        ));
+    }
     Ok(choice.message.content.unwrap_or_default())
 }
 
@@ -260,6 +273,27 @@ mod tests {
     #[test]
     fn no_choices_is_an_error() {
         assert!(parse_chat_body(r#"{"choices":[]}"#).is_err());
+    }
+
+    #[test]
+    fn truncated_output_is_an_error_not_a_chopped_prefix() {
+        // finish_reason "length" means the model hit its output cap mid-token, so
+        // the content is a prefix. Callers either JSON-parse it (the agent) or show
+        // it verbatim (extract_content), and both are wrong on a prefix: the parse
+        // fails with a misleading "expected value" and the agent retries the same
+        // oversized prompt. Fail with the real cause instead.
+        let body = r#"{"choices":[{"finish_reason":"length","message":{"content":"{\"action\":\"cli"}}]}"#;
+        let error = parse_chat_body(body).expect_err("truncated output must not be returned");
+        let error = error.to_string();
+        assert!(error.contains("truncated"), "got: {error}");
+        // Never leak a "None" cap: this port sends no max_tokens to interpolate.
+        assert!(!error.contains("None"), "got: {error}");
+    }
+
+    #[test]
+    fn normal_finish_reason_is_not_treated_as_truncation() {
+        let body = r#"{"choices":[{"finish_reason":"stop","message":{"content":"done"}}]}"#;
+        assert_eq!(parse_chat_body(body).unwrap(), "done");
     }
 }
 

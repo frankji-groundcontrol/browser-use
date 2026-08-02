@@ -28,6 +28,37 @@ async fn scoped_policy_set_get_restore_roundtrips() {
 }
 
 #[tokio::test]
+async fn state_screenshot_degrades_to_none_instead_of_sinking_the_dom() {
+    use std::time::Duration;
+
+    let budget = Duration::from_millis(20);
+
+    assert_eq!(
+        screenshot_or_none(budget, async { Ok(vec![1u8, 2, 3]) }).await,
+        Some(vec![1u8, 2, 3]),
+        "a working capture is still returned"
+    );
+
+    assert_eq!(
+        screenshot_or_none(budget, async { Err(anyhow::anyhow!("capture failed")) }).await,
+        None,
+        "a failed capture must degrade, not propagate"
+    );
+
+    // The DOM is already in hand by the time the screenshot runs, so a capture
+    // that never comes back must not take the whole state snapshot down with it.
+    assert_eq!(
+        screenshot_or_none(budget, async {
+            std::future::pending::<()>().await;
+            unreachable!()
+        })
+        .await,
+        None,
+        "a stalled capture must be cut at the budget"
+    );
+}
+
+#[tokio::test]
 #[cfg(feature = "live-chrome")]
 async fn wedged_command_times_out_and_actor_survives() {
     // A renderer that spins forever must not hang the actor: the command is

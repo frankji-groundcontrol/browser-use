@@ -318,6 +318,34 @@ enum Command {
     },
 }
 
+/// How long a state screenshot may take before the snapshot goes on without it.
+/// Comfortably inside the per-command timeout, so a stalled capture is reported
+/// as DOM-only state rather than killing the whole command.
+const SCREENSHOT_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Runs a state screenshot, degrading a failure or a stall to `None`.
+///
+/// By the time this runs the DOM and tab list are already captured, so letting a
+/// screenshot error propagate would discard a perfectly good snapshot — and a
+/// screenshot that never returns would take the command down with it. The model
+/// can still act on DOM-only state; it cannot act on no state at all.
+async fn screenshot_or_none(
+    budget: std::time::Duration,
+    capture: impl std::future::Future<Output = Result<Vec<u8>>>,
+) -> Option<Vec<u8>> {
+    match tokio::time::timeout(budget, capture).await {
+        Ok(Ok(png)) => Some(png),
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "state screenshot failed; returning DOM-only state");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("state screenshot stalled; returning DOM-only state");
+            None
+        }
+    }
+}
+
 struct BrowserActor {
     session: Option<BrowserSession>,
     page: Option<BrowserPage>,
@@ -348,6 +376,9 @@ impl BrowserActor {
                 .await
                 .is_err()
             {
+                // A cancelled command left the page unverified mid-flight, so the
+                // cached index -> node mapping can no longer be trusted.
+                self.selector_cache.clear();
                 tracing::warn!("browser command timed out; dropping it and continuing");
             }
         }
@@ -512,6 +543,17 @@ impl BrowserActor {
     }
 
     async fn get_state(&mut self, include_screenshot: bool) -> Result<BrowserStateSnapshot> {
+        let result = self.get_state_inner(include_screenshot).await;
+        if result.is_err() {
+            // No verified snapshot means no index is safe to hand to click/type,
+            // so drop the mapping rather than let the next action act on stale
+            // indices (mirrors Python clearing every action lookup path).
+            self.selector_cache.clear();
+        }
+        result
+    }
+
+    async fn get_state_inner(&mut self, include_screenshot: bool) -> Result<BrowserStateSnapshot> {
         self.guard_active_url().await;
         let page = self.active_page().await?;
         let state = page.state().await?;
@@ -519,7 +561,7 @@ impl BrowserActor {
         self.selector_cache.replace(&elements);
         let tabs = self.tabs().await?;
         let screenshot = if include_screenshot {
-            Some(page.screenshot_png(false).await?)
+            screenshot_or_none(SCREENSHOT_BUDGET, page.screenshot_png(false)).await
         } else {
             None
         };
