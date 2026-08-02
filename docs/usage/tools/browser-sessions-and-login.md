@@ -101,6 +101,46 @@ Two limits, both inherent:
   so this cannot read text you copied in another application — use `pbpaste`
   (macOS) or `xclip` (Linux) for that.
 
+## LLM credentials for the two LLM-backed tools
+
+`browser_extract_content` and `retry_with_browser_use_agent` call a model. The
+other 16 tools need no key.
+
+Resolution order — **whatever you configure explicitly always wins**:
+
+1. `OPENAI_API_KEY` (+ `OPENAI_BASE_URL`, `BROWSER_USE_LLM_MODEL`)
+2. otherwise `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL`
+
+The second rule exists because Claude Code exports those from
+`~/.claude/settings.json` into every process it spawns, so a server registered
+with no `env` block works with no setup. Be aware that this means the tools
+spend Claude Code's own gateway token. Setting `OPENAI_*` in the MCP `env` block
+overrides it — verified: an explicit but unreachable `OPENAI_BASE_URL` fails
+rather than silently falling back.
+
+Codex inherits nothing: it authenticates by ChatGPT login (`auth.json` holds
+OAuth tokens and a null `OPENAI_API_KEY`), so it always needs an explicit table:
+
+```toml
+[mcp_servers.browser-use.env]
+OPENAI_API_KEY = "…"
+OPENAI_BASE_URL = "http://your-gateway:8080"
+BROWSER_USE_LLM_MODEL = "gpt-5.6-sol"
+```
+
+Requests use the **Responses API** (`POST {base}/responses`). Set
+`BROWSER_USE_OPENAI_API=chat_completions` for gateways that only implement the
+older route.
+
+> **Known gap.** An `ANTHROPIC_BASE_URL` pointing at the real
+> `api.anthropic.com` will not work: that host serves `/v1/messages`, not
+> `/responses` or `/chat/completions`. Anthropic-compatible *gateways* that
+> expose the OpenAI routes (the common case) are fine. A native Anthropic
+> provider has not been built.
+
+Whichever base URL you use, check the route it actually serves — some gateways
+expose the OpenAI routes at the root (`/responses`) and others under `/v1`.
+
 ## Environment reference
 
 | Variable | Effect |
@@ -108,5 +148,8 @@ Two limits, both inherent:
 | `BROWSER_USE_HEADLESS` | `false`/`0`/`no`/`off` shows the window. Default headless. |
 | `BROWSER_USE_USER_DATA_DIR` | Reuse and keep this profile. Default: throwaway, deleted on close. |
 | `BROWSER_USE_CDP_URL` | Attach to a running Chromium; takes precedence. |
+| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | LLM credentials; take precedence over everything else. |
+| `BROWSER_USE_LLM_MODEL` | Model name for the LLM-backed tools. |
+| `BROWSER_USE_OPENAI_API` | `responses` (default) or `chat_completions`. |
 | `BROWSER_USE_ALLOWED_DOMAINS` | Restrict navigation. |
 | `BROWSER_USE_COMMAND_TIMEOUT_MS` | Per-command backstop (default 90s). |
