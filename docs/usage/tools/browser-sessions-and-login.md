@@ -132,11 +132,16 @@ Requests use the **Responses API** (`POST {base}/responses`). Set
 `BROWSER_USE_OPENAI_API=chat_completions` for gateways that only implement the
 older route.
 
-> **Known gap.** An `ANTHROPIC_BASE_URL` pointing at the real
-> `api.anthropic.com` will not work: that host serves `/v1/messages`, not
-> `/responses` or `/chat/completions`. Anthropic-compatible *gateways* that
-> expose the OpenAI routes (the common case) are fine. A native Anthropic
-> provider has not been built.
+> **Likely gap, UNVERIFIED.** The `ANTHROPIC_*` fallback is only known to work
+> against *gateways* that expose the OpenAI routes — that is what it was tested
+> against (`/v1/responses` on the gateway returns 200). Pointing it at the real
+> `api.anthropic.com` probably fails, since Anthropic documents
+> `POST /v1/messages` with `x-api-key` + `anthropic-version` headers while this
+> client posts `{base}/responses` with `Authorization: Bearer`. That was not
+> confirmed: an attempt to probe it returned the same 403 edge block on every
+> path, including `/v1/messages`, so the check proved nothing. No native
+> Anthropic provider exists; if you need api.anthropic.com directly, that is
+> the work to do.
 
 Whichever base URL you use, check the route it actually serves — some gateways
 expose the OpenAI routes at the root (`/responses`) and others under `/v1`.
