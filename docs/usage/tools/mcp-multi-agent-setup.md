@@ -2,7 +2,7 @@
 
 How to install browser-use as an MCP **server** and register it with several
 coding agents at once (Claude Code, OpenAI Codex CLI, OpenCode, Hermes), so each
-agent can drive a real browser through the same 16 tools.
+agent can drive a real browser through the same tools.
 
 > **What's deployed here.** The server in production on this host is the Rust
 > reimplementation, **`browser-use-rs --mcp`** (crate workspace under
@@ -15,8 +15,8 @@ agent can drive a real browser through the same 16 tools.
 
 ## The tool surface
 
-`browser-use-rs --mcp` speaks MCP over stdio and exposes **16 tools** (identical
-names/schemas to the Python server):
+`browser-use-rs --mcp` speaks MCP over stdio and exposes **18 tools** — 16 with
+names/schemas byte-identical to the Python server, plus 2 additions:
 
 - **14 low-level primitives** — `browser_navigate`, `browser_click`,
   `browser_type`, `browser_get_state`, `browser_get_html`, `browser_screenshot`,
@@ -27,6 +27,11 @@ names/schemas to the Python server):
   and `retry_with_browser_use_agent` (a full autonomous sub-agent with vision,
   multi-action, and reasoning). These call the server's own OpenAI-compatible (or
   AWS Bedrock) model and need `OPENAI_API_KEY` (or `MODEL_PROVIDER=bedrock`).
+- **2 fork-only additions** — `browser_set_viewport` (check responsive layouts
+  at a real width without relaunching, so the session survives) and
+  `browser_read_clipboard` (capture text a page only exposes via a "Copy"
+  button). See
+  [browser-sessions-and-login.md](browser-sessions-and-login.md).
 
 ## 1. Build & install the Rust binary
 
@@ -145,7 +150,7 @@ browser-use:
 Verify: `claude mcp get browser-use` (expect ✔ Connected), `codex mcp get
 browser-use`, `hermes gateway restart && hermes gateway status`. A quick manual
 smoke test — pipe `initialize` then `tools/list` into `browser-use-rs --mcp` and
-expect 16 tools.
+expect 18 tools.
 
 MCP servers run as agent subprocesses. After reinstalling the binary or changing
 env, **restart the agent session** (or its gateway, e.g. `hermes gateway

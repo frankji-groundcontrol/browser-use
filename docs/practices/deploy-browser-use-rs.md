@@ -7,7 +7,15 @@ SIGKILLed install and a request-ordering race on first use.
 ## Build + install
 
 ```bash
-cd rust && cargo build --release
+cd rust
+# Verify BOTH feature configurations first: the release build has no
+# `live-chrome`, so a helper that is gated behind it compiles in tests and
+# breaks here. Ask for the exit code -- `cargo build | tail -1` reports tail's
+# status, which once installed a STALE binary over a failed build.
+cargo test --features live-chrome -- --test-threads=1
+cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --features live-chrome -- -D warnings
+cargo build --release          # must succeed on its own, unpiped
 
 # NEVER `cp` over the live binary: macOS caches signatures per inode and
 # SIGKILLs (exit 137) an in-place overwrite. Fresh inode + ad-hoc re-sign:
