@@ -132,45 +132,29 @@ def test_default_action_timeout_accommodates_extract_action():
 	)
 
 
-@pytest.fixture
-def _restore_service_module():
-	"""Reload browser_use.tools.service without any env override on teardown.
-
-	Tests in this file intentionally reload the module with BROWSER_USE_ACTION_TIMEOUT_S
-	set to various values; without this fixture, the last reload's default leaks into
-	every later test in the same worker.
-	"""
-	import importlib
-	import os
-
-	import browser_use.tools.service as svc_module
-
-	yield svc_module
-	os.environ.pop('BROWSER_USE_ACTION_TIMEOUT_S', None)
-	importlib.reload(svc_module)
-
-
-def test_malformed_env_timeout_does_not_break_import(monkeypatch, _restore_service_module):
+def test_malformed_env_timeout_does_not_break_import():
 	"""Bad BROWSER_USE_ACTION_TIMEOUT_S values must fall back, not crash or misbehave.
 
 	Covers three failure modes:
 	- Non-numeric / empty (ValueError from float()): would crash module import.
 	- NaN: parses fine but makes asyncio.wait_for time out immediately for every action.
 	- Infinity / negative / zero: parses fine but effectively disables the hang guard.
+
+	Exercised through _parse_env_action_timeout, the exact expression the module
+	runs at import time — NOT importlib.reload. Reloading re-executes the module
+	and mints a NEW `Tools` class object each time, while modules that already
+	imported Tools (agent.service) keep the old one; every later class-identity
+	assertion (`is` / isinstance) in the suite then fails with two Tools classes
+	that print identically. That order-dependent breakage took out two
+	test_beta_agent tests in full-suite runs.
 	"""
-	import importlib
+	from browser_use.tools.service import _parse_env_action_timeout
 
-	svc_module = _restore_service_module
-
-	bad_values = ('', 'not-a-number', 'abc', 'nan', 'NaN', 'inf', '-inf', '0', '-5')
+	bad_values = (None, '', 'not-a-number', 'abc', 'nan', 'NaN', 'inf', '-inf', '0', '-5')
 	for bad_value in bad_values:
-		monkeypatch.setenv('BROWSER_USE_ACTION_TIMEOUT_S', bad_value)
-		reloaded = importlib.reload(svc_module)
-		assert reloaded._DEFAULT_ACTION_TIMEOUT_S == 180.0, (
-			f'Expected fallback 180.0 for bad env {bad_value!r}, got {reloaded._DEFAULT_ACTION_TIMEOUT_S}'
+		assert _parse_env_action_timeout(bad_value) == 180.0, (
+			f'Expected fallback 180.0 for bad env {bad_value!r}, got {_parse_env_action_timeout(bad_value)}'
 		)
 
 	# Valid finite positive values still take effect.
-	monkeypatch.setenv('BROWSER_USE_ACTION_TIMEOUT_S', '45')
-	reloaded = importlib.reload(svc_module)
-	assert reloaded._DEFAULT_ACTION_TIMEOUT_S == 45.0
+	assert _parse_env_action_timeout('45') == 45.0
