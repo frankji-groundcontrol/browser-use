@@ -60,6 +60,49 @@ async fn state_screenshot_degrades_to_none_instead_of_sinking_the_dom() {
 
 #[tokio::test]
 #[cfg(feature = "live-chrome")]
+async fn a_capture_that_never_completes_leaves_no_stale_indices() {
+    // click/type resolve an LLM-supplied index through the selector cache, so a
+    // mapping that outlives the capture that produced it is how you act on the
+    // wrong element. Once a capture cannot complete, nothing may be served from
+    // it. Both mechanisms enforce this: get_state drops the mapping before
+    // capturing and only repopulates on success, and a command cancelled on the
+    // actor timeout (which runs no error branch at all) drops it too.
+    let actor = ActorHandle::spawn_with_command_timeout(std::time::Duration::from_secs(2));
+    actor
+        .navigate(
+            "data:text/html,<title>cache</title><button>One</button><button>Two</button>"
+                .to_owned(),
+            false,
+        )
+        .await
+        .expect("navigate should launch the browser");
+
+    actor.get_state(false).await.expect("first capture");
+    assert!(
+        actor.selector_cache_len().await.unwrap() > 0,
+        "a good capture should populate the index mapping"
+    );
+
+    // Wedge the renderer: every later capture now times out mid-flight.
+    let _ = actor.evaluate("while (true) {}").await;
+
+    assert_eq!(
+        actor.selector_cache_len().await.unwrap(),
+        0,
+        "a cancelled command must leave no index behind for a later click/type"
+    );
+
+    let wedged_capture = actor.get_state(false).await;
+    assert!(wedged_capture.is_err(), "capture should time out while wedged");
+    assert_eq!(
+        actor.selector_cache_len().await.unwrap(),
+        0,
+        "a capture that never completed must not resurrect the previous mapping"
+    );
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
 async fn wedged_command_times_out_and_actor_survives() {
     // A renderer that spins forever must not hang the actor: the command is
     // dropped on the per-command timeout and later commands still respond.

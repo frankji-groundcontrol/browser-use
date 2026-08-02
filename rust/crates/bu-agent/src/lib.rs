@@ -477,6 +477,64 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn a_failed_capture_still_gives_the_model_a_turn() -> anyhow::Result<()> {
+        // A capture failure used to `break` the loop, so the model never got a
+        // turn and the task simply ended. It can usually rescue a wedged page
+        // itself, so it must still be asked -- with a state that says plainly
+        // that no index is usable, or it would "click" indices that no longer
+        // mean anything.
+        let llm_server = ScriptedLlmServer::spawn(vec![json!({
+            "action": "done", "success": false, "result": "page was unreachable"
+        })
+        .to_string()]);
+        let provider = LlmProvider::OpenAi(OpenAiChatClient::new(OpenAiChatConfig {
+            api_key: "test-key".to_owned(),
+            base_url: llm_server.base_url(),
+            model: "mock-model".to_owned(),
+            temperature: None,
+        })?);
+
+        let actor = ActorHandle::spawn_with_command_timeout(std::time::Duration::from_secs(2));
+        actor
+            .navigate(
+                "data:text/html,<title>Wedge</title><button>Nope</button>".to_owned(),
+                false,
+            )
+            .await?;
+        // Wedge the renderer so every capture inside the run times out.
+        let _ = actor.evaluate("while (true) {}").await;
+
+        let report = crate::run_task("Find the price", 1, actor, &provider, false).await;
+
+        let requests = llm_server.join();
+        assert_eq!(
+            requests.len(),
+            1,
+            "the model must still be asked to act after a failed capture, got {requests:#?}"
+        );
+        let prompt = requests[0]["messages"][1]["content"]
+            .as_str()
+            .expect("user message should be text")
+            .to_owned();
+        assert!(
+            prompt.contains("state_error"),
+            "the turn must carry the capture failure: {prompt}"
+        );
+        assert!(
+            prompt.contains("Find the price"),
+            "the task must survive a failed capture: {prompt}"
+        );
+        assert!(
+            report.errors.iter().any(|error| error.contains("get_state")),
+            "the failure is still reported: {:?}",
+            report.errors
+        );
+        assert_eq!(report.final_result, "page was unreachable");
+
+        Ok(())
+    }
+
     struct ScriptedLlmServer {
         base_url: String,
         handle: thread::JoinHandle<Vec<Value>>,

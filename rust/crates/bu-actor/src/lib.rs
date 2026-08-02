@@ -196,6 +196,15 @@ impl ActorHandle {
         self.request(|reply| Command::CloseTab { tab, reply }).await
     }
 
+    /// Number of cached index -> node mappings. Test-only read seam: cache
+    /// invalidation after a failed capture is otherwise unobservable from
+    /// outside the actor, which is what left it untested.
+    #[cfg(any(test, feature = "live-chrome"))]
+    pub async fn selector_cache_len(&self) -> Result<usize> {
+        self.request(|reply| Command::SelectorCacheLen { reply })
+            .await
+    }
+
     /// Lists active sessions. Stage 1 keeps the MVP single default session.
     pub async fn list_sessions(&self) -> Result<Option<String>> {
         self.request(|reply| Command::ListSessions { reply }).await
@@ -318,6 +327,10 @@ enum Command {
         script: String,
         reply: Reply<serde_json::Value>,
     },
+    #[cfg(any(test, feature = "live-chrome"))]
+    SelectorCacheLen {
+        reply: Reply<usize>,
+    },
 }
 
 /// How long a state screenshot may take before the snapshot goes on without it.
@@ -394,6 +407,10 @@ impl BrowserActor {
             }
             Command::GetPolicy { reply } => {
                 let _ = reply.send(Ok(self.policy.clone()));
+            }
+            #[cfg(any(test, feature = "live-chrome"))]
+            Command::SelectorCacheLen { reply } => {
+                let _ = reply.send(Ok(self.selector_cache.index_to_backend_node_id.len()));
             }
             Command::Navigate {
                 url,
@@ -545,17 +562,13 @@ impl BrowserActor {
     }
 
     async fn get_state(&mut self, include_screenshot: bool) -> Result<BrowserStateSnapshot> {
-        let result = self.get_state_inner(include_screenshot).await;
-        if result.is_err() {
-            // No verified snapshot means no index is safe to hand to click/type,
-            // so drop the mapping rather than let the next action act on stale
-            // indices (mirrors Python clearing every action lookup path).
-            self.selector_cache.clear();
-        }
-        result
-    }
-
-    async fn get_state_inner(&mut self, include_screenshot: bool) -> Result<BrowserStateSnapshot> {
+        // Drop the mapping up front and repopulate it only on a verified capture.
+        // Clearing here rather than in an error branch means EVERY way this can
+        // fail -- CDP error, or the command being cancelled mid-flight on the
+        // actor timeout, which never runs an error branch at all -- leaves no
+        // stale index behind for a later click/type. Safe because the actor owns
+        // the browser exclusively, so nothing observes the empty window.
+        self.selector_cache.clear();
         self.guard_active_url().await;
         let page = self.active_page().await?;
         let state = page.state().await?;
