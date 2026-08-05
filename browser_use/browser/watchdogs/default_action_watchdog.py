@@ -1687,16 +1687,20 @@ class DefaultActionWatchdog(BaseWatchdog):
 				// Store old value for comparison
 				const oldValue = this.value;
 
-				// REACT-COMPATIBLE VALUE SETTING:
-				// React uses Object.getOwnPropertyDescriptor to track input changes
-				// We need to use the native setter to bypass React's tracking and then trigger events
-				const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-					window.HTMLInputElement.prototype,
-					'value'
-				).set;
+			// REACT/VUE-COMPATIBLE VALUE SETTING:
+			// React and Vue use Object.getOwnPropertyDescriptor to track input
+			// changes. We need to use the native setter from the CORRECT prototype
+			// (HTMLTextAreaElement for <textarea>, HTMLInputElement for <input>)
+			// to bypass framework tracking and then trigger events.
+			const proto = this.tagName === 'TEXTAREA'
+				? window.HTMLTextAreaElement.prototype
+				: window.HTMLInputElement.prototype;
+			const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+				proto, 'value'
+			).set;
 
-				// Set the value using the native setter (bypasses React's control)
-				nativeInputValueSetter.call(this, {json.dumps(text)});
+			// Set the value using the native setter (bypasses React/Vue's control)
+			nativeInputValueSetter.call(this, {json.dumps(text)});
 
 				// Dispatch comprehensive events to ensure all frameworks detect the change
 				// Order matters: focus -> input -> change -> blur (mimics user interaction)
@@ -2165,16 +2169,20 @@ class DefaultActionWatchdog(BaseWatchdog):
 					}
 				}
 
-				// Special Vue reactivity trigger
-				// Vue uses __vueParentComponent or __vue__ for component access
-				if (element.__vue__ || element._vnode || element.__vueParentComponent) {
-					try {
-						// Vue often needs explicit input event with proper timing
-						const vueEvent = new Event('input', { bubbles: true });
-						setTimeout(() => element.dispatchEvent(vueEvent), 0);
-					} catch (e) {
-						console.warn('Vue reactivity trigger failed:', e);
-					}
+				// Vue 3 reactivity trigger
+				// Vue 3 (unlike Vue 2) does NOT expose __vue__/_vnode on DOM elements.
+				// Its v-model listens for native 'input' events on the element, but the
+				// CDP character-by-character typing can race with Vue's reactivity tick.
+				// A delayed re-dispatch of the native input event ensures Vue picks up
+				// the final value even when the per-character dispatch was too fast.
+				// This is a no-op for non-Vue pages and harmless for React (which already
+				// got its synthetic event above), so it's unconditional, not gated on
+				// Vue-internal properties that don't exist in Vue 3.
+				try {
+					const vueEvent = new Event('input', { bubbles: true });
+					setTimeout(() => element.dispatchEvent(vueEvent), 0);
+				} catch (e) {
+					console.warn('Vue reactivity trigger failed:', e);
 				}
 
 				return success;

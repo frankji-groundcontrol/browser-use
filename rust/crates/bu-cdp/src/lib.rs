@@ -1027,6 +1027,29 @@ impl BrowserPage {
                 })?;
         }
 
+        // Dispatch framework-aware input/change events after typing. CDP's
+        // InsertText and key events fire native browser input events in most
+        // cases, but modern frameworks (Vue 3 v-model, React controlled inputs)
+        // sometimes miss the final value because the native event races with
+        // the framework's reactivity tick. A JS-level re-dispatch of the native
+        // input event (bubbles:true) is a no-op when the framework already saw
+        // the change, and a fix when it didn't. This mirrors what
+        // clear_backend_node_id already does after clearing.
+        self.page
+            .evaluate(
+                r#"
+                (() => {
+                    const el = document.activeElement;
+                    if (!el) return false;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    return true;
+                })()
+                "#,
+            )
+            .await
+            .context("failed to dispatch framework input events after typing")?;
+
         Ok(())
     }
 
