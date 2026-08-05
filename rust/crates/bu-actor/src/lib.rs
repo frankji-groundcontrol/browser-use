@@ -13,6 +13,7 @@ use bu_cdp::{BrowserPage, BrowserSession, PageState, SelectorMapElement, TabInfo
 use tokio::sync::{mpsc, oneshot};
 
 pub use bu_cdp::ScreenshotFormat;
+pub use bu_cdp::SelectOptionOutcome;
 pub use bu_cdp::UrlPolicy as BrowserUrlPolicy;
 
 const SESSION_ID: &str = "default";
@@ -150,6 +151,27 @@ impl ActorHandle {
     pub async fn type_text(&self, index: usize, text: String) -> Result<()> {
         self.request(|reply| Command::Type { index, text, reply })
             .await
+    }
+
+    /// Selects an option in a native `<select>` element (index from the last
+    /// selector snapshot). Exactly one of `value`, `label`, or `option_index`
+    /// should be `Some`; if more than one is provided, value takes precedence,
+    /// then label, then option_index.
+    pub async fn select_option(
+        &self,
+        index: usize,
+        value: Option<String>,
+        label: Option<String>,
+        option_index: Option<usize>,
+    ) -> Result<SelectOptionOutcome> {
+        self.request(|reply| Command::SelectOption {
+            index,
+            value,
+            label,
+            option_index,
+            reply,
+        })
+        .await
     }
 
     /// Scrolls the active page.
@@ -294,6 +316,13 @@ enum Command {
         index: usize,
         text: String,
         reply: Reply<()>,
+    },
+    SelectOption {
+        index: usize,
+        value: Option<String>,
+        label: Option<String>,
+        option_index: Option<usize>,
+        reply: Reply<SelectOptionOutcome>,
     },
     Scroll {
         direction: String,
@@ -463,6 +492,15 @@ impl BrowserActor {
             }
             Command::Type { index, text, reply } => {
                 let _ = reply.send(self.type_text(index, &text).await);
+            }
+            Command::SelectOption {
+                index,
+                value,
+                label,
+                option_index,
+                reply,
+            } => {
+                let _ = reply.send(self.select_option(index, value, label, option_index).await);
             }
             Command::Scroll { direction, reply } => {
                 let result = match self.active_page().await {
@@ -655,6 +693,24 @@ impl BrowserActor {
             return Ok(());
         }
         page.type_into_backend_node_id(backend_node_id, text).await
+    }
+
+    async fn select_option(
+        &mut self,
+        index: usize,
+        value: Option<String>,
+        label: Option<String>,
+        option_index: Option<usize>,
+    ) -> Result<SelectOptionOutcome> {
+        let backend_node_id = self.backend_node_id_for_index(index).await?;
+        let page = self.active_page().await?;
+        page.select_option_backend_node_id(
+            backend_node_id,
+            value.as_deref(),
+            label.as_deref(),
+            option_index,
+        )
+        .await
     }
 
     async fn screenshot(&mut self, full_page: bool, format: ScreenshotFormat) -> Result<Vec<u8>> {

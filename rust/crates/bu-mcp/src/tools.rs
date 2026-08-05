@@ -64,6 +64,32 @@ pub fn low_level_tools() -> Vec<Tool> {
             }),
         ),
         tool(
+            "browser_select_option",
+            "Select an option in a native <select> dropdown by option value, visible label text, or 0-based index. Use this instead of browser_click or browser_type for <select> elements — native dropdowns cannot be opened by synthetic mouse clicks under CDP, and typing does not change a select's value.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "index": {
+                        "type": "integer",
+                        "description": "The index of the <select> element (from browser_get_state)"
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "The option's value attribute to select. Provide exactly one of value, label, or option_index."
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "The option's visible text to select (matched case-insensitively, with substring fallback). Provide exactly one of value, label, or option_index."
+                    },
+                    "option_index": {
+                        "type": "integer",
+                        "description": "The 0-based position of the option within the select. Provide exactly one of value, label, or option_index."
+                    }
+                },
+                "required": ["index"]
+            }),
+        ),
+        tool(
             "browser_get_state",
             "Get the current state of the page including all interactive elements",
             json!({

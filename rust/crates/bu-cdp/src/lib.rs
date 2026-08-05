@@ -58,7 +58,7 @@ use discovery::{
 use dom::{
     apply_bounding_box_containment_filter, apply_paint_order_occlusion_filter,
     collect_enhanced_dom_nodes, collect_interactive_elements, is_click_like_event, merge_ax_tree,
-    merge_snapshot, visible_backend_node_ids, REQUIRED_COMPUTED_STYLES,
+    merge_snapshot, visible_backend_node_ids, SelectorMapCandidate, REQUIRED_COMPUTED_STYLES,
 };
 
 /// Browser launch options used by the thin CDP session wrapper.
@@ -180,6 +180,25 @@ impl SelectorMapElement {
     pub fn backend_node_id_value(&self) -> i64 {
         *self.backend_node_id.inner()
     }
+}
+
+/// Outcome of selecting an option in a native `<select>` element.
+///
+/// Native `<select>` dropdowns cannot be operated by synthetic mouse clicks
+/// under CDP (the popup never opens — the gesture flag isn't satisfied), so
+/// `select_option_backend_node_id` focuses the element and sets its value
+/// through the DOM property + dispatched `input`/`change` events. This mirrors
+/// what `clear_backend_node_id`/`type_into_backend_node_id` already do after
+/// mutating a controlled input, and what the Python watchdog's select handler
+/// (`default_action_watchdog.py`) does for selects.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectOptionOutcome {
+    /// Whether an option was successfully selected and the value stuck.
+    pub selected: bool,
+    /// The `value` attribute of the selected `<option>`.
+    pub value: String,
+    /// The visible label text of the selected `<option>`.
+    pub label: String,
 }
 
 /// A launched Chromium session.
@@ -822,6 +841,14 @@ impl BrowserPage {
         apply_paint_order_occlusion_filter(&mut candidates, &enhanced_nodes);
         apply_bounding_box_containment_filter(&dom_tree, &enhanced_nodes, &mut candidates);
 
+        // A `<select>`'s candidate text comes from `descendant_text`, which
+        // concatenates EVERY option label ("Choose a city node ... Shanghai
+        // (dev) ..."). That is useless to the model — it can't tell which
+        // option is selected and the string grows without bound. Replace it
+        // with the selected option's label (or a placeholder + option count)
+        // via one batched evaluate over the select candidates only.
+        self.enrich_select_text(&mut candidates).await;
+
         let elements = candidates
             .into_iter()
             .enumerate()
@@ -829,6 +856,102 @@ impl BrowserPage {
             .collect();
 
         Ok(elements)
+    }
+
+    /// Replaces each `<select>` candidate's concatenated option-label text with
+    /// the currently selected option's label (or a placeholder noting how many
+    /// options exist when none is chosen). One `page.evaluate` call regardless
+    /// of select count; non-select candidates are untouched.
+    ///
+    /// The CDP DOM `Node` carries HTML attributes but not live DOM properties
+    /// like `HTMLSelectElement.value` or `selectedIndex`, so the selected option
+    /// cannot be read from the snapshot — only from a live JS read. Backend node
+    /// ids are not visible to page JS, so selects are matched positionally: the
+    /// page reports every `<select>` in DOM order, and if that count matches the
+    /// candidate select count, they are paired in order. A mismatch (one select
+    /// was filtered as hidden/occluded) skips enrichment entirely rather than
+    /// risk mis-assignment. Errors are tolerated — a failed read leaves the
+    /// original concatenated text in place, which is inaccurate but still lets
+    /// the model address the element by index.
+    async fn enrich_select_text(&self, candidates: &mut [SelectorMapCandidate]) {
+        let select_count = candidates.iter().filter(|c| c.tag() == "select").count();
+        if select_count == 0 {
+            return;
+        }
+
+        let read_script = r#"
+            (() => {
+                const selects = Array.from(document.querySelectorAll("select"));
+                return selects.map(s => {
+                    const idx = s.selectedIndex;
+                    const count = s.options.length;
+                    if (idx >= 0 && s.options[idx]) {
+                        return { label: s.options[idx].text.trim(), count };
+                    }
+                    // Nothing selected: report the first option (often the
+                    // placeholder) plus the option count so the model knows the
+                    // dropdown is unset and how many choices it has.
+                    const first = count > 0 ? s.options[0].text.trim() : "";
+                    return { label: first, count, unset: true };
+                });
+            })()
+        "#;
+        let result = match self.page.evaluate(read_script).await {
+            Ok(evaluation) => match evaluation.into_value::<serde_json::Value>() {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!(%err, "select text enrichment failed; keeping concatenated option labels");
+                    return;
+                }
+            },
+            Err(err) => {
+                tracing::warn!(%err, "select text enrichment failed; keeping concatenated option labels");
+                return;
+            }
+        };
+        let Some(select_infos) = result.as_array() else {
+            return;
+        };
+        if select_infos.len() != select_count {
+            // The DOM has a different number of selects than the candidate list
+            // (one may have been filtered as hidden/occluded). Positional
+            // assignment would be wrong, so leave the original text alone.
+            tracing::debug!(
+                candidate_selects = select_count,
+                dom_selects = select_infos.len(),
+                "select count mismatch; skipping text enrichment"
+            );
+            return;
+        }
+        let mut info_iter = select_infos.iter();
+        for candidate in candidates.iter_mut() {
+            if candidate.tag() != "select" {
+                continue;
+            }
+            let Some(info) = info_iter.next() else {
+                break;
+            };
+            let label = info
+                .get("label")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let count = info
+                .get("count")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let unset = info
+                .get("unset")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let text = if unset {
+                format!("{label} ({count} options)")
+            } else {
+                label.to_owned()
+            };
+            if !text.trim().is_empty() {
+                candidate.set_text(text);
+            }
+        }
     }
 
     async fn js_click_listener_backend_ids(
@@ -1106,6 +1229,194 @@ impl BrowserPage {
             .context("failed to clear focused element")?;
 
         Ok(())
+    }
+
+    /// Selects an option in a native `<select>` element by value, label text,
+    /// or index.
+    ///
+    /// Native `<select>` dropdowns cannot be operated by synthetic mouse clicks
+    /// under CDP: the popup requires a real user gesture flag that
+    /// `Input.dispatchMouseEvent` doesn't satisfy, so the option list never
+    /// renders and no option is ever chosen. Typing doesn't work either —
+    /// `InsertText` rejects `<select>` and the per-character `Char` key-event
+    /// fallback can't emit ArrowDown/Enter.
+    ///
+    /// Instead this focuses the element (via CDP `Focus`, like
+    /// `clear_backend_node_id`) and evaluates a script that sets the value
+    /// through the DOM property and dispatches the framework-facing
+    /// `input`/`change`/`blur` events. The script combines two proven patterns:
+    /// (1) the React prototype-setter bypass from `clear_backend_node_id`
+    /// (`Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')
+    /// .set.call(...)`) so React-controlled selects don't revert, and (2) the
+    /// triple-set + event sequence from the Python watchdog's select handler
+    /// (`default_action_watchdog.py`), which is what makes Vue/Svelte controlled
+    /// selects see the change.
+    pub async fn select_option_backend_node_id(
+        &self,
+        backend_node_id: i64,
+        value: Option<&str>,
+        label: Option<&str>,
+        option_index: Option<usize>,
+    ) -> Result<SelectOptionOutcome> {
+        let element = self
+            .current_element_by_backend_node_id(backend_node_id)
+            .await?;
+
+        self.page
+            .execute(
+                FocusParams::builder()
+                    .backend_node_id(element.backend_node_id)
+                    .build(),
+            )
+            .await
+            .with_context(|| format!("failed to focus backend node id {backend_node_id}"))?;
+
+        // Inject the requested selectors as JSON literals (serde_json::to_string
+        // escapes safely), or `undefined` when absent so the JS `||` chain skips
+        // them. Exactly one of value/label/option_index is expected to be Some.
+        let value_literal = match value {
+            Some(v) => serde_json::to_string(v)?,
+            None => "undefined".to_owned(),
+        };
+        let label_literal = match label {
+            Some(l) => serde_json::to_string(l)?,
+            None => "undefined".to_owned(),
+        };
+        let index_literal = match option_index {
+            Some(i) => i.to_string(),
+            None => "undefined".to_owned(),
+        };
+        let script = format!(
+            r#"
+            (() => {{
+                const valueArg = {value_literal};
+                const labelArg = {label_literal};
+                const indexArg = {index_literal};
+                const el = document.activeElement;
+                if (!el) return {{ ok: false, error: "no active element" }};
+                if (el.tagName.toLowerCase() !== "select") {{
+                    return {{ ok: false, error: "element is " + el.tagName + ", not a <select>" }};
+                }}
+                const select = el;
+                const options = Array.from(select.options);
+
+                const findByValue = (v) => options.find(o => o.value === v);
+                const findByLabel = (l) => {{
+                    const lower = String(l).trim().toLowerCase();
+                    return options.find(o => o.text.trim().toLowerCase() === lower)
+                        || options.find(o => o.text.trim().toLowerCase().includes(lower));
+                }};
+                const findByIndex = (i) => options[i] || null;
+
+                let target = null;
+                if (valueArg !== undefined) target = findByValue(valueArg);
+                if (!target && labelArg !== undefined) target = findByLabel(labelArg);
+                if (!target && indexArg !== undefined) target = findByIndex(indexArg);
+
+                if (!target) {{
+                    return {{
+                        ok: false,
+                        error: "no matching option",
+                        available: options.map(o => ({{ value: o.value, text: o.text.trim() }}))
+                    }};
+                }}
+
+                // 1. Focus (already focused via CDP, but some frameworks re-check).
+                select.focus();
+
+                // 2. Set the value three ways for maximum framework compatibility.
+                // 2a. Native prototype setter bypass (React patches the instance
+                //     value setter on controlled components; going through the
+                //     prototype's native setter defeats the patch, same trick as
+                //     clear_backend_node_id for inputs).
+                const proto = window.HTMLSelectElement.prototype;
+                const desc = Object.getOwnPropertyDescriptor(proto, "value");
+                try {{ desc.set.call(select, target.value); }} catch (e) {{ select.value = target.value; }}
+                // 2b. option.selected + selectedIndex (the Python watchdog's
+                //     triple-set, reliable for Vue/Svelte).
+                target.selected = true;
+                select.selectedIndex = target.index;
+
+                // 3. Dispatch input + change + blur. bubbles:true + cancelable:true
+                //    so framework listeners and validators fire (clear_backend_node_id
+                //    omits cancelable; the watchdog includes it).
+                select.dispatchEvent(new Event("input", {{ bubbles: true, cancelable: true }}));
+                select.dispatchEvent(new Event("change", {{ bubbles: true, cancelable: true }}));
+                select.blur();
+
+                // 4. Verify the value stuck — React/Vue can revert a programmatic
+                //    write on the next tick if the setter bypass missed.
+                if (select.value !== target.value) {{
+                    return {{
+                        ok: false,
+                        error: "selection reverted by page framework",
+                        reverted: true,
+                        finalValue: select.value,
+                        expectedValue: target.value
+                    }};
+                }}
+
+                return {{ ok: true, value: select.value, label: target.text.trim() }};
+            }})()
+            "#
+        );
+
+        let result = self
+            .page
+            .evaluate(script)
+            .await
+            .context("failed to evaluate select option script")?
+            .into_value::<serde_json::Value>()
+            .context("failed to decode select option result")?;
+
+        let ok = result.get("ok").and_then(serde_json::Value::as_bool) == Some(true);
+        if ok {
+            return Ok(SelectOptionOutcome {
+                selected: true,
+                value: result
+                    .get("value")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                label: result
+                    .get("label")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+            });
+        }
+
+        // Build a useful error. For "no matching option" include the available
+        // options so the caller can retry with a valid value/label.
+        let error = result
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown select error")
+            .to_owned();
+        if let Some(available) = result
+            .get("available")
+            .and_then(serde_json::Value::as_array)
+        {
+            let opts: Vec<String> = available
+                .iter()
+                .map(|o| {
+                    let v = o
+                        .get("value")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    let t = o
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    format!("{t:?} (value {v:?})")
+                })
+                .collect();
+            return Err(anyhow!("{error}; available options: {}", opts.join(", ")));
+        }
+        if let Some(final_value) = result.get("finalValue").and_then(serde_json::Value::as_str) {
+            return Err(anyhow!("{error} (final value: {final_value})"));
+        }
+        Err(anyhow!(error))
     }
 
     /// Resolves `href` as a browser URL using the page's current base URI.

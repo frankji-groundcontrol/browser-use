@@ -19,19 +19,22 @@ use tokio::task::JoinSet;
 use tokio::time::{timeout, Duration};
 
 #[test]
-fn tools_list_returns_18_low_level_tools() {
+fn tools_list_returns_19_low_level_tools() {
     let tools = low_level_tools();
     let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
 
-    // 16 are byte-identical to Python's set; browser_set_viewport and
-    // browser_read_clipboard are this fork's deliberate additions.
-    assert_eq!(tools.len(), 18);
+    // 16 are byte-identical to Python's set; browser_set_viewport,
+    // browser_read_clipboard, and browser_select_option are this fork's
+    // deliberate additions (select_option covers native <select> dropdowns,
+    // which cannot be operated by mouse clicks under CDP).
+    assert_eq!(tools.len(), 19);
     assert_eq!(
         names,
         [
             "browser_navigate",
             "browser_click",
             "browser_type",
+            "browser_select_option",
             "browser_get_state",
             "browser_extract_content",
             "browser_get_html",
@@ -339,6 +342,180 @@ async fn selector_map_powers_state_click_and_type() -> anyhow::Result<()> {
             json!({"index": input_index, "text": "typed"}),
         ))
         .await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn select_option_sets_native_select_by_value() -> anyhow::Result<()> {
+    let server = BrowserUseMcpServer::new();
+    let html = r#"
+        <title>Select By Value</title>
+        <select id="s">
+            <option value="">Pick a country</option>
+            <option value="us">United States</option>
+            <option value="ca">Canada</option>
+        </select>
+    "#;
+    server
+        .call_browser_tool(call("browser_navigate", json!({"url": data_url(html)})))
+        .await?;
+
+    let state = server
+        .call_browser_tool(call("browser_get_state", json!({})))
+        .await?
+        .structured_content
+        .expect("browser_get_state should return structured JSON");
+    let elements = state["interactive_elements"]
+        .as_array()
+        .expect("elements should be an array");
+    let select_index = elements
+        .iter()
+        .find(|e| e["tag"] == "select")
+        .and_then(|e| e["index"].as_i64())
+        .expect("a <select> element should be indexed");
+
+    server
+        .call_browser_tool(call(
+            "browser_select_option",
+            json!({"index": select_index, "value": "us"}),
+        ))
+        .await?;
+
+    let value = server
+        .actor()
+        .evaluate("document.getElementById('s').value")
+        .await?;
+    assert_eq!(
+        value,
+        json!("us"),
+        "select value should be 'us' after select_option"
+    );
+
+    // The selector map should now report the selected option's label as the
+    // element text (not the concatenated option labels).
+    let state_after = server
+        .call_browser_tool(call("browser_get_state", json!({})))
+        .await?
+        .structured_content
+        .expect("browser_get_state should return structured JSON");
+    let elements_after = state_after["interactive_elements"]
+        .as_array()
+        .expect("elements should be an array");
+    let select_text = elements_after
+        .iter()
+        .find(|e| e["tag"] == "select")
+        .and_then(|e| e["text"].as_str())
+        .expect("select should still be in the map");
+    assert_eq!(
+        select_text, "United States",
+        "get_state should report the selected option's label, not concatenated options: {select_text:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn select_option_fires_change_event_for_vanilla_js() -> anyhow::Result<()> {
+    // Proves the JS script dispatches a real 'change' event that a vanilla
+    // onchange handler observes — this is the seam Vue/React v-model hooks into.
+    let server = BrowserUseMcpServer::new();
+    let html = r#"
+        <title>Select Change Event</title>
+        <select id="s" onchange="document.body.dataset.changed = this.value">
+            <option value="">Pick</option>
+            <option value="us">United States</option>
+            <option value="ca">Canada</option>
+        </select>
+    "#;
+    server
+        .call_browser_tool(call("browser_navigate", json!({"url": data_url(html)})))
+        .await?;
+
+    let state = server
+        .call_browser_tool(call("browser_get_state", json!({})))
+        .await?
+        .structured_content
+        .expect("browser_get_state should return structured JSON");
+    let elements = state["interactive_elements"]
+        .as_array()
+        .expect("elements should be an array");
+    let select_index = elements
+        .iter()
+        .find(|e| e["tag"] == "select")
+        .and_then(|e| e["index"].as_i64())
+        .expect("a <select> element should be indexed");
+
+    server
+        .call_browser_tool(call(
+            "browser_select_option",
+            json!({"index": select_index, "label": "Canada"}),
+        ))
+        .await?;
+
+    let changed = server
+        .actor()
+        .evaluate("document.body.dataset.changed")
+        .await?;
+    assert_eq!(
+        changed,
+        json!("ca"),
+        "onchange handler should have fired with the selected value"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn select_option_reports_available_options_on_no_match() -> anyhow::Result<()> {
+    let server = BrowserUseMcpServer::new();
+    let html = r#"
+        <title>Select No Match</title>
+        <select id="s">
+            <option value="us">United States</option>
+            <option value="ca">Canada</option>
+        </select>
+    "#;
+    server
+        .call_browser_tool(call("browser_navigate", json!({"url": data_url(html)})))
+        .await?;
+
+    let state = server
+        .call_browser_tool(call("browser_get_state", json!({})))
+        .await?
+        .structured_content
+        .expect("browser_get_state should return structured JSON");
+    let elements = state["interactive_elements"]
+        .as_array()
+        .expect("elements should be an array");
+    let select_index = elements
+        .iter()
+        .find(|e| e["tag"] == "select")
+        .and_then(|e| e["index"].as_i64())
+        .expect("a <select> element should be indexed");
+
+    let result = server
+        .call_browser_tool(call(
+            "browser_select_option",
+            json!({"index": select_index, "value": "zz"}),
+        ))
+        .await?;
+    let error_text = text_content(&result);
+    assert!(
+        result.is_error.unwrap_or(false),
+        "no-match select_option should return a tool error, got: {result:?}"
+    );
+    assert!(
+        error_text.contains("no matching option"),
+        "error should explain no option matched: {error_text}"
+    );
+    assert!(
+        error_text.contains("United States"),
+        "error should list available options to help the caller retry: {error_text}"
+    );
 
     Ok(())
 }

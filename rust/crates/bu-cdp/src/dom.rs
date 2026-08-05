@@ -52,6 +52,17 @@ impl SelectorMapCandidate {
         *self.backend_node_id.inner()
     }
 
+    /// Lowercase tag name, used to identify `<select>` candidates for text
+    /// enrichment (their `descendant_text` concatenates every option label;
+    /// the selector map replaces it with the selected option's label).
+    pub(crate) fn tag(&self) -> &str {
+        &self.tag
+    }
+
+    pub(crate) fn set_text(&mut self, text: String) {
+        self.text = text;
+    }
+
     pub(crate) fn into_element(self, index: usize) -> SelectorMapElement {
         SelectorMapElement {
             index,

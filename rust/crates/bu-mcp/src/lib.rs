@@ -87,6 +87,7 @@ impl BrowserUseMcpServer {
             "browser_get_state" => self.get_state(request.arguments).await,
             "browser_click" => self.click(request.arguments).await,
             "browser_type" => self.type_text(request.arguments).await,
+            "browser_select_option" => self.select_option(request.arguments).await,
             "browser_get_html" => self.get_html(request.arguments).await,
             "browser_extract_content" => self.extract_content(request.arguments).await,
             "browser_screenshot" => self.screenshot(request.arguments).await,
@@ -265,6 +266,44 @@ impl BrowserUseMcpServer {
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Typed {} into element {index}",
             masked_typed_text(&text)
+        ))]))
+    }
+
+    async fn select_option(
+        &self,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let index = required_usize(arguments.as_ref(), "index", "browser_select_option")?;
+        let value = optional_str(arguments.as_ref(), "value").map(str::to_owned);
+        let label = optional_str(arguments.as_ref(), "label").map(str::to_owned);
+        let option_index = optional_i64(arguments.as_ref(), "option_index").map(|i| i as usize);
+        // Exactly one selector is required; if none are provided the actor's JS
+        // can't resolve a target option and returns a clear "no matching option"
+        // error, but validating here gives a precise INVALID_PARAMS message.
+        let provided = [value.is_some(), label.is_some(), option_index.is_some()]
+            .iter()
+            .filter(|&&flag| flag)
+            .count();
+        if provided == 0 {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "browser_select_option requires exactly one of value, label, or option_index",
+                None,
+            ));
+        }
+
+        let outcome = match self
+            .actor
+            .select_option(index, value, label, option_index)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => return Ok(browser_tool_error("browser_select_option failed", error)),
+        };
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Selected '{}' (value '{}') in element {index}",
+            outcome.label, outcome.value
         ))]))
     }
 
