@@ -892,10 +892,66 @@ fn required_usize(
 }
 
 /// Runs the browser-use MCP server over stdio.
+///
+/// Chromium is launched lazily on the first browser tool call. On clean exit
+/// (stdio EOF) or SIGINT/SIGTERM we close the browser so multi-session hosts
+/// (Codex, Claude, Grok) do not accumulate orphan Chromium processes and hit
+/// EMFILE ("Too many open files").
 pub async fn run_stdio_server() -> anyhow::Result<()> {
-    let service = BrowserUseMcpServer::new().serve(stdio()).await?;
+    let server = BrowserUseMcpServer::new();
+    let actor = server.actor.clone();
+
+    // Signal path: hosts often kill MCP with SIGTERM without draining stdio.
+    // Close Chromium before the process disappears so kill_on_drop is not the
+    // only (and unreliable under SIGKILL) cleanup.
+    {
+        let shutdown_actor = actor.clone();
+        tokio::spawn(async move {
+            wait_for_shutdown_signal().await;
+            if let Err(error) = shutdown_actor.close_all().await {
+                tracing::warn!(%error, "failed to close browser on signal");
+            }
+            // Force exit if the MCP service is stuck waiting on a dead transport.
+            std::process::exit(0);
+        });
+    }
+
+    let service = server.serve(stdio()).await?;
     service.waiting().await?;
+    if let Err(error) = actor.close_all().await {
+        tracing::warn!(%error, "failed to close browser after MCP stdio end");
+    }
     Ok(())
+}
+
+/// Resolves when the process should tear down (Ctrl-C / SIGINT / SIGTERM).
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(signal) => signal,
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        let mut sigint = match signal(SignalKind::interrupt()) {
+            Ok(signal) => signal,
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = sigterm.recv() => {}
+            _ = sigint.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// Returns the 15 low-level browser-use tools exposed by the MVP server.

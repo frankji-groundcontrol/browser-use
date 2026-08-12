@@ -445,6 +445,12 @@ impl BrowserActor {
                 tracing::warn!("browser command timed out; dropping it and continuing");
             }
         }
+        // Host dropped every ActorHandle (MCP stdio closed, process exiting).
+        // Without an explicit close(), Chromium can outlive us as an orphan and
+        // keep hundreds of FDs open until the next launch's profile sweep.
+        if let Err(error) = self.close_all().await {
+            tracing::warn!(%error, "failed to close browser on actor shutdown");
+        }
     }
 
     async fn dispatch(&mut self, command: Command) {

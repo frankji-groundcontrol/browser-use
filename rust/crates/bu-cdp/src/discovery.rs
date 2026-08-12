@@ -78,11 +78,16 @@ pub(crate) fn chromium_path_from_env() -> Option<PathBuf> {
 }
 
 pub(crate) fn find_playwright_chromium() -> Option<PathBuf> {
-    playwright_roots()
-        .into_iter()
-        .flat_map(|root| chromium_candidates(&root))
-        .filter(|path| path.is_file())
-        .max()
+    // Newest install first; within an install, full Chrome before headless shell.
+    for root in playwright_roots() {
+        if let Some(path) = chromium_candidates(&root)
+            .into_iter()
+            .find(|path| path.is_file())
+        {
+            return Some(path);
+        }
+    }
+    None
 }
 
 fn playwright_roots() -> Vec<PathBuf> {
@@ -104,16 +109,52 @@ fn chromium_candidates(root: &Path) -> Vec<PathBuf> {
         return Vec::new();
     };
 
-    entries
+    // Prefer higher revision folders (chromium-1234 > chromium-1228).
+    let mut version_dirs: Vec<PathBuf> = entries
         .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("chromium-"))
+                .is_some_and(|name| {
+                    name.starts_with("chromium-") || name.starts_with("chromium_headless_shell-")
+                })
         })
-        .map(|path| path.join("chrome-linux64").join("chrome"))
-        .collect()
+        .collect();
+    version_dirs.sort();
+    // Newest first so find_playwright_chromium can take the first existing path.
+    version_dirs.reverse();
+
+    let mut out = Vec::new();
+    for path in version_dirs {
+        out.extend(chromium_binaries_for_install(&path));
+    }
+    out
+}
+
+/// Platform-specific Playwright Chromium binaries under one install folder.
+fn chromium_binaries_for_install(install: &Path) -> Vec<PathBuf> {
+    let mac_app = "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing";
+    vec![
+        // Linux full + headless shell
+        install.join("chrome-linux64").join("chrome"),
+        install.join("chrome-headless-shell-linux64").join("chrome-headless-shell"),
+        // macOS arm64 / x64
+        install.join("chrome-mac-arm64").join(mac_app),
+        install.join("chrome-mac").join(mac_app),
+        install
+            .join("chrome-headless-shell-mac-arm64")
+            .join("chrome-headless-shell"),
+        install
+            .join("chrome-headless-shell-mac")
+            .join("chrome-headless-shell"),
+        // Windows
+        install.join("chrome-win64").join("chrome.exe"),
+        install.join("chrome-win").join("chrome.exe"),
+        install
+            .join("chrome-headless-shell-win64")
+            .join("chrome-headless-shell.exe"),
+    ]
 }
 
 const SCRATCH_PREFIX: &str = "browser-use-rs-chromium-";
@@ -149,6 +190,10 @@ pub(crate) fn unique_user_data_dir() -> Result<(PathBuf, File)> {
 
 /// Removes scratch profiles whose owning process is gone. Skips any directory
 /// whose lock is still held — that is a live session, possibly another agent's.
+///
+/// Also kills orphan Chromium processes still bound to those profiles. Profile
+/// GC alone is not enough: after SIGKILL of `browser-use-rs`, Chromium can stay
+/// up (reparented) holding the profile and dozens of FDs until manually reaped.
 fn sweep_abandoned_user_data_dirs(root: &Path) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
@@ -170,8 +215,62 @@ fn sweep_abandoned_user_data_dirs(root: &Path) {
                 _ => continue,
             }
         }
+        // Reap any Chromium still using this abandoned profile before rmdir.
+        kill_orphaned_chromium_for_profile(&path);
         // No lock file at all: left by a build predating the lock; also abandoned.
         let _ = fs::remove_dir_all(&path);
+    }
+}
+
+/// Best-effort kill of Chromium children left after a SIGKILL'd MCP host.
+///
+/// Matches processes whose argv contains this profile's `--user-data-dir=...`.
+/// Safe for abandoned profiles only (caller already verified the owner lock is
+/// free). Never touches attached user browsers with custom profile paths.
+fn kill_orphaned_chromium_for_profile(dir: &Path) {
+    #[cfg(unix)]
+    {
+        let needle = format!("--user-data-dir={}", dir.display());
+        let Ok(output) = std::process::Command::new("pgrep")
+            .args(["-f", &needle])
+            .output()
+        else {
+            return;
+        };
+        if !output.status.success() && output.stdout.is_empty() {
+            return;
+        }
+        for pid_str in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+            let Ok(pid) = pid_str.parse::<i32>() else {
+                continue;
+            };
+            // Don't kill ourselves if a host wrapped the MCP in a shell whose
+            // argv happened to include the path (defensive).
+            if pid == std::process::id() as i32 {
+                continue;
+            }
+            // SIGTERM first so Chromium can flush; SIGKILL if it ignores us.
+            let _ = std::process::Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .status();
+        }
+        // Brief grace for clean exit before the profile directory is removed.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        for pid_str in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+            let Ok(pid) = pid_str.parse::<i32>() else {
+                continue;
+            };
+            if pid == std::process::id() as i32 {
+                continue;
+            }
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
     }
 }
 
@@ -210,5 +309,16 @@ mod tests {
             parse_cdp_url(Some("  http://127.0.0.1:9222 ".to_owned())),
             Some("http://127.0.0.1:9222".to_owned())
         );
+    }
+
+    #[test]
+    fn playwright_candidates_include_macos_and_linux_layouts() {
+        let install = PathBuf::from("/tmp/ms-playwright/chromium-1228");
+        let bins = chromium_binaries_for_install(&install);
+        assert!(bins.iter().any(|p| p.ends_with("chrome-linux64/chrome")));
+        assert!(bins.iter().any(|p| {
+            p.to_string_lossy()
+                .contains("chrome-mac-arm64/Google Chrome for Testing.app")
+        }));
     }
 }
