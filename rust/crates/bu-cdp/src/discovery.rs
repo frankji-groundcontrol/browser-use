@@ -138,7 +138,9 @@ fn chromium_binaries_for_install(install: &Path) -> Vec<PathBuf> {
     vec![
         // Linux full + headless shell
         install.join("chrome-linux64").join("chrome"),
-        install.join("chrome-headless-shell-linux64").join("chrome-headless-shell"),
+        install
+            .join("chrome-headless-shell-linux64")
+            .join("chrome-headless-shell"),
         // macOS arm64 / x64
         install.join("chrome-mac-arm64").join(mac_app),
         install.join("chrome-mac").join(mac_app),
