@@ -4,7 +4,8 @@ The MCP server deployed on this host is a from-scratch **Rust reimplementation**
 of `browser-use --mcp`, living in the Cargo workspace under
 [`rust/`](../../rust) on branch `franky-rust`. It reaches **full parity** with the
 Python MCP surface — `tools/list` is byte-identical (16 tools, same order, 0
-schema diffs) — and is hardened beyond it. This doc is the map from that code to
+schema diffs, same `readOnlyHint` annotations as upstream's read-only five) —
+and is hardened beyond it. This doc is the map from that code to
 the design described in docs `00`–`11` (which remain the porting oracle).
 
 The living build log is

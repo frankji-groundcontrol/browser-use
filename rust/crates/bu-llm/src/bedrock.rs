@@ -17,13 +17,13 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 use crate::message::{ChatMessage, ContentPart, MessageContent};
 
-const DEFAULT_MODEL: &str = "us.anthropic.claude-sonnet-4-20250514-v1:0";
+const DEFAULT_MODEL: &str = "us.anthropic.claude-sonnet-4-6";
 const DEFAULT_REGION: &str = "us-east-1";
 
 /// Bedrock model + region selection.
 #[derive(Debug, Clone)]
 pub struct BedrockChatConfig {
-    /// Bedrock model id (e.g. `us.anthropic.claude-sonnet-4-20250514-v1:0`).
+    /// Bedrock model id (e.g. `us.anthropic.claude-sonnet-4-6`).
     pub model: String,
     /// AWS region hosting the model.
     pub region: String,
@@ -185,6 +185,22 @@ mod tests {
         let config =
             BedrockChatConfig::from_env_with_model_override(Some("custom-model".to_owned()));
         assert_eq!(config.model, "custom-model");
+    }
+
+    #[test]
+    fn default_model_is_the_current_bedrock_identifier() {
+        // Upstream replaced the retired `us.anthropic.claude-sonnet-4-20250514-v1:0`
+        // with `us.anthropic.claude-sonnet-4-6` (browser-use d2411b419): the old
+        // id stops resolving on Bedrock, so a stale default breaks every
+        // MODEL_PROVIDER=bedrock deployment that relies on it.
+        let previous_model = std::env::var("MODEL").ok();
+        std::env::remove_var("MODEL");
+        let config = BedrockChatConfig::from_env_with_model_override(None);
+        match previous_model {
+            Some(value) => std::env::set_var("MODEL", value),
+            None => std::env::remove_var("MODEL"),
+        }
+        assert_eq!(config.model, "us.anthropic.claude-sonnet-4-6");
     }
 
     #[test]

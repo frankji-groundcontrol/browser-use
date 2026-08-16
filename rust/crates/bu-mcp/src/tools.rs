@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use rmcp::model::Tool;
+use rmcp::model::{Tool, ToolAnnotations};
 use serde_json::{json, Map, Value};
 
 pub fn low_level_tools() -> Vec<Tool> {
@@ -89,7 +89,7 @@ pub fn low_level_tools() -> Vec<Tool> {
                 "required": ["index"]
             }),
         ),
-        tool(
+        read_only_tool(
             "browser_get_state",
             "Get the current state of the page including all interactive elements",
             json!({
@@ -119,7 +119,7 @@ pub fn low_level_tools() -> Vec<Tool> {
                 "required": ["query"]
             }),
         ),
-        tool(
+        read_only_tool(
             "browser_get_html",
             "Get the raw HTML of the current page or a specific element by CSS selector",
             json!({
@@ -132,7 +132,7 @@ pub fn low_level_tools() -> Vec<Tool> {
                 }
             }),
         ),
-        tool(
+        read_only_tool(
             "browser_screenshot",
             "Take a screenshot of the current page. Returns viewport metadata as text and the screenshot as an image.",
             json!({
@@ -179,7 +179,7 @@ pub fn low_level_tools() -> Vec<Tool> {
                 "required": ["width", "height"]
             }),
         ),
-        tool(
+        read_only_tool(
             "browser_read_clipboard",
             "Read the browser clipboard as text - use after clicking a page's \"Copy\" button to capture what it copied. This is Chromium's own clipboard, not the operating system's, so it cannot read text you copied in another application.",
             json!({
@@ -212,7 +212,7 @@ pub fn low_level_tools() -> Vec<Tool> {
             "Go back to the previous page",
             json!({"type": "object", "properties": {}}),
         ),
-        tool(
+        read_only_tool(
             "browser_list_tabs",
             "List all open tabs",
             json!({"type": "object", "properties": {}}),
@@ -272,7 +272,7 @@ pub fn low_level_tools() -> Vec<Tool> {
                 "required": ["task"]
             }),
         ),
-        tool(
+        read_only_tool(
             "browser_list_sessions",
             "List all active browser sessions with their details and last activity time",
             json!({"type": "object", "properties": {}}),
@@ -301,6 +301,15 @@ pub fn low_level_tools() -> Vec<Tool> {
 
 fn tool(name: &'static str, description: &'static str, input_schema: Value) -> Tool {
     Tool::new(name, description, schema_object(input_schema))
+}
+
+/// Same as [`tool`], plus the `readOnlyHint` annotation upstream marks its
+/// read-only tools with (browser-use c0d0542be), so clients can treat calls as
+/// side-effect free. This fork additionally annotates its own read-only
+/// additions (`browser_read_clipboard`); `browser_extract_content` stays
+/// unannotated to match upstream — it spends an LLM call.
+fn read_only_tool(name: &'static str, description: &'static str, input_schema: Value) -> Tool {
+    tool(name, description, input_schema).annotate(ToolAnnotations::new().read_only(true))
 }
 
 fn schema_object(value: Value) -> Arc<Map<String, Value>> {

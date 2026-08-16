@@ -115,6 +115,65 @@ fn tools_list_returns_19_low_level_tools() {
     );
 }
 
+#[test]
+fn read_only_tools_carry_read_only_hint_annotations() {
+    // Upstream marks the read-only tools with readOnlyHint so clients can skip
+    // confirmation for them (browser-use commit c0d0542be). Parity: annotate the
+    // same five. browser_read_clipboard is this fork's addition and is equally
+    // a pure read, so it is annotated too; browser_extract_content is
+    // deliberately NOT (upstream leaves the LLM-calling tool unannotated).
+    let tools = low_level_tools();
+    let read_only = [
+        "browser_get_state",
+        "browser_get_html",
+        "browser_screenshot",
+        "browser_list_tabs",
+        "browser_list_sessions",
+        "browser_read_clipboard",
+    ];
+    for name in read_only {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("{name} should be listed"));
+        let annotations = tool
+            .annotations
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name} should carry annotations"));
+        assert_eq!(
+            annotations.read_only_hint,
+            Some(true),
+            "{name} should be annotated readOnlyHint=true"
+        );
+    }
+
+    let mutating = [
+        "browser_navigate",
+        "browser_click",
+        "browser_type",
+        "browser_select_option",
+        "browser_scroll",
+        "browser_go_back",
+        "browser_switch_tab",
+        "browser_close_tab",
+        "retry_with_browser_use_agent",
+        "browser_close_session",
+        "browser_close_all",
+        "browser_set_viewport",
+        "browser_extract_content",
+    ];
+    for name in mutating {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("{name} should be listed"));
+        assert!(
+            tool.annotations.is_none(),
+            "{name} must stay unannotated, matching upstream"
+        );
+    }
+}
+
 #[tokio::test]
 #[cfg(feature = "live-chrome")]
 async fn navigate_then_get_state_uses_live_browser() -> anyhow::Result<()> {
