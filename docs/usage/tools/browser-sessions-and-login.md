@@ -138,7 +138,14 @@ Requests use the **Responses API** (`POST {base}/responses`). Set
 older route. A bare-host base URL gets `/v1` appended in both resolution
 branches, so the example above POSTs `/v1/responses` (both roots serve OpenAI
 JSON on the measured gateway; `/v1` is the only root that serves
-`/chat/completions`).
+`/chat/completions`). Version segments in more shapes than bare `v1` count as
+an existing API path (`V1`, `v2`, `v1beta`, `v1.0`), so `/v1` is never
+appended after one. And the guess self-heals at runtime: if the route 404s or
+answers an HTML landing page (some gateways do that instead of 404ing), the
+client retries the other root — versioned ↔ bare — exactly once, so a `/v1`
+that was falsely appended or falsely missing costs one wasted request, not a
+failed tool call. When neither root works the error names both URLs it tried
+and points at `OPENAI_BASE_URL`.
 
 > **What the fallback actually requires.** `ANTHROPIC_BASE_URL` must point at an
 > endpoint that serves the **OpenAI routes**, because this client posts

@@ -71,7 +71,7 @@ contention.
 | Var | Purpose |
 | --- | --- |
 | `OPENAI_API_KEY` | Bearer auth for the 2 LLM tools. |
-| `OPENAI_BASE_URL` | Base URL for the gateway. A bare host gets `/v1` appended automatically (the `OPENAI_*` path normalizes like the `ANTHROPIC_*` fallback); an explicit API path such as `https://…/v1` is used as-is. |
+| `OPENAI_BASE_URL` | Base URL for the gateway. A bare host gets `/v1` appended automatically (the `OPENAI_*` path normalizes like the `ANTHROPIC_*` fallback); an explicit version segment such as `https://…/v1` (or `/V1`, `/v2`, `/v1beta`) is used as-is. If the chosen route 404s or returns an HTML landing page, the other root (versioned ↔ bare) is retried once automatically. |
 | `BROWSER_USE_LLM_MODEL` | Model id (default `gpt-4o`; set to what your gateway lists). |
 | `BROWSER_USE_LLM_TEMPERATURE` | Optional; defaults to `0.7`. |
 | `BROWSER_USE_HEADLESS` | `true` for servers. |

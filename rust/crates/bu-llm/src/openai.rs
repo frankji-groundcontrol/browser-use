@@ -159,17 +159,48 @@ fn resolve_endpoint(lookup: impl Fn(&str) -> Option<String>) -> Option<ResolvedE
 }
 
 /// Appends `/v1` when the base URL is a bare host. The client POSTs to
-/// `{base_url}/chat/completions`, so a host without the API path would hit the
-/// gateway's landing page and "fail to parse" — the single most common
-/// misconfiguration for this deployment.
+/// `{base}/responses` (or `/chat/completions`), so a host without an API path
+/// would hit the gateway's landing page and "fail to parse" — the single most
+/// common misconfiguration for this deployment. Version segments in more
+/// shapes than bare `v<digits>` count as an existing API path (`V1`, `v2`,
+/// `v1beta`, `v1.0`), so `/v1` is never falsely appended after one.
 fn ensure_api_path(base: &str) -> String {
     let trimmed = base.trim_end_matches('/');
-    match trimmed.rsplit('/').next() {
-        Some(last) if last.starts_with('v') && last[1..].chars().all(|c| c.is_ascii_digit()) => {
-            trimmed.to_owned()
-        }
+    match trimmed.rsplit_once('/') {
+        Some((_, last)) if is_version_segment(last) => trimmed.to_owned(),
         _ => format!("{trimmed}/v1"),
     }
+}
+
+/// The other plausible API root for `base`: a versioned base loses its version
+/// segment, a bare one gains `/v1`. Gateways serve the OpenAI routes at one of
+/// these roots, so when the first guess 404s (or answers an HTML landing page)
+/// this is the one remaining candidate.
+fn alternate_api_root(base: &str) -> String {
+    let trimmed = base.trim_end_matches('/');
+    match trimmed.rsplit_once('/') {
+        Some((prefix, last)) if is_version_segment(last) => prefix.to_owned(),
+        _ => format!("{trimmed}/v1"),
+    }
+}
+
+/// Whether a path segment is an API version: `v` followed by at least one
+/// digit, optionally continued with letters/digits/dots (`v1beta`, `v2`,
+/// `v1.0`), case-insensitive. Lookalikes without leading digits ("version",
+/// "vpn", "view") are NOT versions.
+fn is_version_segment(segment: &str) -> bool {
+    let lowered = segment.to_ascii_lowercase();
+    let Some(rest) = lowered.strip_prefix('v') else {
+        return false;
+    };
+    let digits = rest
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    digits > 0
+        && rest[digits..]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.')
 }
 
 impl OpenAiChatConfig {
@@ -257,6 +288,11 @@ impl OpenAiChatClient {
     /// exponential backoff, honoring `Retry-After`, mirroring the OpenAI SDK's
     /// `max_retries=5`. A `null`/empty assistant `content` returns an empty
     /// string rather than erroring (matching Python's `content or ''`).
+    ///
+    /// If the API route itself is wrong — HTTP 404, or a 200 whose body is an
+    /// HTML landing page (gateways answer the wrong root that way instead of
+    /// 404ing) — the other plausible root is tried exactly once, so a `/v1`
+    /// that was falsely appended or falsely missing self-heals.
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String> {
         let body = match self.config.api_style {
             OpenAiApiStyle::Responses => serde_json::to_value(ResponsesRequest::new(
@@ -272,11 +308,23 @@ impl OpenAiChatClient {
         }
         .context("failed to serialize LLM request")?;
 
+        let mut base_override: Option<String> = None;
+        let mut first_url: Option<String> = None;
+        let mut tried_alternate_route = false;
         let mut attempt = 0;
         loop {
+            let url = match &base_override {
+                Some(base) => format!(
+                    "{}/{}",
+                    base.trim_end_matches('/'),
+                    self.config.api_style.path()
+                ),
+                None => self.config.endpoint_url(),
+            };
+            first_url.get_or_insert_with(|| url.clone());
             let send_result = self
                 .http
-                .post(self.config.endpoint_url())
+                .post(&url)
                 .bearer_auth(&self.config.api_key)
                 .json(&body)
                 .send()
@@ -296,6 +344,40 @@ impl OpenAiChatClient {
             };
 
             let status = response.status();
+            let html_body = status.is_success()
+                && response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|content_type| {
+                        content_type.to_ascii_lowercase().contains("text/html")
+                    });
+
+            // A missing route or an HTML landing page means the API path is
+            // wrong for this gateway, not that the request was bad. Gateways
+            // serve the OpenAI routes either under a version segment or at the
+            // bare root, so try the other root once before giving up.
+            if status.as_u16() == 404 || html_body {
+                if !tried_alternate_route {
+                    tried_alternate_route = true;
+                    let current_base = base_override
+                        .clone()
+                        .unwrap_or_else(|| self.config.base_url.clone());
+                    base_override = Some(alternate_api_root(&current_base));
+                    attempt += 1;
+                    continue;
+                }
+                let what = if html_body {
+                    "an HTML page instead of JSON"
+                } else {
+                    "HTTP 404"
+                };
+                let first = first_url.clone().unwrap_or_else(|| url.clone());
+                return Err(anyhow!(
+                    "no OpenAI-compatible route: {what} at both {first} and {url}; check OPENAI_BASE_URL — the gateway serves the routes under /v1 or at the bare host"
+                ));
+            }
+
             if status.is_success() {
                 let text = response
                     .text()
@@ -486,6 +568,54 @@ mod tests {
         let body = r#"{"choices":[{"finish_reason":"stop","message":{"content":"done"}}]}"#;
         assert_eq!(parse_chat_body(body).unwrap(), "done");
     }
+
+    #[test]
+    fn ensure_api_path_appends_only_when_no_version_segment_is_present() {
+        use super::ensure_api_path;
+        // Bare hosts and non-version tails gain /v1.
+        assert_eq!(ensure_api_path("http://h:8080"), "http://h:8080/v1");
+        assert_eq!(ensure_api_path("http://h:8080/"), "http://h:8080/v1");
+        assert_eq!(ensure_api_path("https://gw/api"), "https://gw/api/v1");
+        assert_eq!(
+            ensure_api_path("https://gw/v1beta/openai"),
+            "https://gw/v1beta/openai/v1"
+        );
+        // Version segments are recognized in more shapes than bare v<digits>,
+        // so /v1 is never falsely appended after one: v1, V1, v2, v1beta,
+        // v1alpha1, v1.0 — and NOT after lookalikes with no leading digits
+        // ("version", "vpn", "view"), which must still gain /v1.
+        assert_eq!(ensure_api_path("http://h:8080/v1"), "http://h:8080/v1");
+        assert_eq!(ensure_api_path("http://h:8080/v1/"), "http://h:8080/v1");
+        assert_eq!(ensure_api_path("http://h:8080/V1"), "http://h:8080/V1");
+        assert_eq!(ensure_api_path("http://h:8080/v2"), "http://h:8080/v2");
+        assert_eq!(
+            ensure_api_path("http://h:8080/v1beta"),
+            "http://h:8080/v1beta"
+        );
+        assert_eq!(
+            ensure_api_path("http://h:8080/v1alpha1"),
+            "http://h:8080/v1alpha1"
+        );
+        assert_eq!(ensure_api_path("http://h:8080/v1.0"), "http://h:8080/v1.0");
+        assert_eq!(
+            ensure_api_path("http://h:8080/version"),
+            "http://h:8080/version/v1"
+        );
+        assert_eq!(ensure_api_path("http://h:8080/vpn"), "http://h:8080/vpn/v1");
+    }
+
+    #[test]
+    fn alternate_api_root_toggles_between_versioned_and_bare() {
+        use super::alternate_api_root;
+        assert_eq!(alternate_api_root("http://h:8080/v1"), "http://h:8080");
+        assert_eq!(alternate_api_root("http://h:8080/V1"), "http://h:8080");
+        assert_eq!(alternate_api_root("http://h:8080"), "http://h:8080/v1");
+        // Only the version segment is stripped, never the whole path.
+        assert_eq!(
+            alternate_api_root("https://gw/prefix/v1beta"),
+            "https://gw/prefix"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -545,7 +675,7 @@ mod http_tests {
         server.join().unwrap();
     }
 
-    fn drain_request(stream: &mut TcpStream) {
+    fn drain_request(stream: &mut TcpStream) -> Vec<u8> {
         let mut buffer = Vec::new();
         let mut chunk = [0u8; 1024];
         loop {
@@ -570,5 +700,181 @@ mod http_tests {
                 }
             }
         }
+        buffer
+    }
+
+    fn request_path(buffer: &[u8]) -> String {
+        let header_end = buffer
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("request has headers");
+        String::from_utf8_lossy(&buffer[..header_end])
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// Serves exactly `expected_requests` POSTs, answering each with whatever
+    /// `route` says for its path, and records the paths in arrival order.
+    fn spawn_router(
+        expected_requests: usize,
+        route: impl Fn(&str) -> (u16, &'static str, String) + Send + 'static,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind router mock");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let mut paths = Vec::new();
+            for _ in 0..expected_requests {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let buffer = drain_request(&mut stream);
+                let path = request_path(&buffer);
+                paths.push(path.clone());
+                let (status, content_type, body) = route(&path);
+                let reason = if status == 200 { "OK" } else { "Not Found" };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("write response");
+            }
+            paths
+        });
+        (base_url, handle)
+    }
+
+    fn routed_client(base_url: String) -> OpenAiChatClient {
+        OpenAiChatClient::new(OpenAiChatConfig {
+            api_key: "k".to_owned(),
+            base_url,
+            model: "m".to_owned(),
+            temperature: None,
+            api_style: OpenAiApiStyle::ChatCompletions,
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn falsely_appended_v1_falls_back_to_the_bare_root_on_404() {
+        // A versioned base (what the env path produces for a bare host, or an
+        // explicit …/v1) against a gateway that serves the OpenAI routes at
+        // the root only — the client must strip the version once and succeed.
+        let (base, server) = spawn_router(2, |path| {
+            if path == "/chat/completions" {
+                (
+                    200,
+                    "application/json",
+                    r#"{"choices":[{"message":{"content":"root"}}]}"#.to_owned(),
+                )
+            } else {
+                (
+                    404,
+                    "application/json",
+                    r#"{"error":"no route"}"#.to_owned(),
+                )
+            }
+        });
+        let client = routed_client(format!("{base}/v1"));
+
+        let out = client.chat(vec![message("user", "hi")]).await.unwrap();
+        assert_eq!(out, "root");
+        let paths = server.join().unwrap();
+        assert_eq!(
+            paths,
+            vec!["/v1/chat/completions", "/chat/completions"],
+            "the /v1 route is tried first, then the bare root"
+        );
+    }
+
+    #[tokio::test]
+    async fn falsely_missing_v1_falls_back_to_the_versioned_root_on_404() {
+        // A bare base URL passed straight through `new()` (the env path
+        // normalizes, but explicit configs may not) against a gateway that only
+        // serves the routes under /v1.
+        let (base_url, server) = spawn_router(2, |path| {
+            if path == "/v1/chat/completions" {
+                (
+                    200,
+                    "application/json",
+                    r#"{"choices":[{"message":{"content":"v1"}}]}"#.to_owned(),
+                )
+            } else {
+                (404, "application/json", String::new())
+            }
+        });
+        let client = routed_client(base_url);
+
+        let out = client.chat(vec![message("user", "hi")]).await.unwrap();
+        assert_eq!(out, "v1");
+        let paths = server.join().unwrap();
+        assert_eq!(
+            paths,
+            vec!["/chat/completions", "/v1/chat/completions"],
+            "the bare root is tried first, then /v1 is appended"
+        );
+    }
+
+    #[tokio::test]
+    async fn html_landing_page_triggers_the_bare_root_fallback() {
+        // The measured gateway trap: the wrong root answers HTTP 200 with an
+        // HTML landing page instead of a 404, which would otherwise surface as
+        // a misleading "failed to parse LLM chat response".
+        let (base_url, server) = spawn_router(2, |path| {
+            if path == "/v1/chat/completions" {
+                (
+                    200,
+                    "text/html; charset=utf-8",
+                    "<html><body>welcome</body></html>".to_owned(),
+                )
+            } else {
+                (
+                    200,
+                    "application/json",
+                    r#"{"choices":[{"message":{"content":"json"}}]}"#.to_owned(),
+                )
+            }
+        });
+        let client = routed_client(format!("{base_url}/v1"));
+
+        let out = client.chat(vec![message("user", "hi")]).await.unwrap();
+        assert_eq!(out, "json");
+        let paths = server.join().unwrap();
+        assert_eq!(paths, vec!["/v1/chat/completions", "/chat/completions"]);
+    }
+
+    #[tokio::test]
+    async fn both_roots_missing_names_them_in_the_error() {
+        // When neither root works, the error must say which two URLs were
+        // tried and point at OPENAI_BASE_URL — not a bare 404 or parse failure.
+        let (base, server) = spawn_router(2, |path| {
+            let _ = path;
+            (404, "application/json", String::new())
+        });
+        let versioned = format!("{base}/v1");
+        let tried_first = format!("{versioned}/chat/completions");
+        let tried_second = format!("{base}/chat/completions");
+        let client = routed_client(versioned);
+
+        let error = client
+            .chat(vec![message("user", "hi")])
+            .await
+            .expect_err("both roots missing must fail");
+        let error = error.to_string();
+        assert!(
+            error.contains("no OpenAI-compatible route"),
+            "error should name the route problem: {error}"
+        );
+        assert!(
+            error.contains(&tried_first) && error.contains(&tried_second),
+            "error should name both tried URLs: {error}"
+        );
+        assert!(
+            error.contains("OPENAI_BASE_URL"),
+            "error should point at the env var: {error}"
+        );
+        server.join().unwrap();
     }
 }
