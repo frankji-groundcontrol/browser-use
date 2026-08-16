@@ -1210,6 +1210,7 @@ async fn failing_navigate_returns_tool_error_not_transport_error() -> anyhow::Re
 #[tokio::test]
 #[cfg(feature = "live-chrome")]
 async fn extract_content_posts_chat_request_and_returns_framed_answer() -> anyhow::Result<()> {
+    let _env_lock = LLM_ENV_LOCK.lock().await;
     let llm_server = MockHttpServer::spawn_json(
         // Responses-API shape: that is what the client now posts by default.
         serde_json::json!({
@@ -1277,8 +1278,8 @@ async fn extract_content_posts_chat_request_and_returns_framed_answer() -> anyho
         );
     let request = llm_server.received_request().await?;
     assert_eq!(
-        request.path, "/responses",
-        "OpenAI-style calls use the Responses API"
+        request.path, "/v1/responses",
+        "OpenAI-style calls use the Responses API, with the bare-host mock base URL normalized to /v1"
     );
     assert_eq!(
         request.header("authorization"),
@@ -1314,6 +1315,68 @@ async fn extract_content_posts_chat_request_and_returns_framed_answer() -> anyho
     assert!(user_prompt.contains("[Details]("));
     assert!(!user_prompt.contains("Navigation noise"));
     assert!(!user_prompt.contains("window.noise"));
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn missing_llm_credentials_are_a_tool_error_with_the_reason() -> anyhow::Result<()> {
+    // The failure this pins: a host (ZCode) registers the server without any
+    // LLM env, the model calls browser_extract_content, and the old code
+    // returned a bare protocol error whose actionable message ("no LLM
+    // credentials: set OPENAI_API_KEY …") was invisible to the caller.
+    let _env_lock = LLM_ENV_LOCK.lock().await;
+    let _env = EnvGuard::blank_many(&[
+        "OPENAI_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+    ]);
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call(
+            "browser_navigate",
+            json!({"url": "data:text/html,<title>No LLM</title><h1>x</h1>"}),
+        ))
+        .await?;
+
+    let extract = server
+        .call_browser_tool(call(
+            "browser_extract_content",
+            json!({"query": "anything"}),
+        ))
+        .await
+        .expect("missing credentials must be a tool error, not ErrorData");
+    assert!(
+        extract.is_error.unwrap_or(false),
+        "missing credentials should set is_error=true: {extract:?}"
+    );
+    let extract_text = text_content(&extract).to_owned();
+    assert!(
+        extract_text.contains("browser_extract_content failed"),
+        "error should name the tool: {extract_text}"
+    );
+    assert!(
+        extract_text.contains("no LLM credentials"),
+        "error should state the actionable cause: {extract_text}"
+    );
+
+    let retry = server
+        .call_browser_tool(call(
+            "retry_with_browser_use_agent",
+            json!({"task": "do anything", "max_steps": 1}),
+        ))
+        .await
+        .expect("missing credentials must be a tool error, not ErrorData");
+    assert!(
+        retry.is_error.unwrap_or(false),
+        "missing credentials should set is_error=true: {retry:?}"
+    );
+    assert!(
+        text_content(&retry).contains("no LLM credentials"),
+        "error should state the actionable cause: {}",
+        text_content(&retry)
+    );
 
     Ok(())
 }
@@ -1495,6 +1558,13 @@ struct EnvGuard {
     previous: Vec<(&'static str, Option<String>)>,
 }
 
+/// Serializes tests that mutate the LLM environment. The happy-path extraction
+/// test pins OPENAI_* to a mock server while the missing-credentials test blanks
+/// them; without the lock the two race and either can fail spuriously. Tokio's
+/// mutex because the guard is held across awaits.
+#[cfg(feature = "live-chrome")]
+static LLM_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(feature = "live-chrome")]
 impl EnvGuard {
     fn set_many(values: &[(&'static str, &str)]) -> Self {
@@ -1507,6 +1577,12 @@ impl EnvGuard {
             })
             .collect();
         Self { previous }
+    }
+
+    /// Blanks variables so credential resolution sees them as unset (the
+    /// resolver filters empty values); `Drop` restores the originals.
+    fn blank_many(keys: &[&'static str]) -> Self {
+        Self::set_many(&keys.iter().map(|key| (*key, "")).collect::<Vec<_>>())
     }
 }
 

@@ -71,7 +71,7 @@ contention.
 | Var | Purpose |
 | --- | --- |
 | `OPENAI_API_KEY` | Bearer auth for the 2 LLM tools. |
-| `OPENAI_BASE_URL` | **Must include the API path** (e.g. `https://…/v1`) — the client POSTs `{base}/chat/completions`. A bare host hits the gateway's HTML page → *"failed to parse LLM chat response"*. |
+| `OPENAI_BASE_URL` | Base URL for the gateway. A bare host gets `/v1` appended automatically (the `OPENAI_*` path normalizes like the `ANTHROPIC_*` fallback); an explicit API path such as `https://…/v1` is used as-is. |
 | `BROWSER_USE_LLM_MODEL` | Model id (default `gpt-4o`; set to what your gateway lists). |
 | `BROWSER_USE_LLM_TEMPERATURE` | Optional; defaults to `0.7`. |
 | `BROWSER_USE_HEADLESS` | `true` for servers. |

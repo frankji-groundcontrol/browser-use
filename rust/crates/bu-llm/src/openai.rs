@@ -123,6 +123,11 @@ struct ResolvedEndpoint {
 /// (verified), so the existing client works unchanged — no Anthropic-native
 /// provider is needed.
 ///
+/// Both branches normalize a bare-host base URL by appending `/v1`, because the
+/// client POSTs `{base}/responses` (or `/chat/completions`) and a gateway's
+/// root serves an HTML landing page on at least one of those routes — the
+/// single most common misconfiguration for this deployment.
+///
 /// Takes a lookup closure rather than reading the environment directly so the
 /// precedence rules are testable without mutating process-global state.
 fn resolve_endpoint(lookup: impl Fn(&str) -> Option<String>) -> Option<ResolvedEndpoint> {
@@ -135,7 +140,9 @@ fn resolve_endpoint(lookup: impl Fn(&str) -> Option<String>) -> Option<ResolvedE
     if let Some(api_key) = read("OPENAI_API_KEY") {
         return Some(ResolvedEndpoint {
             api_key,
-            base_url: read("OPENAI_BASE_URL").unwrap_or_else(|| DEFAULT_BASE_URL.to_owned()),
+            base_url: read("OPENAI_BASE_URL")
+                .map(|base| ensure_api_path(&base))
+                .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned()),
             default_model: DEFAULT_MODEL,
         });
     }
@@ -417,6 +424,16 @@ mod tests {
         assert_eq!(resolved.api_key, "sk-openai");
         assert_eq!(resolved.base_url, "https://gw.example/v1");
         assert_eq!(resolved.default_model, DEFAULT_MODEL);
+
+        // A bare-host OPENAI_BASE_URL gains /v1 exactly like the ANTHROPIC
+        // fallback: {base}/chat/completions against the gateway root is the
+        // HTML landing page, not an API route.
+        let resolved = resolve_endpoint(env(&[
+            ("OPENAI_API_KEY", "sk-openai"),
+            ("OPENAI_BASE_URL", "http://100.77.181.75:8080"),
+        ]))
+        .expect("bare-host OpenAI base URL resolves");
+        assert_eq!(resolved.base_url, "http://100.77.181.75:8080/v1");
 
         // Claude Code's gateway vars alone are enough, and a bare host gains /v1
         // (the client POSTs {base}/chat/completions).

@@ -342,8 +342,16 @@ impl BrowserUseMcpServer {
             optional_string_list(arguments.as_ref(), "allowed_domains").filter(|d| !d.is_empty());
 
         // Build the LLM BEFORE mutating the policy, so a config error can't
-        // `?`-return past the restore and leak the scoped policy into the session.
-        let provider = build_agent_llm(model).await?;
+        // return past the restore and leak the scoped policy into the session.
+        let provider = match build_agent_llm(model).await {
+            Ok(provider) => provider,
+            Err(error) => {
+                return Ok(browser_tool_error(
+                    "retry_with_browser_use_agent failed",
+                    error,
+                ))
+            }
+        };
 
         let restore = match allowed_domains {
             Some(domains) => match self.actor.get_policy().await {
@@ -384,6 +392,8 @@ impl BrowserUseMcpServer {
         let query = required_str(arguments.as_ref(), "query", "browser_extract_content")?;
         let extract_links = optional_bool(arguments.as_ref(), "extract_links").unwrap_or(false);
 
+        // Recoverable browser failures return a tool error (isError), not a
+        // JSON-RPC protocol error, so the model can read and react to them.
         let html = match self.actor.get_html(None).await {
             Ok(html) => html,
             Err(error) => return Ok(browser_tool_error("browser_extract_content failed", error)),
@@ -400,14 +410,23 @@ impl BrowserUseMcpServer {
         let user_prompt = format!(
             "<query>\n{query}\n</query>\n\n<webpage_content>\n{markdown}\n</webpage_content>"
         );
-        let answer = OpenAiChatClient::from_env()
-            .map_err(llm_error)?
+        // Missing/invalid LLM credentials are likewise a tool error: a protocol
+        // error hides the actionable message ("no LLM credentials: set …") from
+        // the caller, who then can only see that the tool failed.
+        let client = match OpenAiChatClient::from_env() {
+            Ok(client) => client,
+            Err(error) => return Ok(browser_tool_error("browser_extract_content failed", error)),
+        };
+        let answer = match client
             .chat(vec![
                 message("system", system_prompt),
                 message("user", user_prompt),
             ])
             .await
-            .map_err(llm_error)?;
+        {
+            Ok(answer) => answer,
+            Err(error) => return Ok(browser_tool_error("browser_extract_content failed", error)),
+        };
 
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "<url>{}</url>\n<query>{query}</query>\n<result>{}</result>",
@@ -728,18 +747,10 @@ fn json_error(message: &'static str) -> impl FnOnce(serde_json::Error) -> ErrorD
     }
 }
 
-fn llm_error(error: anyhow::Error) -> ErrorData {
-    ErrorData::new(
-        ErrorCode::INTERNAL_ERROR,
-        "browser_extract_content failed",
-        Some(json!({ "error": error.to_string() })),
-    )
-}
-
 /// Builds the agent LLM backend, mirroring Python's provider selection: AWS
 /// Bedrock when `MODEL_PROVIDER=bedrock` (requires the `bedrock` build feature),
 /// otherwise an OpenAI-compatible client.
-async fn build_agent_llm(model: Option<String>) -> Result<bu_llm::LlmProvider, ErrorData> {
+async fn build_agent_llm(model: Option<String>) -> anyhow::Result<bu_llm::LlmProvider> {
     #[cfg(feature = "bedrock")]
     {
         let is_bedrock = std::env::var("MODEL_PROVIDER")
@@ -748,16 +759,13 @@ async fn build_agent_llm(model: Option<String>) -> Result<bu_llm::LlmProvider, E
         if is_bedrock {
             // Python ignores the tool `model` arg for MODEL_PROVIDER=bedrock
             // (clients often pass an OpenAI model name); use MODEL/env only.
-            let client = bu_llm::BedrockChatClient::from_env_with_model_override(None)
-                .await
-                .map_err(llm_error)?;
+            let client = bu_llm::BedrockChatClient::from_env_with_model_override(None).await?;
             return Ok(bu_llm::LlmProvider::Bedrock(client));
         }
     }
 
-    let config =
-        bu_llm::OpenAiChatConfig::from_env_with_model_override(model).map_err(llm_error)?;
-    let client = OpenAiChatClient::new(config).map_err(llm_error)?;
+    let config = bu_llm::OpenAiChatConfig::from_env_with_model_override(model)?;
+    let client = OpenAiChatClient::new(config)?;
     Ok(bu_llm::LlmProvider::OpenAi(client))
 }
 

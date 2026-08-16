@@ -118,6 +118,11 @@ spend Claude Code's own gateway token. Setting `OPENAI_*` in the MCP `env` block
 overrides it — verified: an explicit but unreachable `OPENAI_BASE_URL` fails
 rather than silently falling back.
 
+Hosts that export **neither** set (ZCode is the known case: its spawned server
+had no `OPENAI_*`/`ANTHROPIC_*` at all) make both LLM tools fail — as a tool
+error reading *"no LLM credentials: set OPENAI_API_KEY …"*, which names the fix.
+Registering an explicit env block for such hosts is the deployment fix.
+
 Codex inherits nothing: it authenticates by ChatGPT login (`auth.json` holds
 OAuth tokens and a null `OPENAI_API_KEY`), so it always needs an explicit table:
 
@@ -130,7 +135,10 @@ BROWSER_USE_LLM_MODEL = "gpt-5.6-sol"
 
 Requests use the **Responses API** (`POST {base}/responses`). Set
 `BROWSER_USE_OPENAI_API=chat_completions` for gateways that only implement the
-older route.
+older route. A bare-host base URL gets `/v1` appended in both resolution
+branches, so the example above POSTs `/v1/responses` (both roots serve OpenAI
+JSON on the measured gateway; `/v1` is the only root that serves
+`/chat/completions`).
 
 > **What the fallback actually requires.** `ANTHROPIC_BASE_URL` must point at an
 > endpoint that serves the **OpenAI routes**, because this client posts
