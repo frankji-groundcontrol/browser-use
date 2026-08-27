@@ -50,6 +50,44 @@ A wrong root does not 404 here; it returns a *success* status with an HTML body.
 Anything that only checks the status code would treat the login page as a model
 response. Same shape of failure as above: leniency masking a defect.
 
+## The cheap probe: a deliberately invalid credential
+
+Added 2026-08-27, from applying this lesson to a second integration the same day.
+
+The obstacle to testing a provider integration is usually that you have no valid
+key. That blocks a *successful* call — it does not block a useful one. Point the
+real client at the real endpoint with an obviously invalid credential and read
+the rejection:
+
+```
+POST https://llm.api.browser-use.com/v1/chat/completions   (key: invalid)
+  -> 401 {"detail":"Invalid API key. Get your API key at ..."}
+```
+
+A `401` that quotes the service's own error text establishes, without any
+account: the route exists and was reached (not a 404, no fallback retry); the
+request was well-formed enough for the server to get as far as evaluating
+auth — so the **auth header shape is right**; the error path surfaces correctly
+end to end; and the responder is the real service rather than a proxy or landing
+page.
+
+Distinguish the failures, because they mean different things:
+
+| Response | Meaning |
+| --- | --- |
+| 401 quoting the service | route + auth shape correct; only a valid key is missing |
+| 404 / HTML landing page | wrong route — the base URL or path is wrong |
+| 400 about the body | reached it, but the request shape is wrong |
+
+Only a successful 200 parse remains untested afterwards, which is a far smaller
+and better-understood gap than "never called".
+
+**This cuts both ways.** The original lesson was about over-claiming — an
+integration assumed working because a lenient counterparty absorbed it. The same
+day, the opposite error nearly shipped: a record stating the endpoint had "never
+been called", written from reasoning rather than from poking it. One probe made
+that false. Reasoning about an integration is not evidence in either direction.
+
 ## When to apply it again
 
 - Adding or reviewing any provider/protocol option, especially behind a shared
