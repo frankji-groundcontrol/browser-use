@@ -5,9 +5,122 @@
 //! That is the whole point of this module: exporting `OPENAI_API_KEY` for some
 //! unrelated tool must not silently change which model the agent talks to.
 
-use std::env;
+use std::{collections::HashMap, env, path::PathBuf, process::Command, sync::OnceLock};
 
 use anyhow::{anyhow, Context, Result};
+
+/// Keychain service name holding the LLM API key.
+pub const KEYCHAIN_SERVICE: &str = "browser-use-llm";
+/// Only this setting is ever read from the Keychain — it stores a secret, not a
+/// configuration file.
+const SECRET_VAR: &str = "BROWSER_USE_LLM_API_KEY";
+
+/// Path of the `.env` file: `$BROWSER_USE_ENV_FILE`, else
+/// `~/.config/browser-use/.env`.
+pub fn dotenv_path() -> Option<PathBuf> {
+    if let Some(explicit) = env::var_os("BROWSER_USE_ENV_FILE") {
+        let path = PathBuf::from(explicit);
+        return (!path.as_os_str().is_empty()).then_some(path);
+    }
+    env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join(".config")
+            .join("browser-use")
+            .join(".env")
+    })
+}
+
+/// Parses `KEY=value` lines. Tolerates `export ` prefixes, surrounding quotes,
+/// `#` comments, and whitespace around `=`. Empty values are dropped so a blank
+/// line in the file cannot mask a real value from a lower layer.
+fn parse_dotenv(text: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim().strip_prefix("export ").unwrap_or(line.trim());
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, raw)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() || key.contains(char::is_whitespace) {
+            continue;
+        }
+        let raw = raw.trim();
+        // A quoted value runs to its *matching* closing quote, so anything after
+        // it (typically a trailing comment) is discarded and a `#` inside the
+        // quotes is preserved. Only an unquoted value is cut at a comment marker.
+        let value = match raw.chars().next() {
+            Some(quote @ ('"' | '\'')) => match raw[1..].find(quote) {
+                Some(end) => raw[1..=end].to_owned(),
+                // Unterminated quote: take the rest verbatim rather than losing it.
+                None => raw[1..].to_owned(),
+            },
+            _ => raw
+                .split_once(" #")
+                .map_or(raw, |(before, _)| before)
+                .trim()
+                .to_owned(),
+        };
+        if !value.is_empty() {
+            out.insert(key.to_owned(), value);
+        }
+    }
+    out
+}
+
+fn dotenv_values() -> &'static HashMap<String, String> {
+    static CACHE: OnceLock<HashMap<String, String>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        dotenv_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .map(|text| parse_dotenv(&text))
+            .unwrap_or_default()
+    })
+}
+
+/// Reads the API key from the macOS Keychain. Any failure (not macOS, no entry,
+/// user denied access) is simply "not found" — this is a fallback layer, not a
+/// requirement.
+fn keychain_secret(_key: &str) -> Option<String> {
+    static CACHE: OnceLock<Option<String>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let output = Command::new("security")
+                .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let value = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+            (!value.is_empty()).then_some(value)
+        })
+        .clone()
+}
+
+/// Composes the three lookup layers, most explicit first: process environment,
+/// then the `.env` file, then the Keychain.
+///
+/// The Keychain layer is consulted for [`SECRET_VAR`] **only** — it stores a
+/// password, not a configuration file, and that restriction is enforced here
+/// rather than inside the Keychain reader so the composition itself is what
+/// gets tested.
+///
+/// Taking each layer as an argument keeps precedence testable without touching
+/// process globals, the real filesystem, or the user's Keychain.
+fn layered<'a>(
+    from_env: impl Fn(&str) -> Option<String> + 'a,
+    from_file: &'a HashMap<String, String>,
+    from_keychain: impl Fn(&str) -> Option<String> + 'a,
+) -> impl Fn(&str) -> Option<String> + 'a {
+    move |key| {
+        from_env(key)
+            .or_else(|| from_file.get(key).cloned())
+            .or_else(|| (key == SECRET_VAR).then(|| from_keychain(key)).flatten())
+    }
+}
 
 /// Default sampling temperature (Python's `ChatOpenAI` default for the agent).
 pub const DEFAULT_TEMPERATURE: f32 = 0.7;
@@ -104,8 +217,18 @@ impl LlmConfig {
     }
 
     /// Loads configuration, letting an MCP tool argument override the model.
+    ///
+    /// Each setting is resolved from the process environment first, then the
+    /// `.env` file, then (for the API key only) the macOS Keychain. So an agent
+    /// config can still pin a value explicitly, while the common case is a
+    /// single `.env` and no secrets in any agent's config file at all.
     pub fn from_env_with_model_override(model_override: Option<String>) -> Result<Self> {
-        Self::resolve(|key| env::var(key).ok(), model_override)
+        let lookup = layered(
+            |key| env::var(key).ok(),
+            dotenv_values(),
+            keychain_secret,
+        );
+        Self::resolve(lookup, model_override)
     }
 
     /// Split from the environment read so precedence is testable without
@@ -411,6 +534,84 @@ mod tests {
         assert_eq!(config.temperature, Some(DEFAULT_TEMPERATURE));
         assert_eq!(config.max_tokens, DEFAULT_MAX_TOKENS);
         assert_eq!(config.api, LlmApi::OpenAiResponses, "default protocol");
+    }
+
+    #[test]
+    fn dotenv_parses_exports_quotes_and_comments() {
+        let parsed = parse_dotenv(
+            r#"
+# a comment
+BROWSER_USE_LLM_MODEL=gpt-5.6-sol
+export BROWSER_USE_LLM_API_KEY="sk-quoted"
+BROWSER_USE_LLM_BASE_URL='https://gw.example/v1'   # trailing comment
+EMPTY=
+BROWSER_USE_LLM_API = openai-chat
+not a pair
+"#,
+        );
+        assert_eq!(parsed.get("BROWSER_USE_LLM_MODEL").unwrap(), "gpt-5.6-sol");
+        assert_eq!(
+            parsed.get("BROWSER_USE_LLM_API_KEY").unwrap(),
+            "sk-quoted",
+            "quotes are stripped"
+        );
+        assert_eq!(
+            parsed.get("BROWSER_USE_LLM_BASE_URL").unwrap(),
+            "https://gw.example/v1",
+            "an unquoted trailing comment is not part of the value"
+        );
+        assert_eq!(
+            parsed.get("BROWSER_USE_LLM_API").unwrap(),
+            "openai-chat",
+            "whitespace around = is tolerated"
+        );
+        assert!(parsed.get("EMPTY").is_none(), "empty values are dropped");
+        assert!(parsed.get("not a pair").is_none());
+    }
+
+    #[test]
+    fn a_hash_inside_quotes_is_kept() {
+        let parsed = parse_dotenv(r#"BROWSER_USE_LLM_API_KEY="sk-with#hash""#);
+        assert_eq!(parsed.get("BROWSER_USE_LLM_API_KEY").unwrap(), "sk-with#hash");
+    }
+
+    #[test]
+    fn process_env_wins_over_the_dotenv_file() {
+        let file = parse_dotenv("BROWSER_USE_LLM_MODEL=from-file");
+        let resolved = layered(
+            |k| (k == "BROWSER_USE_LLM_MODEL").then(|| "from-env".to_owned()),
+            &file,
+            |_| None,
+        );
+        assert_eq!(resolved("BROWSER_USE_LLM_MODEL").unwrap(), "from-env");
+    }
+
+    #[test]
+    fn the_dotenv_file_fills_gaps_the_environment_leaves() {
+        let file = parse_dotenv("BROWSER_USE_LLM_MODEL=from-file");
+        let resolved = layered(|_| None, &file, |_| None);
+        assert_eq!(resolved("BROWSER_USE_LLM_MODEL").unwrap(), "from-file");
+    }
+
+    #[test]
+    fn the_keychain_is_the_last_resort_and_only_for_the_key() {
+        let file = parse_dotenv("");
+        let resolved = layered(|_| None, &file, |_| Some("sk-from-keychain".to_owned()));
+        assert_eq!(
+            resolved("BROWSER_USE_LLM_API_KEY").unwrap(),
+            "sk-from-keychain"
+        );
+        assert!(
+            resolved("BROWSER_USE_LLM_MODEL").is_none(),
+            "the keychain holds a secret, not the whole configuration"
+        );
+    }
+
+    #[test]
+    fn the_dotenv_file_beats_the_keychain() {
+        let file = parse_dotenv("BROWSER_USE_LLM_API_KEY=sk-from-file");
+        let resolved = layered(|_| None, &file, |_| Some("sk-from-keychain".to_owned()));
+        assert_eq!(resolved("BROWSER_USE_LLM_API_KEY").unwrap(), "sk-from-file");
     }
 
     #[test]
