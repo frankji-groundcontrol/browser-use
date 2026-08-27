@@ -45,3 +45,7 @@ a resolution.
   — **closed, not applicable**: the `bu-*` models are ordinary LLMs optimized for
   speed, and this deployment runs a stronger general model on its own gateway.
   Kept as a record of what porting to Browser Use cloud would require.
+- [2026-08-27 — `browser-use-rs` exits silently and successfully with no arguments](2026-08-27-binary-silently-exits-without-mcp-flag.md)
+  — only `--mcp` is recognized; `--help`, `--version`, and a typo'd flag all
+  exit 0 with no output, turning a one-character config typo into a silent
+  failure.
