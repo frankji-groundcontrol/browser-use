@@ -12,7 +12,7 @@ Upstream released 0.13.8 (Browser Harness 0.1.9) and bumped dependencies. Of the
 
 | Upstream change | Portable to Rust? |
 | --- | --- |
-| `ChatBrowserUse` default model `bu-2-0-mini-preview` → `bu-2-0`, with the mini preview now opt-in | **No** — no counterpart exists |
+| `ChatBrowserUse` default model `bu-2-0-mini-preview` → `bu-2-0`, with the mini preview now opt-in | **No** — no provider class exists to hold a default; the Rust model comes from `BROWSER_USE_LLM_MODEL` |
 | `filesystem`: escape plain text before ReportLab parses it as markup in generated PDFs | **No** — no counterpart exists |
 | `filesystem`: `replace_file` now reports when the target text is absent instead of silently no-op'ing | **No** — no counterpart exists |
 
@@ -25,10 +25,27 @@ Both candidates were checked against the actual Rust source rather than assumed,
 per the practice's rule that a false "not applicable" costs as much as a false
 positive:
 
-- **No `ChatBrowserUse` provider.** `bu-llm` contains exactly `openai.rs`,
-  `responses.rs`, and `bedrock.rs`. There is no `bu-*` model family anywhere in
-  the crate — the only hardcoded model id is a Bedrock Claude one. There is no
-  default to flip.
+- **No `ChatBrowserUse` provider class — but the endpoint is not unreachable.**
+  `bu-llm` contains exactly `openai.rs`, `responses.rs`, and `bedrock.rs`, so
+  there is no constructor default to flip. Worth being precise about *why* that
+  is fine: `ChatBrowserUse` POSTs `{base_url}/v1/chat/completions` with
+  `Authorization: Bearer`, i.e. the OpenAI wire format, against
+  `https://llm.api.browser-use.com`. The Rust generic client POSTs
+  `{base}/chat/completions` with the same auth, so browser-use's cloud LLM is
+  reachable **by configuration** —
+  `OPENAI_BASE_URL=https://llm.api.browser-use.com/v1`,
+  `BROWSER_USE_LLM_MODEL=bu-2-0` — with no new provider code.
+
+  What a dedicated Rust provider would add over that: the friendly 401/402
+  messages ("`BROWSER_USE_API_KEY` is invalid", "credits exhausted", each with a
+  billing link) instead of a generic HTTP error, and `session_id` passthrough.
+  It would *not* add retry parity — `openai.rs` already retries 429/5xx with
+  exponential backoff honoring `Retry-After` — and it would not add structured
+  output, because the Rust agent does not use the provider's structured-output
+  API at all: `bu-agent::action::parse_output` strips code fences and parses JSON
+  from the response text. That also sidesteps a real incompatibility, since
+  browser-use's gateway expects a non-standard `output_format` key rather than
+  OpenAI's `response_format`.
 - **No filesystem subsystem.** No Rust crate implements file read/write/replace.
   `bu-tools` exposes the 18 `browser_*` tools, and `bu-mcp` adds
   `retry_with_browser_use_agent`; none of them touch files. Neither the PDF
@@ -51,7 +68,13 @@ it.
 
 ## Follow-up
 
-If `ChatBrowserUse` or a filesystem tool surface is ever added to the Rust port,
-re-check this window: the two filesystem fixes and the model-default change
-would become portable and should be revisited from
-`f3298c559..upstream/main`.
+- If a filesystem tool surface is ever added to the Rust port, revisit this
+  window — both filesystem fixes would become portable from `f3298c559`.
+- A dedicated `ChatBrowserUse` provider in `bu-llm` is **optional**, not a gap:
+  it would buy actionable 401/402 messages and `session_id` passthrough. Worth
+  doing only if the fork actually points at browser-use's cloud LLM; the current
+  deployment uses a private OpenAI-compatible gateway.
+- **Scope caveat.** This assessment covers one 11-day window (25 commits). It
+  does not establish that the Rust port is at parity with Python overall — only
+  that upstream's activity *since the last sync* fell outside the ported
+  surface. A standing parity audit is a separate exercise.
