@@ -1,6 +1,6 @@
 # One LLM config: custom base URL × three wire formats
 
-Date: 2026-08-27 · Status: **in progress** · Owner: Claude
+Date: 2026-08-27 · Status: **complete** · Owner: Claude
 Tracker: [`2026-08-27-rust-chatbrowseruse.track.yaml`](2026-08-27-rust-chatbrowseruse.track.yaml)
 
 ## Objective
@@ -113,3 +113,30 @@ than bolting a second protocol onto it:
   handoff rather than implying it was smoke-tested.
 - Pre-existing flaky `bu-actor` live-Chrome tests fail under full-suite load and
   pass in isolation; confirmed on clean HEAD, unrelated to this work.
+
+## Outcome
+
+Shipped. Verification actually run:
+
+| Check | Result |
+| --- | --- |
+| `bu-llm` tests | **43 passed**, including wire-level proof of exact-first routing, both fallback triggers, and per-protocol auth |
+| `clippy --all-targets -D warnings` | clean on default **and** `live-chrome` |
+| End-to-end `browser_extract_content` | correct answer on **both hosts** against the live gateway |
+| Agent connectivity | `grok mcp doctor` 19 tools, `qoder mcp list` connected, both hosts |
+| Config migration | 10 configs across 2 hosts, backed up as `*.bak-llmenv` |
+| MBP2 deploy | `codesign -v` exit 0, exec check exit 1 (not 137) |
+
+Gateway probe that settled the URL policy:
+
+| Route | Result |
+| --- | --- |
+| `/v1/responses`, `/responses`, `/v1/chat/completions` | 200 JSON |
+| `/chat/completions` | **200 HTML** — the console page |
+
+So the fallback is not theoretical: a bare base URL with `openai-chat` lands on
+that HTML page. Configs pin `/v1` so the first attempt hits.
+
+**Not verified:** the Anthropic path against a real Anthropic endpoint — no key
+available here. Coverage is the mock server plus the contract read from the API
+docs. First real use should confirm it before being trusted.

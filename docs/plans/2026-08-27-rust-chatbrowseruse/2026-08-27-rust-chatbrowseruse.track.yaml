@@ -6,8 +6,9 @@ main:
   outcome: bu-llm can drive browser-use cloud LLM from BROWSER_USE_API_KEY alone,
     with actionable 401/402 errors and bu-* alias handling
   owner: Claude
-  status: active
-  next_evidence: RED tests fail first; full serial suite + clippy -D warnings green
-    on default and live-chrome
+  status: complete
+  next_evidence: 43 bu-llm tests incl. wire-level exact-first/fallback + anthropic
+    auth; clippy clean both feature sets; extract_content verified live on both hosts;
+    10 configs migrated
 side_tracks: []
-updated_at: '2026-08-27T02:52:31Z'
+updated_at: '2026-08-27T03:34:24Z'

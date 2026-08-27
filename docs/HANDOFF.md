@@ -20,8 +20,16 @@ Current status for every task is on the board:
 
 The server is registered with **seven** agents (Claude Code, Codex CLI, OpenCode,
 Hermes, Grok, Qoder, Kimi Code) on both hosts, all verified connected at 19
-tools. Both hosts sit on the same commit (`405ba249c`) with clean trees, and the
+tools. Both hosts sit on the same commit with clean trees, and the
 docs-recording guardrail is active on both.
+
+**The LLM environment surface changed on 2026-08-27 and is a breaking change.**
+Configure the model with `BROWSER_USE_LLM_BASE_URL`, `_API_KEY`, `_API`
+(`openai-responses` | `openai-chat` | `anthropic-messages` | `bedrock`), and
+`_MODEL`. `OPENAI_*`, `ANTHROPIC_*`, `MODEL_PROVIDER`, `BROWSER_USE_OPENAI_API`,
+and `BROWSER_USE_API_KEY` are no longer read at all. All 10 agent configs on both
+hosts are migrated (backups at `*.bak-llmenv`); any *new* config must use the new
+names or the server will refuse to start with a message naming the variable.
 
 Note for any **third** clone: the guardrail's `core.hooksPath` is per-clone local
 config and does **not** arrive with a pull. The hook files will be present but
@@ -41,7 +49,14 @@ Two divergences a newcomer would otherwise trip over:
 
 ## What needs to happen next
 
-1. **Decide on one binary deploy layout across both hosts.** The primary
+1. **Verify the Anthropic Messages path against a real endpoint.** It is
+   implemented and unit-tested against a mock, but no Anthropic key was
+   available here, so it has never spoken to `api.anthropic.com`. Set
+   `BROWSER_USE_LLM_API=anthropic-messages` with a real key and run
+   `browser_extract_content` once.
+   Done when: a live Anthropic call returns an answer, or the gap is fixed.
+
+2. **Decide on one binary deploy layout across both hosts.** The primary
    symlinks `~/.local/bin/browser-use-rs` into `rust/target/release/`; the
    secondary keeps a file copy. The symlink cannot drift but breaks on
    `cargo clean`; the copy survives a clean but goes stale silently, which is
@@ -50,12 +65,12 @@ Two divergences a newcomer would otherwise trip over:
    [deploy-browser-use-rs.md](practices/deploy-browser-use-rs.md) states which
    and why.
 
-2. **Give the secondary host's Kimi entry a stable browser.** It attaches over
+3. **Give the secondary host's Kimi entry a stable browser.** It attaches over
    an ephemeral CDP port that dies whenever that Chrome restarts.
    Done when: the entry either launches its own browser or points at an
    endpoint that survives a restart.
 
-3. **Resume the Rust rewrite** at whatever its plan's tracker names as the next
+4. **Resume the Rust rewrite** at whatever its plan's tracker names as the next
    step. Done when: that step's own exit evidence is satisfied.
 
 ## How to pick up the work

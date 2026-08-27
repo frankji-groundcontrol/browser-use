@@ -16,6 +16,7 @@ growing this table.
 | --- | --- | --- | --- | --- | --- | --- |
 | Docs structure cleanup — add the missing record surfaces and guardrail | complete | Claude | — | Shipped as `405ba249c`; live on both hosts | 2026-08-27 | [plan](2026-08-26-docs-structure-cleanup/2026-08-26-docs-structure-cleanup.md) |
 | Unify the binary deploy layout across both hosts | pending | Unassigned | Needs a call: symlink vs file copy | Pick one, then record it in the deploy practice | 2026-08-27 | [issue](../issues/2026-08-26-installed-binary-drift-from-build-tree.md) |
+| LLM config redesign — one `BROWSER_USE_LLM_*` surface, three wire formats | complete | Claude | — | Anthropic path still unverified against a real endpoint | 2026-08-27 | [plan](2026-08-27-rust-chatbrowseruse/2026-08-27-rust-chatbrowseruse.md) |
 | Rust rewrite — reimplement browser-use in Rust with TDD | in progress | Unassigned | — | Resume at the next step named in the plan | 2026-07-05 | [plan](2026-07-05-rust-rewrite/index.md) |
 | Franky repo setup — repoint the fork, document install, organize docs | in progress | Unassigned | — | Confirm remaining setup items or close the plan | 2026-07-05 | [plan](2026-07-05-franky-repo-setup/index.md) |
 
@@ -27,6 +28,9 @@ One entry per detailed plan, so historical plans stay discoverable.
   repoint to the fork, document the local install, organize repo docs.
 - [2026-07-05 — Rust rewrite](2026-07-05-rust-rewrite/index.md) — modular plan
   to re-implement browser-use in Rust with TDD on the `franky-rust` branch.
+- [2026-08-27 — LLM config redesign](2026-08-27-rust-chatbrowseruse/2026-08-27-rust-chatbrowseruse.md)
+  — replace the scattered LLM env surface with `BROWSER_USE_LLM_*`, implement
+  Anthropic Messages for real, and use the base URL exactly as given.
 - [2026-08-26 — Docs structure cleanup](2026-08-26-docs-structure-cleanup/2026-08-26-docs-structure-cleanup.md)
   — add the changelog, handoff, and recording-guardrail surfaces this fork was
   missing, without disturbing upstream-owned files.
