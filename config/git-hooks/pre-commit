@@ -1,0 +1,17 @@
+#!/bin/sh
+# Docs-recording guardrail — pre-commit hook TEMPLATE (clean-repo-org).
+# Copy to <target-repo>/config/git-hooks/pre-commit and activate once per clone:
+#     git config core.hooksPath config/git-hooks
+#
+# Warns (never blocks) when a commit changes source but records no
+# docs/changelogs/ entry. One source of truth with the Claude Stop hook: both
+# call scripts/check-docs-recorded.sh. Fires for Claude, Codex, and humans since
+# all commit through git. Bypass a single commit: git commit --no-verify
+set -u
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+script="$root/scripts/check-docs-recorded.sh"
+[ -f "$script" ] || exit 0
+
+sh "$script" --staged
+exit 0

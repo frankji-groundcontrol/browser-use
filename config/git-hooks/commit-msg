@@ -1,0 +1,22 @@
+#!/bin/sh
+# qwenimage commit-msg hook — checkpoint gate.
+# When a commit message is tagged [checkpoint] (or a `checkpoint:` line), the
+# agent is declaring a milestone another agent could take over from. Require the
+# handoff trio to be staged (a docs/changelogs/ entry + the active docs/plans/
+# file + docs/HANDOFF.md) and BLOCK the commit if any is missing.
+#
+# The agent decides what is a checkpoint (tag or don't). Non-checkpoint commits
+# are not gated here — the pre-commit hook still gives the changelog nudge.
+# Bypass: git commit --no-verify
+set -u
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+script="$root/scripts/check-docs-recorded.sh"
+msg_file="${1:-}"
+[ -f "$script" ] || exit 0
+[ -n "$msg_file" ] && [ -f "$msg_file" ] || exit 0
+
+if grep -qiE '(\[checkpoint\]|^checkpoint:)' "$msg_file" 2>/dev/null; then
+  sh "$script" --checkpoint || exit 1
+fi
+exit 0

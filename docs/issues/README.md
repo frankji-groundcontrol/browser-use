@@ -30,3 +30,7 @@ a resolution.
 - [2026-08-02 — `importlib.reload` splits class identity](2026-08-02-importlib-reload-splits-class-identity.md)
   — order-dependent `Tools is Tools` failures (pre-existing on upstream/main);
   test the import-time expression's function directly instead of reloading.
+- [2026-08-26 — A clean `git status` hides a stale installed binary](2026-08-26-installed-binary-drift-from-build-tree.md)
+  — same HEAD, clean tree, and a no-op `cargo build` on a second host, yet
+  agents still ran months-old code; hash the deployed copy against its own
+  host's build tree, since mtime and size both mislead.

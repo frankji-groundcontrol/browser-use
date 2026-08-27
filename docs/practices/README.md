@@ -5,6 +5,16 @@ techniques worth repeating. One file (or folder) per practice.
 
 ## Index
 
+- [2026-08-26 — Technical lead and dev worker operations](2026-08-26-technical-lead-dev-worker-operations.md)
+  — who defines milestones versus who plans and implements them, the six-step
+  sequence, and when to parallelize independent units in isolated worktrees.
+- [2026-08-26 — Python code style and change workflow](2026-08-26-python-code-style-and-change-workflow.md)
+  — the style contract, hard constraints, `cdp-use` patterns, test rules, and the
+  six-step workflow for changing existing behaviour. Extracted from `CLAUDE.md`.
+- [2026-08-26 — Docs-recording guardrail](2026-08-26-docs-recording-guardrail.md)
+  — the git hooks that ask for a record at commit time (warn on ordinary
+  commits, block a `[checkpoint]` missing the handoff trio), and why a fresh
+  clone starts with them inert.
 - [Deploying `browser-use-rs`](deploy-browser-use-rs.md) — build → fresh-inode
   install + codesign → four-step verification ladder (exec, protocol probe,
   registration, sequential live smoke with visual screenshots).

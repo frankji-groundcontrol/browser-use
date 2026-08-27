@@ -19,10 +19,20 @@ organized on the `franky` branch following the `clean-repo-org` practice.
   [Rust implementation](architecture/12-rust-implementation.md) that ports it.
 - [usage/](usage/README.md) — guides for end users, developers, and the
   shipped tools (including the MCP-server multi-agent setup).
+- [changelogs/](changelogs/README.md) — what changed and how it was verified.
+  One dated file per ordinary change; a dated folder for large ones.
 - [issues/](issues/README.md) — concrete implementation issue records.
 - [learning/](learning/README.md) — reusable lessons captured from tasks.
-- [plans/](plans/README.md) — dated, living task plans.
+- [plans/](plans/README.md) — the cross-task status board plus dated, living
+  task plans.
 - [practices/](practices/README.md) — reusable setup and implementation methods.
+
+## Picking up work
+
+Start at [`HANDOFF.md`](HANDOFF.md) — a takeover brief for a reader with no
+conversation history: the current objective, what is true now, the next actions
+and what completes each, and the constraints to preserve. Current per-task
+status lives on the [task board](plans/README.md).
 
 ## Repo entry points
 
