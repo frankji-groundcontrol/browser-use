@@ -85,6 +85,47 @@ which model the agent talks to.
 
 Route per format: `{base}/responses`, `{base}/chat/completions`, `{base}/messages`.
 
+### Where the key lives
+
+Each setting resolves through three layers, most explicit first:
+
+1. **The process environment** — what an agent's MCP config passes. Still wins,
+   so a single agent can be pinned to a different model or endpoint.
+2. **`~/.config/browser-use/.env`** — the single source for everything else.
+   Override the path with `BROWSER_USE_ENV_FILE`.
+3. **The macOS Keychain**, service `browser-use-llm` — consulted for
+   `BROWSER_USE_LLM_API_KEY` only, since it stores a password rather than a
+   configuration.
+
+So the normal setup is one file and **no secret in any agent's config**:
+
+```bash
+mkdir -p ~/.config/browser-use && chmod 700 ~/.config/browser-use
+umask 077 && cat > ~/.config/browser-use/.env <<'EOF'
+BROWSER_USE_LLM_BASE_URL=https://…/v1
+BROWSER_USE_LLM_API=openai-responses
+BROWSER_USE_LLM_MODEL=gpt-5.6-sol
+BROWSER_USE_LLM_API_KEY=sk-…
+EOF
+```
+
+To keep the key out of the filesystem entirely, omit it from the `.env` and put
+it in the Keychain instead — it must be seeded from a **local terminal**, since a
+non-interactive SSH session cannot unlock the login keychain:
+
+```bash
+security add-generic-password -U -a "$USER" -s browser-use-llm -w 'sk-…'
+```
+
+Rotation is then one command (or one file), not an edit across every agent.
+
+> **Why this exists.** The key used to be copied literally into all five agent
+> configs per host, and `~/.grok/config.toml` was created world-readable (0644)
+> holding it. `grok`'s own `auth.json` is 0600, so the exposure was specific to
+> the file that MCP env blocks land in. Check permissions after any
+> `grok mcp add`: see
+> [issues/2026-08-27-agent-config-world-readable-secrets.md](../../issues/2026-08-27-agent-config-world-readable-secrets.md).
+
 **Base URL: exact first, `/v1` as a fallback.** The URL you set is the URL used.
 Only if that route 404s — or answers 200 with an HTML landing page, which is how
 gateways signal a wrong root — is the alternate root tried once (a bare host

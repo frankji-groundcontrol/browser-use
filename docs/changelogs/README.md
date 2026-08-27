@@ -18,6 +18,9 @@ local runtime paths — unless publication was explicitly approved.
 
 ## Index
 
+- [2026-08-27 — Key storage: one `.env`, Keychain fallback, no secrets in agent configs](2026-08-27-key-storage-dotenv-keychain.md)
+  — settings resolve env → `.env` → Keychain, so the key lives in one place
+  instead of ten plaintext copies across agent config files.
 - [2026-08-27 — One LLM config surface, three wire formats](2026-08-27-llm-config-redesign.md)
   — **breaking**: `BROWSER_USE_LLM_*` replaces the `OPENAI_*`/`ANTHROPIC_*`/
   `MODEL_PROVIDER` tangle, Anthropic Messages is implemented for real, and the

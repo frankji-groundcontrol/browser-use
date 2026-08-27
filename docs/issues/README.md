@@ -38,3 +38,6 @@ a resolution.
   — three timing-sensitive tests fail under full-suite load and pass in
   isolation; confirmed pre-existing on clean HEAD, so a red suite here is
   usually noise rather than a regression.
+- [2026-08-27 — Agent MCP configs held API keys, one of them world-readable](2026-08-27-agent-config-world-readable-secrets.md)
+  — `~/.grok/config.toml` was 0644 with a live key in it while grok's own
+  `auth.json` was 0600; re-check the mode after every `grok mcp add`.

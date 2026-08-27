@@ -49,14 +49,23 @@ Two divergences a newcomer would otherwise trip over:
 
 ## What needs to happen next
 
-1. **Verify the Anthropic Messages path against a real endpoint.** It is
+1. **Seed the secondary host's Keychain from a local terminal.** Its
+   `~/.config/browser-use/.env` holds the key in plaintext because a
+   non-interactive SSH session cannot unlock the login keychain. From a terminal
+   *on that machine*:
+   `security add-generic-password -U -a "$USER" -s browser-use-llm -w 'sk-…'`,
+   then delete the `BROWSER_USE_LLM_API_KEY` line from its `.env`.
+   Done when: that host answers a `browser_extract_content` call with no key in
+   any file.
+
+2. **Verify the Anthropic Messages path against a real endpoint.** It is
    implemented and unit-tested against a mock, but no Anthropic key was
    available here, so it has never spoken to `api.anthropic.com`. Set
    `BROWSER_USE_LLM_API=anthropic-messages` with a real key and run
    `browser_extract_content` once.
    Done when: a live Anthropic call returns an answer, or the gap is fixed.
 
-2. **Decide on one binary deploy layout across both hosts.** The primary
+3. **Decide on one binary deploy layout across both hosts.** The primary
    symlinks `~/.local/bin/browser-use-rs` into `rust/target/release/`; the
    secondary keeps a file copy. The symlink cannot drift but breaks on
    `cargo clean`; the copy survives a clean but goes stale silently, which is
@@ -65,12 +74,12 @@ Two divergences a newcomer would otherwise trip over:
    [deploy-browser-use-rs.md](practices/deploy-browser-use-rs.md) states which
    and why.
 
-3. **Give the secondary host's Kimi entry a stable browser.** It attaches over
+4. **Give the secondary host's Kimi entry a stable browser.** It attaches over
    an ephemeral CDP port that dies whenever that Chrome restarts.
    Done when: the entry either launches its own browser or points at an
    endpoint that survives a restart.
 
-4. **Resume the Rust rewrite** at whatever its plan's tracker names as the next
+5. **Resume the Rust rewrite** at whatever its plan's tracker names as the next
    step. Done when: that step's own exit evidence is satisfied.
 
 ## How to pick up the work
@@ -94,6 +103,11 @@ Constraints to preserve:
   [the router lesson](learning/2026-08-26-fork-router-editable-region.md).
 - **Never `cp` over the live binary** — macOS SIGKILLs it. Fresh inode, then
   re-sign; the deploy practice has the sequence.
+- **Secrets live in `~/.config/browser-use/.env` (0600), not in agent configs.**
+  Settings resolve process env → `.env` → Keychain (API key only). Do not put a
+  key back into an agent's MCP config; and re-check `stat -f "%Sp" ~/.grok/config.toml`
+  after any `grok mcp add`, which recreates it world-readable. See
+  [the exposure issue](issues/2026-08-27-agent-config-world-readable-secrets.md).
 - **Redact secrets in records.** Agent MCP configs hold live API keys and
   gateway hosts. Note that `qoder mcp get <name>` prints them in plaintext;
   prefer `qoder mcp list`.
