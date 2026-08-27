@@ -18,6 +18,10 @@ local runtime paths — unless publication was explicitly approved.
 
 ## Index
 
+- [2026-08-27 — Upstream sync: 25 commits merged, nothing to port to Rust](2026-08-27-upstream-sync-nothing-to-port.md)
+  — upstream's only code changes this window landed in `ChatBrowserUse` and the
+  filesystem module, neither of which the Rust port implements; both refuted
+  against the real source rather than assumed.
 - [2026-08-26 — Multi-agent MCP rollout and docs record system](2026-08-26-mcp-rollout-and-docs-records.md)
   — registered the Rust MCP server with Kimi Code, Qoder, and Grok across two
   hosts, corrected the deploy and setup docs, and added the changelog, handoff,
