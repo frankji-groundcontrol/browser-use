@@ -67,14 +67,34 @@ Fix options, in preference order:
 3. Accept the gap and document it. Weakest: the wiring is exactly where a
    refactor would silently break it.
 
-## Not tested at all: the live endpoint
+## Live endpoint: verified up to the auth boundary
 
-No call has ever been made to `https://llm.api.browser-use.com`. There is no
-Browser Use cloud key in the environment, in any agent config, or in
-`~/.config/browser-use/.env`; the deployed endpoint is a private
-OpenAI-compatible gateway. The code path is believed correct because it matches
-Python's wire contract — `POST {base}/v1/chat/completions`, bearer auth — but
-believed is not verified.
+Updated 2026-08-27 after an actual probe. No valid Browser Use key exists here,
+but pointing the client at the real service with a deliberately invalid one is
+still informative, and it passed:
+
+```
+POST https://llm.api.browser-use.com/v1/chat/completions
+  -> HTTP 401 {"detail":"Invalid API key. Get your API key at ..."}
+  -> surfaced as "BROWSER_USE_LLM_API_KEY is invalid or missing.
+     Get a new key at https://cloud.browser-use.com/new-api-key"
+```
+
+That establishes, against the real service rather than a mock:
+
+- the route is right — it was reached directly, with no 404 and no fallback retry;
+- the auth **shape** is accepted — the server evaluated the credential and
+  rejected the key, not the request format;
+- the 401 hint fires end-to-end, not merely in the `status_hint` unit test — so
+  **gap 2's missing integration coverage is now partly answered by live
+  evidence**, though still not by a repeatable test;
+- the responder is genuinely Browser Use — its own error text arrived alongside
+  ours, so this was not a proxy or a landing page.
+
+**Still unproven:** a successful 200 completion parsing. That path is
+`openai-chat` response handling, which is heavily unit-tested and runs against
+the deployed gateway continuously, so the residual risk is low — but it is not
+zero and should not be described as verified.
 
 ## Acceptance for closing this
 
@@ -82,7 +102,8 @@ believed is not verified.
   and an invalid bare model id fails locally naming the valid aliases.
 - An HTTP-level test proves a 401 and a 402 surface their guidance through
   `chat()`.
-- One live `browser_extract_content` against `llm.api.browser-use.com` succeeds.
+- One live `browser_extract_content` against `llm.api.browser-use.com` succeeds
+  **with a valid key** (the 401 path is already confirmed live).
 
 Related: [key storage](../changelogs/2026-08-27-key-storage-dotenv-keychain.md),
 [the lesson on unverified integrations](../learning/2026-08-27-working-by-accident-is-not-working.md)
