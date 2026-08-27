@@ -1,6 +1,25 @@
 # Browser Use cloud support lost two things in the config redesign
 
 Date: 2026-08-27 · Scope: `bu-llm` — Browser Use cloud LLM (`llm.api.browser-use.com`)
+Status: **closed, not applicable** (2026-08-27) — see Resolution.
+
+## Resolution: this deployment does not use Browser Use cloud
+
+The `bu-*` models are ordinary language models behind an OpenAI-compatible
+endpoint, marketed by Browser Use as *faster and cheaper* for browser automation
+rather than more capable. This deployment runs a frontier general model
+(`gpt-5.6-sol`) on a private gateway, which trades that speed for stronger
+reasoning — so there is nothing to gain by pointing at `llm.api.browser-use.com`.
+
+Confirmed by exercising the most demanding LLM path on the configured model:
+`retry_with_browser_use_agent` completed a two-step task (click a button, then
+read the value it revealed) and answered correctly. That path requires strict
+JSON action emission plus multi-step reasoning; `browser_extract_content` was
+verified repeatedly alongside it on both hosts.
+
+The gaps below are therefore **not defects to fix** but a record of what would
+need doing *if* someone ever pointed this fork at Browser Use cloud. Left here
+for that reason, not as outstanding work.
 
 ## Context
 
