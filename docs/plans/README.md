@@ -14,7 +14,8 @@ growing this table.
 
 | Task | Status | Owner | Depends on / blocker | Next action | Updated | Plan |
 | --- | --- | --- | --- | --- | --- | --- |
-| Docs structure cleanup — add the missing record surfaces and guardrail | complete | Claude | — | Commit and push; pull on the secondary host | 2026-08-26 | [plan](2026-08-26-docs-structure-cleanup/2026-08-26-docs-structure-cleanup.md) |
+| Docs structure cleanup — add the missing record surfaces and guardrail | complete | Claude | — | Shipped as `405ba249c`; live on both hosts | 2026-08-27 | [plan](2026-08-26-docs-structure-cleanup/2026-08-26-docs-structure-cleanup.md) |
+| Unify the binary deploy layout across both hosts | pending | Unassigned | Needs a call: symlink vs file copy | Pick one, then record it in the deploy practice | 2026-08-27 | [issue](../issues/2026-08-26-installed-binary-drift-from-build-tree.md) |
 | Rust rewrite — reimplement browser-use in Rust with TDD | in progress | Unassigned | — | Resume at the next step named in the plan | 2026-07-05 | [plan](2026-07-05-rust-rewrite/index.md) |
 | Franky repo setup — repoint the fork, document install, organize docs | in progress | Unassigned | — | Confirm remaining setup items or close the plan | 2026-07-05 | [plan](2026-07-05-franky-repo-setup/index.md) |
 

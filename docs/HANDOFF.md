@@ -20,7 +20,12 @@ Current status for every task is on the board:
 
 The server is registered with **seven** agents (Claude Code, Codex CLI, OpenCode,
 Hermes, Grok, Qoder, Kimi Code) on both hosts, all verified connected at 19
-tools. Both hosts sit on the same commit with clean trees.
+tools. Both hosts sit on the same commit (`405ba249c`) with clean trees, and the
+docs-recording guardrail is active on both.
+
+Note for any **third** clone: the guardrail's `core.hooksPath` is per-clone local
+config and does **not** arrive with a pull. The hook files will be present but
+inert until someone runs `git config core.hooksPath config/git-hooks`.
 
 Two divergences a newcomer would otherwise trip over:
 
@@ -36,16 +41,19 @@ Two divergences a newcomer would otherwise trip over:
 
 ## What needs to happen next
 
-1. **Publish the current docs work.** The record system added on 2026-08-26
-   (changelogs, handoff, guardrail, task board) is committed only locally, so
-   the two hosts' docs now differ.
-   Done when: the branch is pushed and the secondary host has pulled it.
-
-2. **Decide on one binary deploy layout across both hosts.** Symlink cannot
-   drift but breaks on `cargo clean`; the copy survives a clean but goes stale
-   silently. Pick one and record it in the deploy practice.
+1. **Decide on one binary deploy layout across both hosts.** The primary
+   symlinks `~/.local/bin/browser-use-rs` into `rust/target/release/`; the
+   secondary keeps a file copy. The symlink cannot drift but breaks on
+   `cargo clean`; the copy survives a clean but goes stale silently, which is
+   what already bit us once.
    Done when: both hosts use the same layout and
-   [deploy-browser-use-rs.md](practices/deploy-browser-use-rs.md) states which.
+   [deploy-browser-use-rs.md](practices/deploy-browser-use-rs.md) states which
+   and why.
+
+2. **Give the secondary host's Kimi entry a stable browser.** It attaches over
+   an ephemeral CDP port that dies whenever that Chrome restarts.
+   Done when: the entry either launches its own browser or points at an
+   endpoint that survives a restart.
 
 3. **Resume the Rust rewrite** at whatever its plan's tracker names as the next
    step. Done when: that step's own exit evidence is satisfied.

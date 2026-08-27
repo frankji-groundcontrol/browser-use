@@ -79,6 +79,22 @@ the matching `docs/usage/library/` page. Reasoning and the decision trail are in
 - `check_target_routers.py` passes against this repo.
 - Secret sweep over `docs/` for keys, bearer tokens, and gateway hosts: clean.
 
+## Publication
+
+Shipped as `405ba249c` (`[checkpoint]`, 33 files, +2208/−1167), pushed to
+`origin/franky-rust` and fast-forwarded onto the secondary host. Two things the
+commit alone did not cover:
+
+- **`core.hooksPath` does not travel with git.** It is per-clone local config,
+  so the secondary host pulled the hook files inert and needed
+  `git config core.hooksPath config/git-hooks` run locally. Any future clone
+  needs the same — this is the failure signal named in the
+  [guardrail practice](../practices/2026-08-26-docs-recording-guardrail.md).
+- **Plan tracker history was being ignored.** The repo's blanket `*.jsonl` rule
+  swallowed `*.track.history.jsonl`, which would have stranded each plan's
+  durable execution record on whichever machine created it. Added a scoped
+  negation in `.gitignore`, following the existing `!/server.json` precedent.
+
 ## Follow-up
 
 - The secondary host's Kimi entry attaches to an **ephemeral** CDP port
