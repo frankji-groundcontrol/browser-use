@@ -134,7 +134,19 @@ gateway in use here, `/v1/chat/completions` serves JSON while `/chat/completions
 returns the console's HTML, so setting the base to `https://…/v1` saves a wasted
 round trip on every call.
 
-Browser use's own cloud LLM needs no special provider — it is an
+**"Browser Use" means two different things — don't conflate them.** This
+repository is the browser-automation *tool*. Browser Use also sells a hosted
+*model* service (the `bu-*` family) at `llm.api.browser-use.com`, on a separate
+account with its own key from `cloud.browser-use.com`. The tool does not require
+it: point `BROWSER_USE_LLM_BASE_URL` at whatever model provider you already use.
+A key for your own gateway will **not** authenticate against `llm.api.browser-use.com`,
+and vice versa.
+
+The `bu-*` models are ordinary LLMs, marketed as faster and cheaper for browser
+tasks rather than more capable — so a frontier general model is a reasonable or
+better choice, trading their speed for stronger reasoning.
+
+If you *do* want that service, it needs no special provider — it is an
 OpenAI-compatible endpoint:
 
 ```bash
