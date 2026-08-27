@@ -92,6 +92,11 @@ the case the fallback recovers. Configs now pin `/v1` so the first attempt hits.
 Not verified: the Anthropic path against a real Anthropic endpoint — no key is
 available here. Its coverage is the mock server plus the documented contract.
 
+## Lesson recorded
+
+Why this survived so long, and the cheap check that would have caught it:
+[an integration that works only because the counterparty is lenient is untested](../learning/2026-08-27-working-by-accident-is-not-working.md).
+
 ## Follow-up
 
 - Flaky live-Chrome tests, confirmed pre-existing:
