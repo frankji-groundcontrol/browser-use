@@ -34,3 +34,7 @@ a resolution.
   — same HEAD, clean tree, and a no-op `cargo build` on a second host, yet
   agents still ran months-old code; hash the deployed copy against its own
   host's build tree, since mtime and size both mislead.
+- [2026-08-27 — Live-Chrome tests fail intermittently under load](2026-08-27-flaky-live-chrome-tests.md)
+  — three timing-sensitive tests fail under full-suite load and pass in
+  isolation; confirmed pre-existing on clean HEAD, so a red suite here is
+  usually noise rather than a regression.

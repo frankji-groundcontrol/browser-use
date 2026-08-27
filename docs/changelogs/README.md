@@ -18,6 +18,10 @@ local runtime paths — unless publication was explicitly approved.
 
 ## Index
 
+- [2026-08-27 — One LLM config surface, three wire formats](2026-08-27-llm-config-redesign.md)
+  — **breaking**: `BROWSER_USE_LLM_*` replaces the `OPENAI_*`/`ANTHROPIC_*`/
+  `MODEL_PROVIDER` tangle, Anthropic Messages is implemented for real, and the
+  base URL is used exactly as given with `/v1` only as a fallback.
 - [2026-08-27 — Upstream sync: 25 commits merged, nothing to port to Rust](2026-08-27-upstream-sync-nothing-to-port.md)
   — upstream's only code changes this window landed in `ChatBrowserUse` and the
   filesystem module, neither of which the Rust port implements; both refuted
