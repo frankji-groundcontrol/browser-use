@@ -41,3 +41,7 @@ a resolution.
 - [2026-08-27 — Agent MCP configs held API keys, one of them world-readable](2026-08-27-agent-config-world-readable-secrets.md)
   — `~/.grok/config.toml` was 0644 with a live key in it while grok's own
   `auth.json` was 0600; re-check the mode after every `grok mcp add`.
+- [2026-08-27 — Browser Use cloud support lost two things in the config redesign](2026-08-27-browser-use-cloud-gaps-after-redesign.md)
+  — `bu-latest` no longer normalizes to `bu-2-0`, and the 401/402 hint lost its
+  HTTP-level test when `openai.rs` was rewritten; the live endpoint has never
+  been called.

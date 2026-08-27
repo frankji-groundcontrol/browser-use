@@ -58,14 +58,22 @@ Two divergences a newcomer would otherwise trip over:
    Done when: that host answers a `browser_extract_content` call with no key in
    any file.
 
-2. **Verify the Anthropic Messages path against a real endpoint.** It is
+2. **Close the Browser Use cloud gaps.** `bu-latest` no longer normalizes to
+   `bu-2-0`, the 401/402 hint's wiring lost its HTTP-level test, and
+   `llm.api.browser-use.com` has never actually been called — there is no cloud
+   key on either host. Details and acceptance criteria in
+   [the issue](issues/2026-08-27-browser-use-cloud-gaps-after-redesign.md).
+   Done when: its three acceptance bullets hold, or the record is closed as
+   "Browser Use cloud is not used here".
+
+3. **Verify the Anthropic Messages path against a real endpoint.** It is
    implemented and unit-tested against a mock, but no Anthropic key was
    available here, so it has never spoken to `api.anthropic.com`. Set
    `BROWSER_USE_LLM_API=anthropic-messages` with a real key and run
    `browser_extract_content` once.
    Done when: a live Anthropic call returns an answer, or the gap is fixed.
 
-3. **Decide on one binary deploy layout across both hosts.** The primary
+4. **Decide on one binary deploy layout across both hosts.** The primary
    symlinks `~/.local/bin/browser-use-rs` into `rust/target/release/`; the
    secondary keeps a file copy. The symlink cannot drift but breaks on
    `cargo clean`; the copy survives a clean but goes stale silently, which is
@@ -74,12 +82,12 @@ Two divergences a newcomer would otherwise trip over:
    [deploy-browser-use-rs.md](practices/deploy-browser-use-rs.md) states which
    and why.
 
-4. **Give the secondary host's Kimi entry a stable browser.** It attaches over
+5. **Give the secondary host's Kimi entry a stable browser.** It attaches over
    an ephemeral CDP port that dies whenever that Chrome restarts.
    Done when: the entry either launches its own browser or points at an
    endpoint that survives a restart.
 
-5. **Resume the Rust rewrite** at whatever its plan's tracker names as the next
+6. **Resume the Rust rewrite** at whatever its plan's tracker names as the next
    step. Done when: that step's own exit evidence is satisfied.
 
 ## How to pick up the work
