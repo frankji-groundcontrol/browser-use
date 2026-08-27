@@ -1,0 +1,13 @@
+version: 1
+task: rust-chatbrowseruse
+coordinator: Claude
+history_file: 2026-08-27-rust-chatbrowseruse.track.history.jsonl
+main:
+  outcome: bu-llm can drive browser-use cloud LLM from BROWSER_USE_API_KEY alone,
+    with actionable 401/402 errors and bu-* alias handling
+  owner: Claude
+  status: active
+  next_evidence: RED tests fail first; full serial suite + clippy -D warnings green
+    on default and live-chrome
+side_tracks: []
+updated_at: '2026-08-27T02:52:31Z'

@@ -8,7 +8,7 @@ use std::{
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use bu_actor::{ActorHandle, ClickOutcome, ScreenshotFormat};
 use bu_dom::extract_clean_markdown;
-use bu_llm::{message, OpenAiChatClient};
+use bu_llm::{message, LlmClient};
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResult, ContentBlock, ErrorCode, Implementation,
@@ -413,7 +413,7 @@ impl BrowserUseMcpServer {
         // Missing/invalid LLM credentials are likewise a tool error: a protocol
         // error hides the actionable message ("no LLM credentials: set …") from
         // the caller, who then can only see that the tool failed.
-        let client = match OpenAiChatClient::from_env() {
+        let client = match LlmClient::from_env() {
             Ok(client) => client,
             Err(error) => return Ok(browser_tool_error("browser_extract_content failed", error)),
         };
@@ -764,9 +764,18 @@ async fn build_agent_llm(model: Option<String>) -> anyhow::Result<bu_llm::LlmPro
         }
     }
 
-    let config = bu_llm::OpenAiChatConfig::from_env_with_model_override(model)?;
-    let client = OpenAiChatClient::new(config)?;
-    Ok(bu_llm::LlmProvider::OpenAi(client))
+    let config = bu_llm::LlmConfig::from_env_with_model_override(model)?;
+
+    #[cfg(feature = "bedrock")]
+    if config.api == bu_llm::LlmApi::Bedrock {
+        // Bedrock authenticates through the AWS chain and takes its model from
+        // the same BROWSER_USE_LLM_MODEL as every other backend.
+        let client =
+            bu_llm::BedrockChatClient::from_env_with_model_override(Some(config.model)).await?;
+        return Ok(bu_llm::LlmProvider::Bedrock(client));
+    }
+
+    Ok(bu_llm::LlmProvider::Http(bu_llm::LlmClient::new(config)?))
 }
 
 /// Writes screenshot bytes to `path`, creating parent directories, and returns

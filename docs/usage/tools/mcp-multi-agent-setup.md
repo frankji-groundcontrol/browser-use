@@ -27,7 +27,7 @@ names/schemas byte-identical to the Python server, plus 3 additions:
 - **2 LLM-backed tools** — `browser_extract_content` (page → structured answer)
   and `retry_with_browser_use_agent` (a full autonomous sub-agent with vision,
   multi-action, and reasoning). These call the server's own OpenAI-compatible (or
-  AWS Bedrock) model and need `OPENAI_API_KEY` (or `MODEL_PROVIDER=bedrock`).
+  AWS Bedrock) model, so they need `BROWSER_USE_LLM_*` configured (§3).
 - **3 fork-only additions** — `browser_set_viewport` (check responsive layouts
   at a real width without relaunching, so the session survives),
   `browser_read_clipboard` (capture text a page only exposes via a "Copy"
@@ -70,17 +70,58 @@ contention.
 
 ## 3. Environment
 
+The LLM is configured by four variables. Nothing else selects a backend — in
+particular, exporting `OPENAI_API_KEY` for some other tool can no longer change
+which model the agent talks to.
+
 | Var | Purpose |
 | --- | --- |
-| `OPENAI_API_KEY` | Bearer auth for the 2 LLM tools. |
-| `OPENAI_BASE_URL` | Base URL for the gateway. A bare host gets `/v1` appended automatically (the `OPENAI_*` path normalizes like the `ANTHROPIC_*` fallback); an explicit version segment such as `https://…/v1` (or `/V1`, `/v2`, `/v1beta`) is used as-is. If the chosen route 404s or returns an HTML landing page, the other root (versioned ↔ bare) is retried once automatically. |
-| `BROWSER_USE_LLM_MODEL` | Model id (default `gpt-4o`; set to what your gateway lists). |
+| `BROWSER_USE_LLM_BASE_URL` | Endpoint base. Used **exactly as given** for the first request. |
+| `BROWSER_USE_LLM_API_KEY` | Credential. Sent as `Authorization: Bearer` (OpenAI) or `x-api-key` (Anthropic). |
+| `BROWSER_USE_LLM_API` | Wire format: `openai-responses` (default), `openai-chat`, `anthropic-messages`, or `bedrock` (needs the `bedrock` build). |
+| `BROWSER_USE_LLM_MODEL` | Model id. Required — there is no default. |
 | `BROWSER_USE_LLM_TEMPERATURE` | Optional; defaults to `0.7`. |
+| `BROWSER_USE_LLM_MAX_TOKENS` | Optional; defaults to `4096`. Required by Anthropic Messages, unused by the OpenAI formats. |
+
+Route per format: `{base}/responses`, `{base}/chat/completions`, `{base}/messages`.
+
+**Base URL: exact first, `/v1` as a fallback.** The URL you set is the URL used.
+Only if that route 404s — or answers 200 with an HTML landing page, which is how
+gateways signal a wrong root — is the alternate root tried once (a bare host
+gains `/v1`; a versioned one loses it). This is worth pinning correctly: on the
+gateway in use here, `/v1/chat/completions` serves JSON while `/chat/completions`
+returns the console's HTML, so setting the base to `https://…/v1` saves a wasted
+round trip on every call.
+
+Browser use's own cloud LLM needs no special provider — it is an
+OpenAI-compatible endpoint:
+
+```bash
+BROWSER_USE_LLM_BASE_URL=https://llm.api.browser-use.com/v1
+BROWSER_USE_LLM_API=openai-chat
+BROWSER_USE_LLM_MODEL=bu-2-0
+```
+
+A 401 or 402 from that host is reported with the fix (invalid key / exhausted
+credits and where to top up) rather than as a bare HTTP status.
+
+Browser-side settings are unchanged:
+
+| Var | Purpose |
+| --- | --- |
 | `BROWSER_USE_HEADLESS` | `true` for servers. |
 | `BROWSER_USE_ALLOWED_DOMAINS` | Optional comma-separated allowlist; navigation off-list is blocked and disallowed pages are reset to `about:blank`. |
 | `BROWSER_USE_PROHIBITED_DOMAINS` | Optional denylist (consulted when no allowlist is set). |
 | `BROWSER_USE_BLOCK_IP_ADDRESSES` | `true` to reject bare-IP navigation (SSRF hardening). |
-| `MODEL_PROVIDER=bedrock` | Use AWS Bedrock (requires the `bedrock` build); `MODEL`/`REGION` select the model. |
+| `BROWSER_USE_CDP_URL` | Attach to an already-running Chrome instead of launching one. |
+| `BROWSER_USE_USER_DATA_DIR` | Reuse a profile across runs so logins survive. |
+
+> **Removed 2026-08-27.** `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `ANTHROPIC_API_KEY`,
+> `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `MODEL_PROVIDER`,
+> `BROWSER_USE_OPENAI_API`, and `BROWSER_USE_API_KEY` are no longer read at all.
+> The old `ANTHROPIC_*` path never spoke Anthropic — it sent OpenAI-shaped bodies
+> and only worked because those gateways serve both protocols; use
+> `BROWSER_USE_LLM_API=anthropic-messages` for the real thing.
 
 **No User-Agent workaround is needed.** The Rust client uses `reqwest`'s default
 UA, which does not contain `OpenAI`, so gateways that WAF-block the official SDK's
@@ -105,8 +146,10 @@ All seven agents launch a local/stdio MCP server; point each at
 
 ```bash
 claude mcp add browser-use -s user \
-  -e OPENAI_API_KEY='${OPENAI_API_KEY}' -e OPENAI_BASE_URL='${OPENAI_BASE_URL}' \
-  -e BROWSER_USE_LLM_MODEL='gpt-5.4-mini' -e BROWSER_USE_HEADLESS='true' \
+  -e BROWSER_USE_LLM_API_KEY='${BROWSER_USE_LLM_API_KEY}' \
+  -e BROWSER_USE_LLM_BASE_URL='${BROWSER_USE_LLM_BASE_URL}' \
+  -e BROWSER_USE_LLM_API='openai-responses' \
+  -e BROWSER_USE_LLM_MODEL='gpt-5.6-sol' -e BROWSER_USE_HEADLESS='true' \
   -- browser-use-rs --mcp
 ```
 
@@ -117,9 +160,10 @@ claude mcp add browser-use -s user \
 command = "browser-use-rs"
 args = ["--mcp"]
 [mcp_servers.browser-use.env]
-OPENAI_API_KEY = "…"
-OPENAI_BASE_URL = "https://…/v1"
-BROWSER_USE_LLM_MODEL = "gpt-5.4-mini"
+BROWSER_USE_LLM_API_KEY = "…"
+BROWSER_USE_LLM_BASE_URL = "https://…/v1"
+BROWSER_USE_LLM_API = "openai-responses"
+BROWSER_USE_LLM_MODEL = "gpt-5.6-sol"
 BROWSER_USE_HEADLESS = "true"
 ```
 
@@ -131,9 +175,10 @@ BROWSER_USE_HEADLESS = "true"
   "command": ["browser-use-rs", "--mcp"],
   "enabled": true,
   "environment": {
-    "OPENAI_API_KEY": "{env:OPENAI_API_KEY}",
-    "OPENAI_BASE_URL": "{env:OPENAI_BASE_URL}",
-    "BROWSER_USE_LLM_MODEL": "gpt-5.4-mini"
+    "BROWSER_USE_LLM_API_KEY": "{env:BROWSER_USE_LLM_API_KEY}",
+    "BROWSER_USE_LLM_BASE_URL": "{env:BROWSER_USE_LLM_BASE_URL}",
+    "BROWSER_USE_LLM_API": "openai-responses",
+    "BROWSER_USE_LLM_MODEL": "gpt-5.6-sol"
   }
 }
 ```
@@ -146,9 +191,10 @@ browser-use:
   args: [--mcp]
   enabled: true
   env:
-    OPENAI_API_KEY: "${OPENAI_API_KEY}"
-    OPENAI_BASE_URL: "https://…/v1"
-    BROWSER_USE_LLM_MODEL: "gpt-5.4-mini"
+    BROWSER_USE_LLM_API_KEY: "${BROWSER_USE_LLM_API_KEY}"
+    BROWSER_USE_LLM_BASE_URL: "https://…/v1"
+    BROWSER_USE_LLM_API: "openai-responses"
+    BROWSER_USE_LLM_MODEL: "gpt-5.6-sol"
     BROWSER_USE_HEADLESS: "true"
 ```
 
@@ -157,8 +203,9 @@ browser-use:
 
 ```bash
 grok mcp add browser-use -s user \
-  -e OPENAI_API_KEY="$OPENAI_API_KEY" -e OPENAI_BASE_URL="$OPENAI_BASE_URL" \
-  -e BROWSER_USE_LLM_MODEL='gpt-5.6-sol' \
+  -e BROWSER_USE_LLM_API_KEY="$BROWSER_USE_LLM_API_KEY" \
+  -e BROWSER_USE_LLM_BASE_URL="$BROWSER_USE_LLM_BASE_URL" \
+  -e BROWSER_USE_LLM_API='openai-responses' -e BROWSER_USE_LLM_MODEL='gpt-5.6-sol' \
   -- ~/.local/bin/browser-use-rs --mcp
 ```
 
@@ -166,8 +213,9 @@ grok mcp add browser-use -s user \
 
 ```bash
 qoder mcp add browser-use -s user -t stdio \
-  -e OPENAI_API_KEY="$OPENAI_API_KEY" -e OPENAI_BASE_URL="$OPENAI_BASE_URL" \
-  -e BROWSER_USE_LLM_MODEL='gpt-5.6-sol' \
+  -e BROWSER_USE_LLM_API_KEY="$BROWSER_USE_LLM_API_KEY" \
+  -e BROWSER_USE_LLM_BASE_URL="$BROWSER_USE_LLM_BASE_URL" \
+  -e BROWSER_USE_LLM_API='openai-responses' -e BROWSER_USE_LLM_MODEL='gpt-5.6-sol' \
   -- ~/.local/bin/browser-use-rs --mcp
 ```
 
@@ -179,7 +227,9 @@ overwrite, so sibling servers survive:
 F=~/.kimi-code/mcp.json
 jq '.mcpServers["browser-use"] = {
       command: "/Users/me/.local/bin/browser-use-rs", args: ["--mcp"],
-      env: {OPENAI_API_KEY: env.OPENAI_API_KEY, OPENAI_BASE_URL: env.OPENAI_BASE_URL,
+      env: {BROWSER_USE_LLM_API_KEY: env.BROWSER_USE_LLM_API_KEY,
+            BROWSER_USE_LLM_BASE_URL: env.BROWSER_USE_LLM_BASE_URL,
+            BROWSER_USE_LLM_API: "openai-responses",
             BROWSER_USE_LLM_MODEL: "gpt-5.6-sol"}
     }' "$F" > "$F.tmp" && mv "$F.tmp" "$F" && chmod 600 "$F"
 ```

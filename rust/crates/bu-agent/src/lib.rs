@@ -381,7 +381,7 @@ mod tests {
     };
 
     use bu_actor::ActorHandle;
-    use bu_llm::{LlmProvider, OpenAiChatClient, OpenAiChatConfig};
+    use bu_llm::{LlmApi, LlmClient, LlmConfig, LlmProvider};
     use serde_json::{json, Value};
 
     #[tokio::test]
@@ -391,14 +391,16 @@ mod tests {
             json!({"action": "click", "index": 0}).to_string(),
             json!({"action": "done", "success": true, "result": "clicked"}).to_string(),
         ]);
-        let llm = OpenAiChatClient::new(OpenAiChatConfig {
+        let llm = LlmClient::new(LlmConfig {
             api_key: "test-key".to_owned(),
             base_url: llm_server.base_url(),
             model: "mock-model".to_owned(),
             temperature: None,
-            api_style: Default::default(),
+            // ScriptedLlmServer serves the Responses-API shape.
+            api: LlmApi::OpenAiResponses,
+            max_tokens: 4096,
         })?;
-        let provider = LlmProvider::OpenAi(llm);
+        let provider = LlmProvider::Http(llm);
         let actor = ActorHandle::spawn();
         let page = "data:text/html,<title>Agent Test</title><button onclick='document.body.dataset.clicked=\"yes\"'>Flip</button>";
         actor.navigate(page.to_owned(), false).await?;
@@ -444,12 +446,14 @@ mod tests {
         let llm_server = ScriptedLlmServer::spawn(vec![
             json!({"action": "done", "success": true, "result": "seen"}).to_string(),
         ]);
-        let provider = LlmProvider::OpenAi(OpenAiChatClient::new(OpenAiChatConfig {
+        let provider = LlmProvider::Http(LlmClient::new(LlmConfig {
             api_key: "test-key".to_owned(),
             base_url: llm_server.base_url(),
             model: "mock-model".to_owned(),
             temperature: None,
-            api_style: Default::default(),
+            // ScriptedLlmServer serves the Responses-API shape.
+            api: LlmApi::OpenAiResponses,
+            max_tokens: 4096,
         })?);
         let actor = ActorHandle::spawn();
         actor
@@ -492,12 +496,14 @@ mod tests {
             "action": "done", "success": false, "result": "page was unreachable"
         })
         .to_string()]);
-        let provider = LlmProvider::OpenAi(OpenAiChatClient::new(OpenAiChatConfig {
+        let provider = LlmProvider::Http(LlmClient::new(LlmConfig {
             api_key: "test-key".to_owned(),
             base_url: llm_server.base_url(),
             model: "mock-model".to_owned(),
             temperature: None,
-            api_style: Default::default(),
+            // ScriptedLlmServer serves the Responses-API shape.
+            api: LlmApi::OpenAiResponses,
+            max_tokens: 4096,
         })?);
 
         let actor = ActorHandle::spawn_with_command_timeout(std::time::Duration::from_secs(2));
