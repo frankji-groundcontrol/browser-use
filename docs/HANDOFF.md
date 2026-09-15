@@ -21,12 +21,13 @@ Current status for every task is on the board:
 The server is registered with **seven** agents (Claude Code, Codex CLI, OpenCode,
 Hermes, Grok, Qoder, Kimi Code) on both hosts, all verified against the Rust
 MCP handshake at 19 tools. Local, MBP2 and franky-frank now sit on commit
-`95cff2759`; the release binary was rebuilt and installed on both remote hosts,
+`c2595bbde`; the release binary was rebuilt and installed on both remote hosts,
 and the local symlink points at the rebuilt target. The
 docs-recording guardrail is active on both.
 
 Recent slice (2026-09-16): verified Rust attachment to a temporary Chrome
-DevTools endpoint, pushed the source-remote port and CLI changes, and deployed
+DevTools endpoint, fixed HTTP endpoint resolution, pushed the source-remote port
+and CLI changes, and deployed
 the release binary to MBP2 and franky-frank. No persistent user Chrome exposed
 DevTools locally, so `BROWSER_USE_CDP_URL` attachment to the user's current
 browser remains an explicit follow-up.

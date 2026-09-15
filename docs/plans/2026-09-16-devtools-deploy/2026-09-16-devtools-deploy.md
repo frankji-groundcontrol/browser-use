@@ -33,3 +33,6 @@ claims did not establish live attachment or deployment.
 The protocol probe returned 19 tools locally and on both remote hosts. The
 `live-chrome` test matrix compiled; its two actor failures are environment
 failures caused by missing Chromium, not Rust compilation or Clippy failures.
+
+The HTTP DevTools resolution fix was committed as `c2595bbde` and rebuilt on
+both remote hosts.
