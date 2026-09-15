@@ -587,6 +587,7 @@ dependencies = [
  "anyhow",
  "chromiumoxide",
  "futures-util",
+ "reqwest",
  "serde_json",
  "tokio",
  "tracing",

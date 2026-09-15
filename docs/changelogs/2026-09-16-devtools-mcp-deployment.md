@@ -13,3 +13,7 @@ was installed on local, MBP2, and franky-frank after the commit was pushed.
 
 Related: [deployment plan](../plans/2026-09-16-devtools-deploy/2026-09-16-devtools-deploy.md),
 [DevTools follow-up](../issues/2026-09-16-current-chrome-devtools-endpoint.md).
+
+Follow-up fix: HTTP CDP endpoints now resolve `/json/version` to the browser
+WebSocket before calling `chromiumoxide`. A live probe against Chrome 149 on
+port 9230 completed `initialize` and `browser_navigate` successfully.

@@ -51,6 +51,28 @@ const MAX_LISTENER_PROBE_NODES: usize = 500;
 /// not race menus and SPA updates mounted by the click handler.
 const POST_CLICK_SETTLE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// Chromium exposes a browser WebSocket URL through its HTTP DevTools endpoint.
+/// `chromiumoxide` connects to that WebSocket, so resolve HTTP inputs first.
+async fn devtools_websocket_url(endpoint: &str) -> Result<String> {
+    if endpoint.starts_with("ws://") || endpoint.starts_with("wss://") {
+        return Ok(endpoint.to_owned());
+    }
+    let version_url = format!("{}/json/version", endpoint.trim_end_matches('/'));
+    let response = reqwest::get(&version_url)
+        .await
+        .with_context(|| format!("failed to query DevTools endpoint {version_url}"))?
+        .error_for_status()
+        .with_context(|| format!("DevTools endpoint rejected {version_url}"))?;
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .with_context(|| format!("invalid DevTools version response from {version_url}"))?;
+    body.get("webSocketDebuggerUrl")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("DevTools version response has no webSocketDebuggerUrl"))
+}
+
 use discovery::{
     cdp_url_from_env, chromium_path_from_env, find_playwright_chromium, headless_from_env,
     unique_user_data_dir, user_data_dir_from_env,
@@ -329,9 +351,10 @@ impl BrowserSession {
     /// URL. The browser is NOT ours: we never close it and never touch its
     /// profile directory.
     pub async fn attach(cdp_url: &str) -> Result<Self> {
-        let (browser, handler) = Browser::connect(cdp_url.to_owned())
+        let websocket_url = devtools_websocket_url(cdp_url).await?;
+        let (browser, handler) = Browser::connect(websocket_url.clone())
             .await
-            .with_context(|| format!("failed to attach to Chromium at {cdp_url}"))?;
+            .with_context(|| format!("failed to attach to Chromium at {websocket_url}"))?;
         Ok(Self::from_parts(browser, handler, None, true))
     }
 
