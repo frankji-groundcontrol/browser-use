@@ -19,9 +19,17 @@ Current status for every task is on the board:
 ## What is true now
 
 The server is registered with **seven** agents (Claude Code, Codex CLI, OpenCode,
-Hermes, Grok, Qoder, Kimi Code) on both hosts, all verified connected at 19
-tools. Both hosts sit on the same commit with clean trees, and the
+Hermes, Grok, Qoder, Kimi Code) on both hosts, all verified against the Rust
+MCP handshake at 19 tools. Local, MBP2 and franky-frank now sit on commit
+`95cff2759`; the release binary was rebuilt and installed on both remote hosts,
+and the local symlink points at the rebuilt target. The
 docs-recording guardrail is active on both.
+
+Recent slice (2026-09-16): verified Rust attachment to a temporary Chrome
+DevTools endpoint, pushed the source-remote port and CLI changes, and deployed
+the release binary to MBP2 and franky-frank. No persistent user Chrome exposed
+DevTools locally, so `BROWSER_USE_CDP_URL` attachment to the user's current
+browser remains an explicit follow-up.
 
 **The LLM environment surface changed on 2026-08-27 and is a breaking change.**
 Configure the model with `BROWSER_USE_LLM_BASE_URL`, `_API_KEY`, `_API`
@@ -81,6 +89,11 @@ Two divergences a newcomer would otherwise trip over:
 
 5. **Resume the Rust rewrite** at whatever its plan's tracker names as the next
    step. Done when: that step's own exit evidence is satisfied.
+
+6. **Expose the current Chrome DevTools endpoint** when live attachment is
+needed. Start Chrome with remote debugging, set `BROWSER_USE_CDP_URL`, then run
+the sequential attach probe in the deployment plan. See
+`issues/2026-09-16-current-chrome-devtools-endpoint.md`.
 
 ## How to pick up the work
 
