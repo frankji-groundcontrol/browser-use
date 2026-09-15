@@ -7,6 +7,8 @@ use url::Url;
 /// Domain/IP access policy applied to every navigation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UrlPolicy {
+    /// Disable all navigation security checks when explicitly requested.
+    pub disable_security: bool,
     /// Allowlist patterns; empty means "no allow restriction".
     pub allowed_domains: Vec<String>,
     /// Denylist patterns; consulted only when `allowed_domains` is empty.
@@ -21,6 +23,7 @@ impl UrlPolicy {
     /// (comma-separated) and `BROWSER_USE_BLOCK_IP_ADDRESSES` (truthy).
     pub fn from_env() -> Self {
         Self {
+            disable_security: truthy_env("BROWSER_USE_DISABLE_SECURITY"),
             allowed_domains: csv_env("BROWSER_USE_ALLOWED_DOMAINS"),
             prohibited_domains: csv_env("BROWSER_USE_PROHIBITED_DOMAINS"),
             block_ip_addresses: truthy_env("BROWSER_USE_BLOCK_IP_ADDRESSES"),
@@ -29,13 +32,17 @@ impl UrlPolicy {
 
     /// True when the policy imposes no restriction at all (fast path).
     pub fn is_unrestricted(&self) -> bool {
-        self.allowed_domains.is_empty()
-            && self.prohibited_domains.is_empty()
-            && !self.block_ip_addresses
+        self.disable_security
+            || (self.allowed_domains.is_empty()
+                && self.prohibited_domains.is_empty()
+                && !self.block_ip_addresses)
     }
 
     /// Mirrors `SecurityWatchdog._is_url_allowed`.
     pub fn is_url_allowed(&self, url: &str) -> bool {
+        if self.disable_security {
+            return true;
+        }
         // Always allow internal browser targets.
         if matches!(
             url,

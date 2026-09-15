@@ -14,3 +14,4 @@ and when to apply it again. One dated file (or dated folder) per lesson.
 - [2026-08-27 — An integration that works only because the counterparty is lenient is untested](2026-08-27-working-by-accident-is-not-working.md)
   — the "Anthropic" option never spoke Anthropic and worked for months anyway;
   grep for the one header unique to a protocol before believing the label.
+- [2026-09-15 — Port source-remote settings at the policy boundary](2026-09-15-rust-port-source-remote.md) — shared policy fields avoid duplicated security guards; chromiumoxide handles HTTP DevTools discovery.

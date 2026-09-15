@@ -107,12 +107,17 @@ mod tests {
         assert_eq!(value["model"], "m");
         // f32 -> JSON widens to 0.699999988079071, so compare with tolerance
         // rather than against the literal.
-        let temperature = value["temperature"].as_f64().expect("temperature is a number");
+        let temperature = value["temperature"]
+            .as_f64()
+            .expect("temperature is a number");
         assert!(
             (temperature - 0.7).abs() < 1e-6,
             "temperature should round-trip as ~0.7, got {temperature}"
         );
-        assert_eq!(value["messages"][0], json!({"role": "user", "content": "hi"}));
+        assert_eq!(
+            value["messages"][0],
+            json!({"role": "user", "content": "hi"})
+        );
     }
 
     #[test]

@@ -8,6 +8,7 @@ async fn scoped_policy_set_get_restore_roundtrips() {
     let base = actor.get_policy().await.unwrap();
 
     let scoped = UrlPolicy {
+        disable_security: false,
         allowed_domains: vec!["example.com".to_owned()],
         prohibited_domains: Vec::new(),
         block_ip_addresses: false,

@@ -1386,11 +1386,20 @@ async fn missing_llm_credentials_are_a_tool_error_with_the_reason() -> anyhow::R
     // returned a bare protocol error whose actionable message ("no LLM
     // credentials: set OPENAI_API_KEY …") was invisible to the caller.
     let _env_lock = LLM_ENV_LOCK.lock().await;
+    // Blank the variables actually read since the 2026-08-27 config redesign,
+    // and point BROWSER_USE_ENV_FILE at a path that cannot exist so the
+    // developer's real ~/.config/browser-use/.env cannot satisfy the config and
+    // turn this into a live LLM call.
     let _env = EnvGuard::blank_many(&[
-        "OPENAI_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_API_KEY",
+        "BROWSER_USE_LLM_BASE_URL",
+        "BROWSER_USE_LLM_API_KEY",
+        "BROWSER_USE_LLM_MODEL",
+        "BROWSER_USE_LLM_API",
     ]);
+    let _env_file = EnvGuard::set_many(&[(
+        "BROWSER_USE_ENV_FILE",
+        "/nonexistent/browser-use-test-isolation.env",
+    )]);
     let server = BrowserUseMcpServer::new();
     server
         .call_browser_tool(call(

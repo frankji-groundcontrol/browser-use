@@ -70,14 +70,18 @@ fn parse_dotenv(text: &str) -> HashMap<String, String> {
     out
 }
 
-fn dotenv_values() -> &'static HashMap<String, String> {
-    static CACHE: OnceLock<HashMap<String, String>> = OnceLock::new();
-    CACHE.get_or_init(|| {
-        dotenv_path()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .map(|text| parse_dotenv(&text))
-            .unwrap_or_default()
-    })
+/// Reads and parses the `.env` on each resolution.
+///
+/// Deliberately **not** cached: a process-wide `OnceLock` would freeze whichever
+/// path was resolved first, so a test pointing `BROWSER_USE_ENV_FILE` at an
+/// isolated file would silently get an earlier test's values instead. Config is
+/// resolved once per LLM tool call and the file is a few hundred bytes, so the
+/// read costs nothing worth that hazard.
+fn dotenv_values() -> HashMap<String, String> {
+    dotenv_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| parse_dotenv(&text))
+        .unwrap_or_default()
 }
 
 /// Reads the API key from the macOS Keychain. Any failure (not macOS, no entry,
@@ -223,11 +227,8 @@ impl LlmConfig {
     /// config can still pin a value explicitly, while the common case is a
     /// single `.env` and no secrets in any agent's config file at all.
     pub fn from_env_with_model_override(model_override: Option<String>) -> Result<Self> {
-        let lookup = layered(
-            |key| env::var(key).ok(),
-            dotenv_values(),
-            keychain_secret,
-        );
+        let file = dotenv_values();
+        let lookup = layered(|key| env::var(key).ok(), &file, keychain_secret);
         Self::resolve(lookup, model_override)
     }
 
@@ -255,9 +256,7 @@ impl LlmConfig {
         let api_key = match read("BROWSER_USE_LLM_API_KEY") {
             Some(key) => key,
             None if needs_http_credentials => {
-                return Err(anyhow!(
-                    "no LLM credentials: set BROWSER_USE_LLM_API_KEY"
-                ))
+                return Err(anyhow!("no LLM credentials: set BROWSER_USE_LLM_API_KEY"))
             }
             None => String::new(),
         };
@@ -450,7 +449,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(config.endpoint_url(), "https://gw.example/v1/chat/completions");
+        assert_eq!(
+            config.endpoint_url(),
+            "https://gw.example/v1/chat/completions"
+        );
         assert_eq!(
             config.fallback_url().unwrap(),
             "https://gw.example/chat/completions"
@@ -565,14 +567,17 @@ not a pair
             "openai-chat",
             "whitespace around = is tolerated"
         );
-        assert!(parsed.get("EMPTY").is_none(), "empty values are dropped");
-        assert!(parsed.get("not a pair").is_none());
+        assert!(!parsed.contains_key("EMPTY"), "empty values are dropped");
+        assert!(!parsed.contains_key("not a pair"));
     }
 
     #[test]
     fn a_hash_inside_quotes_is_kept() {
         let parsed = parse_dotenv(r#"BROWSER_USE_LLM_API_KEY="sk-with#hash""#);
-        assert_eq!(parsed.get("BROWSER_USE_LLM_API_KEY").unwrap(), "sk-with#hash");
+        assert_eq!(
+            parsed.get("BROWSER_USE_LLM_API_KEY").unwrap(),
+            "sk-with#hash"
+        );
     }
 
     #[test]

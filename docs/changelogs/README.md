@@ -1,5 +1,7 @@
 # Change records
 
+- [2026-09-16 — DevTools MCP verification and deployment](2026-09-16-devtools-mcp-deployment.md)
+
 Human-readable records of meaningful repository changes — what changed, why, and
 how it was verified — so a future maintainer does not have to reconstruct intent
 from the diff.
@@ -33,3 +35,4 @@ local runtime paths — unless publication was explicitly approved.
   — registered the Rust MCP server with Kimi Code, Qoder, and Grok across two
   hosts, corrected the deploy and setup docs, and added the changelog, handoff,
   and recording-guardrail surfaces this fork was missing.
+- [2026-09-15 — Rust security override and DevTools attachment](2026-09-15-rust-security-and-cdp-attach.md) — honors the Python security-disable setting and documents existing CDP attachment.

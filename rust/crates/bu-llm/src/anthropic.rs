@@ -42,12 +42,8 @@ struct RequestMessage {
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum RequestBlock {
-    Text {
-        text: String,
-    },
-    Image {
-        source: ImageSource,
-    },
+    Text { text: String },
+    Image { source: ImageSource },
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -255,7 +251,8 @@ mod tests {
 
     #[test]
     fn non_text_blocks_are_skipped() {
-        let body = r#"{"content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"answer"}]}"#;
+        let body =
+            r#"{"content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"answer"}]}"#;
         assert_eq!(parse_messages_body(body).unwrap(), "answer");
     }
 

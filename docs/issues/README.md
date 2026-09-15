@@ -6,6 +6,8 @@ a resolution.
 
 ## Index
 
+- [2026-09-16 — Current Chrome DevTools endpoint is not exposed](2026-09-16-current-chrome-devtools-endpoint.md)
+
 - [2026-08-02 — DOMSnapshot bounds are frame-local: iframe clicks hit the wrong element](2026-08-02-iframe-frame-local-bounds-wrong-click.md)
   — the Rust port's highest-severity finding: wrong-element clicks and
   everything-culled occlusion, fixed via `getContentQuads` (+ forced reflow)

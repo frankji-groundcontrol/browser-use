@@ -68,11 +68,7 @@ impl LlmClient {
         let mut attempt = 0;
         loop {
             let url = match &base_override {
-                Some(base) => format!(
-                    "{}/{}",
-                    base.trim_end_matches('/'),
-                    self.config.api.path()
-                ),
+                Some(base) => format!("{}/{}", base.trim_end_matches('/'), self.config.api.path()),
                 None => self.config.endpoint_url(),
             };
             first_url.get_or_insert_with(|| url.clone());
@@ -155,10 +151,9 @@ impl LlmClient {
 
     fn build_body(&self, messages: Vec<ChatMessage>) -> Result<serde_json::Value> {
         let value = match self.config.api {
-            LlmApi::OpenAiResponses => serde_json::to_value(build_responses_request(
-                &self.config,
-                messages,
-            )),
+            LlmApi::OpenAiResponses => {
+                serde_json::to_value(build_responses_request(&self.config, messages))
+            }
             LlmApi::OpenAiChat => serde_json::to_value(build_chat_request(&self.config, messages)),
             LlmApi::AnthropicMessages => {
                 serde_json::to_value(build_anthropic(&self.config, messages))
@@ -253,9 +248,14 @@ mod tests {
     #[test]
     fn browser_use_host_gets_actionable_hints() {
         let base = "https://llm.api.browser-use.com/v1";
-        assert!(status_hint(base, 401).unwrap().contains("BROWSER_USE_LLM_API_KEY"));
+        assert!(status_hint(base, 401)
+            .unwrap()
+            .contains("BROWSER_USE_LLM_API_KEY"));
         assert!(status_hint(base, 402).unwrap().contains("credits"));
-        assert!(status_hint(base, 500).is_none(), "5xx is not operator-fixable");
+        assert!(
+            status_hint(base, 500).is_none(),
+            "5xx is not operator-fixable"
+        );
     }
 
     #[test]
@@ -390,7 +390,10 @@ mod http_tests {
             .chat(vec![message("user", "hi")])
             .await
             .unwrap();
-        assert_eq!(out, "recovered", "a 200 HTML page is a wrong route, not an answer");
+        assert_eq!(
+            out, "recovered",
+            "a 200 HTML page is a wrong route, not an answer"
+        );
         drop(requests);
     }
 
@@ -413,7 +416,10 @@ mod http_tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains("/messages"), "should name the route: {error}");
+        assert!(
+            error.contains("/messages"),
+            "should name the route: {error}"
+        );
         assert!(
             error.contains("/v1/messages"),
             "should name both roots tried: {error}"
@@ -476,7 +482,10 @@ mod http_tests {
         assert_eq!(json["system"], "be terse", "system must be hoisted");
         assert_eq!(json["max_tokens"], 77, "max_tokens is required");
         assert_eq!(json["messages"][0]["content"][1]["type"], "image");
-        assert_eq!(json["messages"][0]["content"][1]["source"]["type"], "base64");
+        assert_eq!(
+            json["messages"][0]["content"][1]["source"]["type"],
+            "base64"
+        );
     }
 
     #[tokio::test]
@@ -489,7 +498,10 @@ mod http_tests {
             .await
             .unwrap();
         let lower = requests.recv().unwrap().to_ascii_lowercase();
-        assert!(lower.contains("authorization: bearer secret-key"), "{lower}");
+        assert!(
+            lower.contains("authorization: bearer secret-key"),
+            "{lower}"
+        );
         assert!(!lower.contains("x-api-key"), "must not send Anthropic auth");
     }
 

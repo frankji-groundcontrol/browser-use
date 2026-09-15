@@ -6,6 +6,9 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bu-actor = { path = "../bu-actor" }
+bu-agent = { path = "../bu-agent" }
+bu-llm = { path = "../bu-llm" }
 bu-mcp = { path = "../bu-mcp" }
 tokio.workspace = true
 tracing-subscriber.workspace = true

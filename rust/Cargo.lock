@@ -602,6 +602,9 @@ name = "bu-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bu-actor",
+ "bu-agent",
+ "bu-llm",
  "bu-mcp",
  "tokio",
  "tracing-subscriber",
