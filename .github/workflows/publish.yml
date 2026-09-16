@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       create_tag:
-        description: "Create the next pre-release tag before publishing"
+        description: "Create a tag from the package version before publishing"
         required: false
         default: true
         type: boolean
@@ -34,47 +34,32 @@ jobs:
   tag_pre_release:
     if: github.event_name == 'workflow_dispatch' && inputs.create_tag
     runs-on: ubuntu-latest
+    outputs:
+      new_tag: ${{ steps.tag.outputs.new_tag }}
     steps:
       - uses: actions/checkout@v4
       - name: Create pre-release tag
+        id: tag
         run: |
+          set -euo pipefail
           git fetch --tags
-          latest_tag=$(git tag --list --sort=-v:refname | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(rc[0-9]+)?$' | head -n 1)
-          if [ -z "$latest_tag" ]; then
-            echo "Failed to find the latest git tag from list:" > /dev/stderr
-            git tag --list --sort=-v:refname
+          new_tag="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          if git rev-parse --verify "refs/tags/$new_tag" >/dev/null 2>&1; then
+            echo "Tag $new_tag already exists; bump the package version before publishing." >&2
             exit 1
-          else
-            # Bump the tag rc version
-            if [[ "$latest_tag" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(rc([0-9]+))?$ ]]; then
-              major="${BASH_REMATCH[1]}"
-              minor="${BASH_REMATCH[2]}"
-              patch="${BASH_REMATCH[3]}"
-              rc="${BASH_REMATCH[5]}"
-              echo "latest_tag: ${major}.${minor}.${patch}rc${rc:-0}"
-              if [ -z "$rc" ]; then
-                # No rc, so bump patch and set rc=1            # 0.2.1 -> 0.2.2rc1
-                patch=$((patch + 1))
-                new_tag="${major}.${minor}.${patch}rc1"
-              else
-                if [ "$rc" -ge 99 ]; then
-                  echo "Error: rc version is already at 99 for tag $latest_tag, refusing to increment further." > /dev/stderr
-                  exit 1
-                fi
-                rc=$((rc + 1))
-                new_tag="${major}.${minor}.${patch}rc${rc}"    # 0.2.1rc1 -> 0.2.1rc2
-              fi
-            else
-              echo "Error: latest_tag '$latest_tag' does not match expected version pattern." > /dev/stderr
-              exit 1
-            fi
           fi
           echo "new_tag: $new_tag"
-          git tag $new_tag
-          git push origin $new_tag
+          git tag "$new_tag"
+          git push origin "$new_tag"
+          echo "new_tag=$new_tag" >> "$GITHUB_OUTPUT"
 
   publish_to_pypi:
-    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    needs: tag_pre_release
+    if: >-
+      always() && (
+        github.event_name == 'release' ||
+        (github.event_name == 'workflow_dispatch' && inputs.create_tag && needs.tag_pre_release.result == 'success')
+      )
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -108,6 +93,8 @@ jobs:
           fi
           echo "::notice::Environment '${ENV_NAME}' is protected with prevent_self_review. OK."
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.tag_pre_release.outputs.new_tag || github.ref }}
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -115,7 +102,16 @@ jobs:
       - run: uv sync
 
       - run: uv run --no-sync ruff check --no-fix --select PLE # quick check for syntax errors to avoid waiting time doing the rest of the build
+      - name: Assert package version matches release tag
+        if: github.event_name == 'release' || needs.tag_pre_release.outputs.new_tag != ''
+        env:
+          EXPECTED_TAG: ${{ needs.tag_pre_release.outputs.new_tag || github.ref_name }}
+        run: uv run python scripts/check_release_version.py "$EXPECTED_TAG"
       - run: uv build
+      - name: Assert artifact versions match release tag
+        env:
+          EXPECTED_TAG: ${{ needs.tag_pre_release.outputs.new_tag || github.ref_name }}
+        run: uv run python scripts/check_release_version.py "$EXPECTED_TAG" --artifacts
 
       # - name: Detect installed Playwright version
       #   run: echo "PLAYWRIGHT_VERSION=$(uv pip list --format json | jq -r '.[] | select(.name == "playwright") | .version')" >> $GITHUB_ENV

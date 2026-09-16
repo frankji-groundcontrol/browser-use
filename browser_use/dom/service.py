@@ -360,32 +360,35 @@ class DomService:
 		cdp_session = await self.browser_session.get_or_create_cdp_session(target_id=target_id, focus=False)
 		frame_tree = await cdp_session.cdp_client.send.Page.getFrameTree(session_id=cdp_session.session_id)
 
-		def collect_all_frame_ids(frame_tree_node) -> list[str]:
-			"""Recursively collect all frame IDs from the frame tree."""
-			frame_ids = [frame_tree_node['frame']['id']]
+		all_frame_ids: list[str] = []
 
-			if 'childFrames' in frame_tree_node and frame_tree_node['childFrames']:
-				for child_frame in frame_tree_node['childFrames']:
-					frame_ids.extend(collect_all_frame_ids(child_frame))
+		def collect_frame_ids(frame_tree_node, depth: int = 0) -> None:
+			"""Honor the same iframe limits used when constructing the DOM."""
+			if len(all_frame_ids) >= max(1, self.max_iframes) or depth > self.max_iframe_depth:
+				return
+			all_frame_ids.append(frame_tree_node['frame']['id'])
+			for child_frame in frame_tree_node.get('childFrames', []):
+				collect_frame_ids(child_frame, depth + 1)
 
-			return frame_ids
-
-		# Collect all frame IDs recursively
-		all_frame_ids = collect_all_frame_ids(frame_tree['frameTree'])
-
-		# Get accessibility tree for each frame
-		ax_tree_requests = []
-		for frame_id in all_frame_ids:
-			ax_tree_request = cdp_session.cdp_client.send.Accessibility.getFullAXTree(
-				params={'frameId': frame_id}, session_id=cdp_session.session_id
-			)
-			ax_tree_requests.append(ax_tree_request)
+		collect_frame_ids(frame_tree['frameTree'])
 
 		# return_exceptions=True so a child frame detaching mid-request (e.g. ad iframes)
 		# doesn't discard AX data from the rest. The root frame is required — if it
 		# fails, propagate so the caller's retry/empty-DOM path runs instead of
 		# silently returning a tree with no main-document AX properties.
-		ax_trees = await asyncio.gather(*ax_tree_requests, return_exceptions=True)
+		ax_trees = []
+		for batch_start in range(0, len(all_frame_ids), _DESCRIBE_NODE_BATCH_SIZE):
+			ax_trees.extend(
+				await asyncio.gather(
+					*[
+						cdp_session.cdp_client.send.Accessibility.getFullAXTree(
+							params={'frameId': frame_id}, session_id=cdp_session.session_id
+						)
+						for frame_id in all_frame_ids[batch_start : batch_start + _DESCRIBE_NODE_BATCH_SIZE]
+					],
+					return_exceptions=True,
+				)
+			)
 
 		root_result = ax_trees[0]
 		if isinstance(root_result, BaseException):

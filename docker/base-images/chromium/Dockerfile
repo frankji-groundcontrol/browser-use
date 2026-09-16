@@ -1,5 +1,6 @@
 ARG BASE_TAG=latest
-FROM browseruse/base-system:${BASE_TAG}
+ARG REGISTRY=browseruse
+FROM ${REGISTRY}/base-system:${BASE_TAG}
 
 WORKDIR /tmp
 COPY pyproject.toml ./

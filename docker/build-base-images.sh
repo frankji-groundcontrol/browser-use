@@ -52,7 +52,7 @@ fi
 
 # Build images in order
 build_image "base-system" "base-images/system/Dockerfile"
-build_image "base-chromium" "base-images/chromium/Dockerfile" "--build-arg BASE_TAG=latest"
-build_image "base-python-deps" "base-images/python-deps/Dockerfile" "--build-arg BASE_TAG=latest"
+build_image "base-chromium" "base-images/chromium/Dockerfile" "--build-arg BASE_TAG=latest --build-arg REGISTRY=$REGISTRY"
+build_image "base-python-deps" "base-images/python-deps/Dockerfile" "--build-arg BASE_TAG=latest --build-arg REGISTRY=$REGISTRY"
 
 echo "[INFO] Build complete. Use: FROM ${REGISTRY}/base-python-deps:latest"

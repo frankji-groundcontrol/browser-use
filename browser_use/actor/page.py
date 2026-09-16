@@ -1,5 +1,6 @@
 """Page class for page-level operations."""
 
+import asyncio
 from typing import TYPE_CHECKING, TypeVar
 
 from pydantic import BaseModel
@@ -46,6 +47,7 @@ class Page:
 		self._client = browser_session.cdp_client
 		self._target_id = target_id
 		self._session_id: str | None = session_id
+		self._session_lock = asyncio.Lock()
 		self._mouse: 'Mouse | None' = None
 
 		self._llm = llm
@@ -53,19 +55,20 @@ class Page:
 	async def _ensure_session(self) -> str:
 		"""Ensure we have a session ID for this target."""
 		if not self._session_id:
-			params: 'AttachToTargetParameters' = {'targetId': self._target_id, 'flatten': True}
-			result = await self._client.send.Target.attachToTarget(params)
-			self._session_id = result['sessionId']
+			async with self._session_lock:
+				if self._session_id:
+					return self._session_id
+				params: 'AttachToTargetParameters' = {'targetId': self._target_id, 'flatten': True}
+				result = await self._client.send.Target.attachToTarget(params)
+				self._session_id = result['sessionId']
 
-			# Enable necessary domains
-			import asyncio
-
-			await asyncio.gather(
-				self._client.send.Page.enable(session_id=self._session_id),
-				self._client.send.DOM.enable(session_id=self._session_id),
-				self._client.send.Runtime.enable(session_id=self._session_id),
-				self._client.send.Network.enable(session_id=self._session_id),
-			)
+				# Enable necessary domains before releasing the lock.
+				await asyncio.gather(
+					self._client.send.Page.enable(session_id=self._session_id),
+					self._client.send.DOM.enable(session_id=self._session_id),
+					self._client.send.Runtime.enable(session_id=self._session_id),
+					self._client.send.Network.enable(session_id=self._session_id),
+				)
 
 		return self._session_id
 

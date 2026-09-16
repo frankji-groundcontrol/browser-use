@@ -84,7 +84,11 @@ class LocalBrowserWatchdog(BaseWatchdog):
 
 	async def on_BrowserStopEvent(self, event: BrowserStopEvent) -> None:
 		"""Listen for BrowserStopEvent and dispatch BrowserKillEvent without awaiting it."""
-		if self.browser_session.is_local and self._subprocess:
+		if (
+			self.browser_session.is_local
+			and self._subprocess
+			and (event.force or not self.browser_session.browser_profile.keep_alive)
+		):
 			self.logger.debug('[LocalBrowserWatchdog] BrowserStopEvent received, dispatching BrowserKillEvent')
 			# Dispatch BrowserKillEvent without awaiting so it gets processed after all BrowserStopEvent handlers
 			self.event_bus.dispatch(BrowserKillEvent())
@@ -104,6 +108,8 @@ class LocalBrowserWatchdog(BaseWatchdog):
 		self._temp_dirs_to_cleanup = []
 
 		for attempt in range(max_retries):
+			subprocess = None
+			process = None
 			try:
 				# Get launch args from profile
 				launch_args = profile.get_args()
@@ -146,8 +152,10 @@ class LocalBrowserWatchdog(BaseWatchdog):
 				subprocess = await asyncio.create_subprocess_exec(
 					browser_path,
 					*launch_args,
-					stdout=asyncio.subprocess.PIPE,
-					stderr=asyncio.subprocess.PIPE,
+					# Browser output is not consumed; pipes would eventually fill and
+					# block Chrome. Discard it instead of owning drain tasks forever.
+					stdout=asyncio.subprocess.DEVNULL,
+					stderr=asyncio.subprocess.DEVNULL,
 				)
 				self.logger.debug(
 					f'[LocalBrowserWatchdog] 🎭 Browser running with browser_pid= {subprocess.pid} 🔗 listening on CDP port :{debug_port}'
@@ -177,7 +185,13 @@ class LocalBrowserWatchdog(BaseWatchdog):
 
 				return process, cdp_url
 
-			except Exception as e:
+			except BaseException as e:
+				# A failed or cancelled CDP readiness wait still owns the launched
+				# process. Terminate and reap it before retrying or propagating.
+				if process is not None:
+					await self._cleanup_process(process)
+				if subprocess is not None:
+					await subprocess.wait()
 				error_str = str(e).lower()
 
 				# Check if this is a user_data_dir related error

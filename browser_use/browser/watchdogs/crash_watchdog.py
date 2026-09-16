@@ -283,14 +283,21 @@ class CrashWatchdog(BaseWatchdog):
 
 		try:
 			self.logger.debug(f'[CrashWatchdog] Checking browser health for target {self.browser_session.agent_focus_target_id}')
-			cdp_session = await self.browser_session.get_or_create_cdp_session()
+			page_targets = self.browser_session.session_manager.get_all_page_targets()
+			target_ids = {target.target_id for target in page_targets}
+			focus_target_id = self.browser_session.agent_focus_target_id
+			if focus_target_id not in target_ids:
+				focus_target_id = page_targets[0].target_id if page_targets else None
+			if focus_target_id is None:
+				raise RuntimeError('No live page target is available for the health check')
+			cdp_session = await self.browser_session.get_or_create_cdp_session(target_id=focus_target_id, focus=False)
 
-			for target in self.browser_session.session_manager.get_all_page_targets():
+			for target in page_targets:
 				if self._is_new_tab_page(target.url) and target.url != 'about:blank':
 					self.logger.debug(f'[CrashWatchdog] Redirecting chrome://new-tab-page/ to about:blank {target.url}')
-					cdp_session = await self.browser_session.get_or_create_cdp_session(target_id=target.target_id)
-					await cdp_session.cdp_client.send.Page.navigate(
-						params={'url': 'about:blank'}, session_id=cdp_session.session_id
+					target_session = await self.browser_session.get_or_create_cdp_session(target_id=target.target_id, focus=False)
+					await target_session.cdp_client.send.Page.navigate(
+						params={'url': 'about:blank'}, session_id=target_session.session_id
 					)
 
 			# Quick ping to check if session is alive

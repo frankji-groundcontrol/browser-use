@@ -77,7 +77,10 @@ class Element:
 		"""Get DOM node ID from backend node ID."""
 		params: 'PushNodesByBackendIdsToFrontendParameters' = {'backendNodeIds': [self._backend_node_id]}
 		result = await self._client.send.DOM.pushNodesByBackendIdsToFrontend(params, session_id=self._session_id)
-		return result['nodeIds'][0]
+		node_ids = result.get('nodeIds', [])
+		if not node_ids or node_ids[0] == 0:
+			raise RuntimeError(f'Element backend node {self._backend_node_id} is detached from the DOM')
+		return node_ids[0]
 
 	async def _get_remote_object_id(self) -> str | None:
 		"""Get remote object ID for this element."""
@@ -248,14 +251,6 @@ class Element:
 				# No visible quad found, use the first quad anyway
 				best_quad = quads[0]
 
-			# Calculate center point of the best quad
-			center_x = sum(best_quad[i] for i in range(0, 8, 2)) / 4
-			center_y = sum(best_quad[i] for i in range(1, 8, 2)) / 4
-
-			# Ensure click point is within viewport bounds
-			center_x = max(0, min(viewport_width - 1, center_x))
-			center_y = max(0, min(viewport_height - 1, center_y))
-
 			# Scroll element into view
 			try:
 				await self._client.send.DOM.scrollIntoViewIfNeeded(
@@ -264,6 +259,24 @@ class Element:
 				await asyncio.sleep(0.05)  # Wait for scroll to complete
 			except Exception:
 				pass
+
+			# Scrolling can change the element's geometry; refresh the quad before
+			# choosing coordinates so an off-screen element is not clicked at the
+			# pre-scroll viewport edge.
+			try:
+				refreshed = await self._client.send.DOM.getContentQuads(
+					params={'backendNodeId': self._backend_node_id}, session_id=self._session_id
+				)
+				if refreshed.get('quads'):
+					best_quad = refreshed['quads'][0]
+			except Exception:
+				pass
+
+			# Calculate center point and clamp only after scrolling.
+			center_x = sum(best_quad[i] for i in range(0, 8, 2)) / 4
+			center_y = sum(best_quad[i] for i in range(1, 8, 2)) / 4
+			center_x = max(0, min(max(0, viewport_width - 1), center_x))
+			center_y = max(0, min(max(0, viewport_height - 1), center_y))
 
 			# Calculate modifier bitmask for CDP
 			modifier_value = 0
@@ -627,10 +640,19 @@ class Element:
 			session_id=self._session_id,
 		)
 
-		await self._client.send.Input.dispatchMouseEvent(
-			{'type': 'mouseMoved', 'x': target_x, 'y': target_y},
-			session_id=self._session_id,
-		)
+		# Keep the left button held while moving; CDP uses `buttons` to mark a
+		# drag in progress and intermediate moves trigger dragover handlers.
+		for step in range(1, 11):
+			progress = step / 10
+			await self._client.send.Input.dispatchMouseEvent(
+				{
+					'type': 'mouseMoved',
+					'x': source_x + (target_x - source_x) * progress,
+					'y': source_y + (target_y - source_y) * progress,
+					'buttons': 1,
+				},
+				session_id=self._session_id,
+			)
 
 		await self._client.send.Input.dispatchMouseEvent(
 			{'type': 'mouseReleased', 'x': target_x, 'y': target_y, 'button': 'left'},

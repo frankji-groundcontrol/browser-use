@@ -19,6 +19,7 @@ RUN groupadd --system $BROWSERUSE_USER && \
     chown -R "$BROWSERUSE_USER:$BROWSERUSE_USER" "/home/$BROWSERUSE_USER" "$DATA_DIR"
 
 WORKDIR /app
+COPY pyproject.toml uv.lock /app/
 COPY . /app
 
 # Install browser-use

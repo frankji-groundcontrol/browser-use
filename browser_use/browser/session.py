@@ -627,6 +627,9 @@ class BrowserSession(BaseModel):
 
 	async def reset(self) -> None:
 		"""Clear all cached CDP sessions with proper cleanup."""
+		preserve_local_browser = bool(
+			self.browser_profile.keep_alive and self._local_browser_watchdog and self._local_browser_watchdog._subprocess
+		)
 
 		# Suppress auto-reconnect callback during teardown
 		self._intentional_stop = True
@@ -664,7 +667,7 @@ class BrowserSession(BaseModel):
 		self._downloaded_files.clear()
 
 		self.agent_focus_target_id = None
-		if self.is_local:
+		if self.is_local and not preserve_local_browser:
 			self.browser_profile.cdp_url = None
 
 		self._crash_watchdog = None
@@ -672,7 +675,8 @@ class BrowserSession(BaseModel):
 		self._aboutblank_watchdog = None
 		self._security_watchdog = None
 		self._storage_state_watchdog = None
-		self._local_browser_watchdog = None
+		if not preserve_local_browser:
+			self._local_browser_watchdog = None
 		self._default_action_watchdog = None
 		self._dom_watchdog = None
 		self._screenshot_watchdog = None
@@ -1743,7 +1747,10 @@ class BrowserSession(BaseModel):
 
 		# Initialize LocalBrowserWatchdog
 		LocalBrowserWatchdog.model_rebuild()
-		self._local_browser_watchdog = LocalBrowserWatchdog(event_bus=self.event_bus, browser_session=self)
+		if self._local_browser_watchdog is None:
+			self._local_browser_watchdog = LocalBrowserWatchdog(event_bus=self.event_bus, browser_session=self)
+		else:
+			self._local_browser_watchdog.event_bus = self.event_bus
 		# self.event_bus.on(BrowserLaunchEvent, self._local_browser_watchdog.on_BrowserLaunchEvent)
 		# self.event_bus.on(BrowserKillEvent, self._local_browser_watchdog.on_BrowserKillEvent)
 		# self.event_bus.on(BrowserStopEvent, self._local_browser_watchdog.on_BrowserStopEvent)

@@ -16,19 +16,22 @@ set -o pipefail
 IFS=$'\n'
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-cd "$SCRIPT_DIR"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_DIR"
 
 
 if [ -f "$SCRIPT_DIR/lint.sh" ]; then
     echo "[√] already inside a cloned browser-use repo"
 else
-    echo "[+] Cloning browser-use repo into current directory: $SCRIPT_DIR"
-    git clone https://github.com/browser-use/browser-use
-    cd browser-use
+    echo "[+] Cloning browser-use repo into current directory: $REPO_DIR"
+    git clone https://github.com/browser-use/browser-use "$REPO_DIR/browser-use"
+    cd "$REPO_DIR/browser-use"
 fi
 
 echo "[+] Installing uv..."
 curl -LsSf https://astral.sh/uv/install.sh | sh
+# The installer cannot update the parent shell's PATH.
+export PATH="$HOME/.local/bin:$PATH"
 
 #git checkout main git pull
 echo

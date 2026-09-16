@@ -28,9 +28,11 @@ class Mouse:
 		self._client = browser_session.cdp_client
 		self._session_id = session_id
 		self._target_id = target_id
+		self._last_position = (0, 0)
 
 	async def click(self, x: int, y: int, button: 'MouseButton' = 'left', click_count: int = 1) -> None:
 		"""Click at the specified coordinates."""
+		self._last_position = (x, y)
 		# Mouse press
 		press_params: 'DispatchMouseEventParameters' = {
 			'type': 'mousePressed',
@@ -61,8 +63,8 @@ class Mouse:
 		"""Press mouse button down."""
 		params: 'DispatchMouseEventParameters' = {
 			'type': 'mousePressed',
-			'x': 0,  # Will use last mouse position
-			'y': 0,
+			'x': self._last_position[0],
+			'y': self._last_position[1],
 			'button': button,
 			'clickCount': click_count,
 		}
@@ -75,8 +77,8 @@ class Mouse:
 		"""Release mouse button."""
 		params: 'DispatchMouseEventParameters' = {
 			'type': 'mouseReleased',
-			'x': 0,  # Will use last mouse position
-			'y': 0,
+			'x': self._last_position[0],
+			'y': self._last_position[1],
 			'button': button,
 			'clickCount': click_count,
 		}
@@ -92,6 +94,7 @@ class Mouse:
 
 		params: 'DispatchMouseEventParameters' = {'type': 'mouseMoved', 'x': x, 'y': y}
 		await self._client.send.Input.dispatchMouseEvent(params, session_id=self._session_id)
+		self._last_position = (x, y)
 
 	async def scroll(
 		self, x: int | None = None, y: int | None = None, delta_x: int | None = None, delta_y: int | None = None

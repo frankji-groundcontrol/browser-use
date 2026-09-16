@@ -142,7 +142,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # Copy only dependency manifest
 WORKDIR /app
-COPY pyproject.toml uv.lock* /app/
+COPY pyproject.toml uv.lock /app/
 
 RUN --mount=type=cache,target=/root/.cache,sharing=locked,id=cache-$TARGETARCH$TARGETVARIANT \
     echo "[+] Setting up venv using uv in $VENV_DIR..." \
@@ -177,7 +177,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=apt-$TARGETARCH$T
 RUN --mount=type=cache,target=/root/.cache,sharing=locked,id=cache-$TARGETARCH$TARGETVARIANT \
      echo "[+] Installing browser-use pip sub-dependencies..." \
      && ( \
-        uv sync --all-extras --no-dev --no-install-project \
+        uv sync --all-extras --locked --no-dev --no-install-project \
         && echo -e '\n\n' \
      ) | tee -a /VERSION.txt
 
