@@ -191,7 +191,14 @@ class LocalBrowserWatchdog(BaseWatchdog):
 				if process is not None:
 					await self._cleanup_process(process)
 				if subprocess is not None:
-					await subprocess.wait()
+					if subprocess.returncode is None:
+						subprocess.terminate()
+					try:
+						await asyncio.wait_for(subprocess.wait(), timeout=5.0)
+					except asyncio.TimeoutError:
+						if subprocess.returncode is None:
+							subprocess.kill()
+						await subprocess.wait()
 				error_str = str(e).lower()
 
 				# Check if this is a user_data_dir related error
@@ -224,7 +231,6 @@ class LocalBrowserWatchdog(BaseWatchdog):
 						pass
 
 				raise
-
 		# Should not reach here, but just in case
 		if self._original_user_data_dir is not None:
 			profile.user_data_dir = self._original_user_data_dir
