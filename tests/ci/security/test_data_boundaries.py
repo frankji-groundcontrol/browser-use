@@ -21,6 +21,18 @@ def test_full_url_allowlist_requires_exact_authority():
 	assert not watchdog._is_url_allowed('https://example.com@evil.test/path')
 
 
+def test_full_url_policy_uses_browser_path_and_authority_semantics():
+	profile = BrowserProfile(allowed_domains=['https://example.com/safe'], headless=True, user_data_dir=None)
+	watchdog = SecurityWatchdog(browser_session=BrowserSession(browser_profile=profile), event_bus=EventBus())
+	for url in [
+		'https://example.com/safe/../private',
+		'https://example.com/safe/%2e%2e/private',
+		'https://evil.test\\@example.com/safe',
+	]:
+		assert not watchdog._is_url_allowed(url), url
+	assert watchdog._is_url_allowed('https://example.com/safe/child')
+
+
 def test_large_domain_list_retains_wildcard_policy():
 	patterns = ['*.example.com', *[f'other-{index}.test' for index in range(100)]]
 	profile = BrowserProfile(prohibited_domains=patterns, headless=True, user_data_dir=None)
@@ -79,9 +91,64 @@ def test_telemetry_requires_opt_in_and_omits_parent_commands(monkeypatch):
 
 
 def test_skill_cookie_scope_respects_domain_boundary_and_path():
-	parameter = SimpleNamespace(cookie_domain='example.com', cookie_path='/account')
+	parameter = SimpleNamespace(name='session', cookie_domain='example.com', cookie_path='/account')
 	assert SkillService._cookie_matches_scope({'domain': '.example.com', 'path': '/account'}, parameter)
+	assert SkillService._cookie_matches_scope(
+		{'domain': '.example.com', 'path': '/account'},
+		SimpleNamespace(name='session', cookie_domain='www.example.com', cookie_path='/account'),
+	)
 	assert not SkillService._cookie_matches_scope({'domain': 'example.com.evil.test', 'path': '/account'}, parameter)
+	assert not SkillService._cookie_matches_scope({'domain': '.com', 'path': '/account'}, parameter)
 	assert not SkillService._cookie_matches_scope({'domain': '.example.com', 'path': '/other'}, parameter)
 	assert not SkillService._cookie_matches_scope({'domain': '.example.com', 'path': '/accounting'}, parameter)
 	assert not SkillService._cookie_matches_scope({'domain': '.example.com', 'path': '/'}, SimpleNamespace())
+	values = SkillService._scoped_cookie_values(
+		[
+			{'name': 'session', 'value': 'evil', 'domain': 'example.com.evil.test', 'path': '/account'},
+			{'name': 'session', 'value': 'good', 'domain': '.example.com', 'path': '/account'},
+		],
+		[parameter],
+	)
+	assert values == {'session': 'good'}
+
+
+def test_full_url_globs_cannot_cross_authority_or_path_boundaries():
+	profile = BrowserProfile(allowed_domains=['http*://*.example.com/safe/*'], headless=True, user_data_dir=None)
+	watchdog = SecurityWatchdog(browser_session=BrowserSession(browser_profile=profile), event_bus=EventBus())
+	assert watchdog._is_url_allowed('https://sub.example.com/safe/page')
+	for url in [
+		'https://evil.test/?next=.example.com/safe/page',
+		'https://sub.example.com:8443/safe/page',
+		'https://sub.example.com/safe/../private',
+		'https://sub.example.com/safe/%2e%2e/private',
+	]:
+		assert not watchdog._is_url_allowed(url)
+
+
+def test_schema_invalid_config_is_preserved(tmp_path):
+	path = tmp_path / 'config.json'
+	original = '{"llm": "invalid but potentially recoverable", "private": "preserve me"}'
+	path.write_text(original)
+	load_and_migrate_config(path)
+	assert path.read_text() == original
+
+
+def test_config_serialization_failure_preserves_previous_file(tmp_path):
+	from typing import Any, cast
+
+	import pytest
+
+	from browser_use.config import _write_config
+
+	path = tmp_path / 'config.json'
+	path.write_text('previous config')
+	with pytest.raises(TypeError):
+		_write_config(path, cast(Any, SimpleNamespace(model_dump=lambda: {'not_json': object()})))
+	assert path.read_text() == 'previous config'
+
+
+def test_credentials_do_not_change_the_matched_destination_host():
+	profile = BrowserProfile(prohibited_domains=['https://example.com/safe'], headless=True, user_data_dir=None)
+	watchdog = SecurityWatchdog(browser_session=BrowserSession(browser_profile=profile), event_bus=EventBus())
+	assert not watchdog._is_url_allowed('https://user:password@example.com/safe')
+	assert watchdog._is_url_allowed('https://example.com@different.test/safe')

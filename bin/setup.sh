@@ -28,22 +28,28 @@ else
     cd "$REPO_DIR/browser-use"
 fi
 
-echo "[+] Installing uv..."
-curl -LsSf https://astral.sh/uv/install.sh | sh
-# The installer cannot update the parent shell's PATH.
-export PATH="$HOME/.local/bin:$PATH"
+if ! command -v uv >/dev/null 2>&1; then
+    echo "[+] Installing uv..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+fi
 
 #git checkout main git pull
 echo
 echo "[+] Setting up venv"
-uv venv
+export UV_PROJECT_ENVIRONMENT="$PWD/.venv"
+if [ ! -x "$UV_PROJECT_ENVIRONMENT/bin/python" ]; then
+    uv venv --python "$(cat .python-version)" "$UV_PROJECT_ENVIRONMENT"
+fi
+source "$UV_PROJECT_ENVIRONMENT/bin/activate"
 echo
 echo "[+] Installing packages in venv"
-uv sync --dev --all-extras
+uv sync --locked --dev --all-extras
 echo
 echo "[i] Tip: make sure to set BROWSER_USE_LOGGING_LEVEL=debug and your LLM API keys in your .env file"
 echo
-uv pip show browser-use
+uv pip show --python "$UV_PROJECT_ENVIRONMENT/bin/python" browser-use
+uv run --no-sync python -c 'import os, pathlib, sys; assert pathlib.Path(sys.prefix).resolve() == pathlib.Path(os.environ["UV_PROJECT_ENVIRONMENT"]).resolve(); import browser_use; print("Verified browser_use in the project environment")'
 
 echo "Usage:"
 echo "  $ browser-use               use the CLI"

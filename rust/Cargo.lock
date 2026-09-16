@@ -607,6 +607,7 @@ dependencies = [
  "bu-agent",
  "bu-llm",
  "bu-mcp",
+ "serde_json",
  "tokio",
  "tracing-subscriber",
 ]

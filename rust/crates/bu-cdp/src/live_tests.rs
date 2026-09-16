@@ -232,12 +232,29 @@ async fn attaching_uses_an_existing_browser_and_never_closes_it() -> anyhow::Res
     let profile = std::env::temp_dir().join(format!("bu-attach-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&profile);
 
+    let page_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let page_addr = page_listener.local_addr()?;
+    std::thread::spawn(move || {
+        while let Ok((mut stream, _)) = page_listener.accept() {
+            use std::io::Write;
+            let body = "<title>Existing Tab</title><main>ok</main>";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+        }
+    });
+    let page_url = format!("http://{page_addr}/");
+
     let mut child = std::process::Command::new(executable)
         .arg(format!("--remote-debugging-port={port}"))
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg("--headless=new")
         .arg("--no-sandbox")
         .arg("--no-first-run")
+        .arg(&page_url)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
@@ -263,6 +280,19 @@ async fn attaching_uses_an_existing_browser_and_never_closes_it() -> anyhow::Res
     })
     .await?;
 
+    let mut tabs = Vec::new();
+    for _ in 0..40 {
+        tabs = session.tabs(None).await?;
+        if tabs.iter().any(|tab| tab.title == "Existing Tab") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        tabs.iter().any(|tab| tab.title == "Existing Tab"),
+        "attach must discover the pre-existing titled tab, got {tabs:?}"
+    );
+
     let page = session.new_page().await?;
     page.navigate("data:text/html,<title>Attached</title>")
         .await?;
@@ -284,5 +314,30 @@ async fn attaching_uses_an_existing_browser_and_never_closes_it() -> anyhow::Res
     let _ = child.kill();
     let _ = child.wait();
     std::fs::remove_dir_all(&profile).ok();
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn stopped_owned_browser_is_killed_and_reaped_within_budget() -> anyhow::Result<()> {
+    let session = BrowserSession::launch_headless().await?;
+    let pid = session
+        .browser
+        .lock()
+        .await
+        .get_mut_child()
+        .unwrap()
+        .as_mut_inner()
+        .id()
+        .unwrap();
+    let stopped = std::process::Command::new("kill")
+        .args(["-STOP", &pid.to_string()])
+        .status()?;
+    assert!(stopped.success());
+    tokio::time::timeout(std::time::Duration::from_secs(18), session.close()).await??;
+    assert!(
+        session.browser.lock().await.try_wait()?.is_some(),
+        "owned child was not reaped"
+    );
     Ok(())
 }

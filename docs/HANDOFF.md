@@ -18,27 +18,26 @@ Current status for every task is on the board:
 
 ## What is true now
 
-The whole-repository hardening pass completed on 2026-09-16. Every retained
-finding in [the review record](issues/2026-09-16-whole-repo-review-findings.md)
-has an implemented fix and reproducible local evidence, or an explicit blocked
-external proof. The active [hardening plan](plans/2026-09-16-hardening-review-findings/2026-09-16-hardening-review-findings.md)
-and tracker are complete.
+The whole-repository hardening goal is complete with honest environment blocks.
+RST-04 Bedrock Converse typed tools, streaming, retries, timeouts, and usage are
+implemented and fixture-proven (`bu-llm --features bedrock`: 70 tests, twice).
+Keep-alive `stop()`/`start()` rebinds session handlers. Cookie scope rejects
+single-label suffix domains. Setup creates and verifies one repo-root
+environment. See the [hardening plan](plans/2026-09-16-hardening-review-findings/2026-09-16-hardening-review-findings.md).
+The previously deployed source is `b4d67c7e8`; this slice is uncommitted until
+the next install.
 
 Python Ruff, format, Pyright, focused regressions, package build, release
-contracts, and the full `tests/ci` suite pass. Rust format, Clippy, default and
-env-isolated all-feature workspace tests, live CDP/MCP tests, and provider
-fixtures pass. Docker daemon execution, real external provider credentials, and
-a controlled beta child-process death harness remain unavailable locally and
-are recorded as blocked rather than passed.
+contracts, and `tests/ci` (1116 passed, 34 skipped) pass. Rust format, Clippy
+`-D warnings`, default tests, two agreeing env-isolated all-feature workspace
+runs (actor 6, agent 9, CDP 25, LLM 70, MCP 37), and live CDP/MCP attach/policy
+tests pass. Docker daemon execution and real external provider credentials
+remain unavailable locally and are recorded as blocked rather than passed.
 
-Recent slice (2026-09-16): hardened URL authority checks, config preservation and
-permissions, opt-in telemetry, cookie scope, browser/DOM lifecycle, beta RPC
-cleanup, Rust DevTools existing-target attach, pre-action policy guards,
-bounded shutdown, provider wire contracts, release serialization, and pinned
-Docker locks. The Rust all-feature matrix completed with 4 actor, 9 agent, 21
-CDP, 37 MCP, and 61 LLM tests passing. The MCP fixture now uses the explicit
-`BROWSER_USE_LLM_*` environment surface, keeping the matrix isolated from
-ambient credentials.
+Recent slice (2026-09-16): Bedrock Converse tools/streaming fixtures, keep-alive
+event-bus rebind, cookie public-suffix rejection, setup-script environment
+proof, DevTools error redaction, and existing-tab attach. The MCP fixture uses
+the explicit `BROWSER_USE_LLM_*` environment surface.
 
 **The LLM environment surface changed on 2026-08-27 and is a breaking change.**
 Configure the model with `BROWSER_USE_LLM_BASE_URL`, `_API_KEY`, `_API`

@@ -15,7 +15,7 @@ growing this table.
 | Task | Status | Owner | Depends on / blocker | Next action | Updated | Plan |
 | --- | --- | --- | --- | --- | --- | --- |
 | Whole-repository adversarial review | complete | Codex | Docker daemon, real provider credentials, and beta child-process matrix unavailable locally | Remediate SEC-01/02/03/04/05 and REL-01/02 first | 2026-09-16 | [plan](2026-09-16-whole-repo-review/2026-09-16-whole-repo-review.md) |
-| Whole-repository hardening and proof | complete | Codex | Docker daemon, real provider credentials, and beta child-process matrix unavailable locally | All retained findings fixed; see resolution table and evidence | 2026-09-16 | [plan](2026-09-16-hardening-review-findings/2026-09-16-hardening-review-findings.md) |
+| Whole-repository hardening and proof | complete | Codex | Docker daemon and real provider credentials unavailable locally | Recorded fixtures plus honest environment blocks | 2026-09-16 | [plan](2026-09-16-hardening-review-findings/2026-09-16-hardening-review-findings.md) |
 | DevTools attachment and Rust MCP deployment | in progress | Codex | Live verification before release | Probe current Chrome, then install on three hosts | 2026-09-16 | [plan](2026-09-16-devtools-deploy/2026-09-16-devtools-deploy.md) |
 | Docs structure cleanup — add the missing record surfaces and guardrail | complete | Claude | — | Shipped as `405ba249c`; live on both hosts | 2026-08-27 | [plan](2026-08-26-docs-structure-cleanup/2026-08-26-docs-structure-cleanup.md) |
 | Unify the binary deploy layout across both hosts | pending | Unassigned | Needs a call: symlink vs file copy | Pick one, then record it in the deploy practice | 2026-08-27 | [issue](../issues/2026-08-26-installed-binary-drift-from-build-tree.md) |

@@ -110,7 +110,7 @@ adversarial verification surfaced.
 
 Historical audits and fixes are recorded in
 [progress.md](../plans/2026-07-05-rust-rewrite/progress.md). Current acceptance is
-tracked by the [hardening plan](../plans/2026-09-16-hardening-review-findings/2026-09-16-hardening-review-findings.md);
+recorded in the completed [hardening plan](../plans/2026-09-16-hardening-review-findings/2026-09-16-hardening-review-findings.md);
 historical test counts do not establish current or full parity.
 
 ## Build, test, deploy

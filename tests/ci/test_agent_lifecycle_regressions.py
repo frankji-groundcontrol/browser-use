@@ -5,6 +5,7 @@ import sys
 import time
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -151,3 +152,17 @@ async def test_sdk_restarts_after_stdout_reader_failure():
 				await asyncio.wait_for(client.call('test'), timeout=1)
 	finally:
 		await client.close()
+
+
+@pytest.mark.asyncio
+async def test_crash_watchdog_attaches_to_created_target():
+	from browser_use.browser.events import TabCreatedEvent
+	from browser_use.browser.watchdogs.crash_watchdog import CrashWatchdog
+
+	watchdog = CrashWatchdog.model_construct(
+		browser_session=cast(Any, SimpleNamespace(logger=SimpleNamespace())), event_bus=cast(Any, SimpleNamespace())
+	)
+	attach = AsyncMock()
+	object.__setattr__(watchdog, 'attach_to_target', attach)
+	await watchdog.on_TabCreatedEvent(TabCreatedEvent(target_id='new-target', url='about:blank'))
+	attach.assert_awaited_once_with('new-target')

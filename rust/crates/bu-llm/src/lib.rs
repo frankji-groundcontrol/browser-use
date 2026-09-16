@@ -49,6 +49,18 @@ pub enum LlmProvider {
 }
 
 impl LlmProvider {
+    /// Selects the backend from the explicit API setting for both CLI and MCP.
+    pub async fn from_config(config: LlmConfig) -> anyhow::Result<Self> {
+        #[cfg(feature = "bedrock")]
+        if config.api == LlmApi::Bedrock {
+            let client = BedrockChatClient::from_env_with_model_override(Some(config.model))
+                .await?
+                .with_inference(config.max_tokens, config.temperature)?;
+            return Ok(Self::Bedrock(client));
+        }
+        Ok(Self::Http(LlmClient::new(config)?))
+    }
+
     /// Sends chat messages and returns the assistant text, regardless of provider.
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> anyhow::Result<String> {
         match self {
@@ -63,11 +75,11 @@ impl LlmProvider {
         match self {
             Self::Http(client) => client.complete(request).await,
             #[cfg(feature = "bedrock")]
-            Self::Bedrock(_) => Err(bedrock_typed_boundary()),
+            Self::Bedrock(client) => client.complete(request).await,
         }
     }
 
-    /// Streams provider events as they arrive. Bedrock remains available through `chat`.
+    /// Streams provider events as they arrive, including tools and final usage.
     pub async fn stream(
         &self,
         request: CompletionRequest,
@@ -76,7 +88,7 @@ impl LlmProvider {
         match self {
             Self::Http(client) => client.stream(request, emit).await,
             #[cfg(feature = "bedrock")]
-            Self::Bedrock(_) => Err(bedrock_typed_boundary()),
+            Self::Bedrock(client) => client.stream(request, emit).await,
         }
     }
 
@@ -87,24 +99,6 @@ impl LlmProvider {
             #[cfg(feature = "bedrock")]
             Self::Bedrock(_) => "bedrock".to_owned(),
         }
-    }
-}
-
-#[cfg(feature = "bedrock")]
-fn bedrock_typed_boundary() -> anyhow::Error {
-    anyhow::anyhow!(
-        "Bedrock typed completions and streaming are unavailable: the Converse adapter currently supports text/image chat only"
-    )
-}
-
-#[cfg(all(test, feature = "bedrock"))]
-mod bedrock_boundary_tests {
-    use super::bedrock_typed_boundary;
-
-    #[test]
-    fn typed_boundary_is_explicit() {
-        let message = bedrock_typed_boundary().to_string();
-        assert!(message.contains("text/image chat only"));
     }
 }
 

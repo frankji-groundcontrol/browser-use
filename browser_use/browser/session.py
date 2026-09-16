@@ -691,19 +691,12 @@ class BrowserSession(BaseModel):
 		self._intentional_stop = False
 		self.logger.info('✅ Browser session reset complete')
 
-	def model_post_init(self, __context) -> None:
-		"""Register event handlers after model initialization."""
-		self._connection_lock = asyncio.Lock()
-		# Initialize reconnect event as set (no reconnection pending)
-		self._reconnect_event = asyncio.Event()
-		self._reconnect_event.set()
-
-		# Check if handlers are already registered to prevent duplicates
+	def _register_session_event_handlers(self) -> None:
+		"""Attach session-level handlers to the current event bus."""
 		from browser_use.browser.watchdog_base import BaseWatchdog
 
 		start_handlers = self.event_bus.handlers.get('BrowserStartEvent', [])
 		start_handler_names = [getattr(h, '__name__', str(h)) for h in start_handlers]
-
 		if any('on_BrowserStartEvent' in name for name in start_handler_names):
 			raise RuntimeError(
 				'[BrowserSession] Duplicate handler registration attempted! '
@@ -720,6 +713,14 @@ class BrowserSession(BaseModel):
 		BaseWatchdog.attach_handler_to_session(self, AgentFocusChangedEvent, self.on_AgentFocusChangedEvent)
 		BaseWatchdog.attach_handler_to_session(self, FileDownloadedEvent, self.on_FileDownloadedEvent)
 		BaseWatchdog.attach_handler_to_session(self, CloseTabEvent, self.on_CloseTabEvent)
+
+	def model_post_init(self, __context) -> None:
+		"""Register event handlers after model initialization."""
+		self._connection_lock = asyncio.Lock()
+		# Initialize reconnect event as set (no reconnection pending)
+		self._reconnect_event = asyncio.Event()
+		self._reconnect_event.set()
+		self._register_session_event_handlers()
 
 	@observe_debug(ignore_input=True, ignore_output=True, name='browser_session_start')
 	async def start(self) -> None:
@@ -748,6 +749,7 @@ class BrowserSession(BaseModel):
 		await self.reset()
 		# Create fresh event bus
 		self.event_bus = ResilientEventBus()
+		self._register_session_event_handlers()
 
 	async def stop(self) -> None:
 		"""Stop the browser session without killing the browser process.
@@ -773,6 +775,7 @@ class BrowserSession(BaseModel):
 		await self.reset()
 		# Create fresh event bus
 		self.event_bus = ResilientEventBus()
+		self._register_session_event_handlers()
 
 	async def close(self) -> None:
 		"""Alias for stop()."""

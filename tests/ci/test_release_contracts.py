@@ -2,6 +2,9 @@
 
 import importlib.util
 import io
+import os
+import shutil
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -36,13 +39,58 @@ class ReleaseContracts(unittest.TestCase):
 			with self.assertRaisesRegex(ValueError, 'package.whl'):
 				CHECK.check_version('1.2.3rc1', root, artifacts=True)
 
+	def test_tag_script_creates_one_version_or_validates_existing_tag(self):
+		import yaml
+
+		workflow = yaml.safe_load((ROOT / '.github/workflows/publish.yml').read_text())
+		script = workflow['jobs']['tag_pre_release']['steps'][1]['run']
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			remote = root / 'origin.git'
+			repo = root / 'repo'
+			repo.mkdir()
+
+			def git(*args, cwd=repo):
+				return subprocess.run(['git', *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+			git('init', '--bare', str(remote), cwd=root)
+			git('init')
+			git('config', 'user.name', 'Release Fixture')
+			git('config', 'user.email', 'fixture@example.invalid')
+			git('remote', 'add', 'origin', str(remote))
+			(repo / 'pyproject.toml').write_text('[project]\nversion = "1.2.3rc1"\n')
+			(repo / 'scripts').mkdir()
+			shutil.copyfile(ROOT / 'scripts/check_release_version.py', repo / 'scripts/check_release_version.py')
+			git('add', '.')
+			git('commit', '-m', 'fixture')
+			env = {**os.environ, 'CREATE_TAG': 'true', 'GITHUB_OUTPUT': str(root / 'output')}
+
+			def run():
+				return subprocess.run(['bash', '-c', script], cwd=repo, env=env, capture_output=True, text=True)
+
+			self.assertEqual(run().returncode, 0)
+			self.assertEqual(git('rev-parse', '1.2.3rc1').stdout, git('rev-parse', 'HEAD').stdout)
+			self.assertNotEqual(run().returncode, 0)
+			env.update(CREATE_TAG='false', RELEASE_REF_TYPE='branch', RELEASE_REF_NAME='main')
+			self.assertNotEqual(run().returncode, 0)
+			env.update(RELEASE_REF_TYPE='tag', RELEASE_REF_NAME='1.2.3rc1')
+			self.assertEqual(run().returncode, 0)
+			env['RELEASE_REF_NAME'] = '1.2.2'
+			self.assertNotEqual(run().returncode, 0)
+
 	def test_workflow_and_docker_use_validated_inputs(self):
 		workflow = (ROOT / '.github/workflows/publish.yml').read_text()
 		self.assertIn('needs: tag_pre_release', workflow)
+		self.assertIn('group: publish-${{ github.repository }}', workflow)
+		self.assertIn('cancel-in-progress: false', workflow)
 		self.assertIn('ref: ${{ needs.tag_pre_release.outputs.new_tag || github.ref }}', workflow)
 		self.assertIn('check_release_version.py "$EXPECTED_TAG" --artifacts', workflow)
 		self.assertIn('git rev-parse --verify "refs/tags/$new_tag"', workflow)
 		self.assertNotIn('\nuv.lock\n', (ROOT / '.gitignore').read_text())
+		fast = (ROOT / 'Dockerfile.fast').read_text()
+		self.assertNotIn('BASE_TAG=latest', fast)
+		self.assertIn('sha256sum --check /app/base-uv-lock.sha256', fast)
+		self.assertIn('ARG BASE_IMAGE', fast)
 		for name in ['Dockerfile', 'Dockerfile.fast', 'docker/base-images/python-deps/Dockerfile']:
 			text = (ROOT / name).read_text()
 			self.assertIn('COPY pyproject.toml uv.lock ', text)

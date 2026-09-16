@@ -1,7 +1,9 @@
 # Fast Dockerfile using pre-built base images
-ARG REGISTRY=browseruse
-ARG BASE_TAG=latest
-FROM ${REGISTRY}/base-python-deps:${BASE_TAG}
+# Supply an immutable registry digest, never a mutable tag.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+ARG BASE_IMAGE
+RUN case "$BASE_IMAGE" in *@sha256:*) ;; *) echo "BASE_IMAGE must be pinned by sha256 digest" >&2; exit 1;; esac
 
 LABEL name="browseruse" description="Browser automation for AI agents"
 
@@ -24,6 +26,7 @@ COPY . /app
 
 # Install browser-use
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    sha256sum --check /app/base-uv-lock.sha256 && \
     uv sync --all-extras --locked --no-dev --compile-bytecode
 
 USER "$BROWSERUSE_USER"

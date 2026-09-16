@@ -6,10 +6,12 @@ This directory contains the optimized Docker build system for browser-use, achie
 
 ```bash
 # Build base images (only needed once or when dependencies change)
-./docker/build-base-images.sh
+./docker/build-base-images.sh --push
 
 # Build browser-use
-docker build -f Dockerfile.fast -t browseruse .
+# Resolve and record the base-python-deps registry digest after building it.
+# BASE_IMAGE must be a published name@sha256:<digest>, not a tag.
+docker build -f Dockerfile.fast --build-arg BASE_IMAGE="$BASE_IMAGE" -t browseruse .
 
 # Or use the standard Dockerfile (slower but self-contained)
 docker build -t browseruse .
@@ -32,3 +34,8 @@ docker build -t browseruse .
 | Standard Dockerfile | ~2 minutes |
 | Fast build (with base images) | ~30 seconds |
 | Rebuild after code change | ~16 seconds |
+
+The fast image checks its tracked `uv.lock` against the checksum embedded in the
+base. Rebuild and pin a new base digest when the lock changes. A missing or
+mutable base reference fails closed; an old base cannot silently supply a
+different dependency graph.

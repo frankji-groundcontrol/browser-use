@@ -36,6 +36,7 @@ dist/
 # Secrets and sensitive files
 secrets.env
 .env
+.env.*
 browser_cookies.json
 cookies.json
 gcp-login.json

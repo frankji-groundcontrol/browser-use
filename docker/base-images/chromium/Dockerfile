@@ -2,15 +2,12 @@ ARG BASE_TAG=latest
 ARG REGISTRY=browseruse
 FROM ${REGISTRY}/base-system:${BASE_TAG}
 
-WORKDIR /tmp
-COPY pyproject.toml ./
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 
-# Install chromium browser using temporary playwright installation
+# Pin the installer and ask it for the executable path: Chromium distributions
+# have used both chrome-linux and chrome-linux64 directories.
 RUN --mount=type=cache,target=/root/.cache,sharing=locked \
-    echo "Installing chromium browser via temporary playwright..." && \
-    pip install --no-cache-dir playwright && \
-    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright playwright install chromium --with-deps --no-shell && \
-    ln -s /opt/playwright/chromium-*/chrome-linux/chrome /usr/bin/chromium-browser && \
-    chmod -R 755 /opt/playwright && \
-    pip uninstall playwright -y && \
-    rm -f pyproject.toml
+    uvx --from playwright==1.63.0 playwright install chromium --with-deps --no-shell && \
+    uvx --from playwright==1.63.0 python -c 'import os; from playwright.sync_api import sync_playwright; p = sync_playwright().start(); os.symlink(p.chromium.executable_path, "/usr/bin/chromium-browser"); p.stop()' && \
+    test -x /usr/bin/chromium-browser && \
+    chmod -R 755 /opt/playwright

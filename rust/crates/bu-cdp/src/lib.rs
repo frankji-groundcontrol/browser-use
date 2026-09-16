@@ -372,13 +372,14 @@ impl BrowserSession {
     /// Returns Chromium's first existing page, if any — so callers adopt the
     /// browser's initial tab instead of opening a redundant second one.
     pub async fn first_page(&self) -> Result<Option<BrowserPage>> {
-        let pages = self
+        let mut pages = self
             .browser
             .lock()
             .await
             .pages()
             .await
             .context("failed to list Chromium pages")?;
+        pages.sort_by_key(|page| page.target_id().inner().clone());
         Ok(pages.into_iter().next().map(|page| BrowserPage { page }))
     }
 
@@ -396,13 +397,14 @@ impl BrowserSession {
     }
 
     pub async fn tabs(&self, active_page: Option<&BrowserPage>) -> Result<Vec<TabInfo>> {
-        let pages = self
+        let mut pages = self
             .browser
             .lock()
             .await
             .pages()
             .await
             .context("failed to list Chromium pages")?;
+        pages.sort_by_key(|page| page.target_id().inner().clone());
         let active_target_id = active_page.map(BrowserPage::target_id);
 
         let mut tabs = Vec::with_capacity(pages.len());
@@ -467,21 +469,25 @@ impl BrowserSession {
         let _ = tokio::time::timeout(shutdown_timeout, browser.close()).await;
         match tokio::time::timeout(shutdown_timeout, browser.wait()).await {
             Ok(Ok(_)) => Ok(()),
-            _ => match browser.kill().await {
-                Some(result) => result.context("failed to kill and reap Chromium browser"),
-                None => Ok(()),
+            _ => match tokio::time::timeout(shutdown_timeout, browser.kill()).await {
+                Ok(Some(result)) => result.context("failed to kill and reap Chromium browser"),
+                Ok(None) => Ok(()),
+                Err(_) => Err(anyhow!(
+                    "timed out reaping Chromium after forced termination"
+                )),
             },
         }
     }
 
     async fn resolve_tab(&self, tab_ref: &str) -> Result<BrowserPage> {
-        let pages = self
+        let mut pages = self
             .browser
             .lock()
             .await
             .pages()
             .await
             .context("failed to list Chromium pages")?;
+        pages.sort_by_key(|page| page.target_id().inner().clone());
         let page =
             page_by_ref(pages, tab_ref).with_context(|| format!("tab {tab_ref} not found"))?;
 

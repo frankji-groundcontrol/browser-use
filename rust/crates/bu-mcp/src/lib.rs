@@ -747,35 +747,10 @@ fn json_error(message: &'static str) -> impl FnOnce(serde_json::Error) -> ErrorD
     }
 }
 
-/// Builds the agent LLM backend, mirroring Python's provider selection: AWS
-/// Bedrock when `MODEL_PROVIDER=bedrock` (requires the `bedrock` build feature),
-/// otherwise an OpenAI-compatible client.
+/// Builds the configured provider through the shared CLI/MCP selection path.
 async fn build_agent_llm(model: Option<String>) -> anyhow::Result<bu_llm::LlmProvider> {
-    #[cfg(feature = "bedrock")]
-    {
-        let is_bedrock = std::env::var("MODEL_PROVIDER")
-            .map(|value| value.eq_ignore_ascii_case("bedrock"))
-            .unwrap_or(false);
-        if is_bedrock {
-            // Python ignores the tool `model` arg for MODEL_PROVIDER=bedrock
-            // (clients often pass an OpenAI model name); use MODEL/env only.
-            let client = bu_llm::BedrockChatClient::from_env_with_model_override(None).await?;
-            return Ok(bu_llm::LlmProvider::Bedrock(client));
-        }
-    }
-
     let config = bu_llm::LlmConfig::from_env_with_model_override(model)?;
-
-    #[cfg(feature = "bedrock")]
-    if config.api == bu_llm::LlmApi::Bedrock {
-        // Bedrock authenticates through the AWS chain and takes its model from
-        // the same BROWSER_USE_LLM_MODEL as every other backend.
-        let client =
-            bu_llm::BedrockChatClient::from_env_with_model_override(Some(config.model)).await?;
-        return Ok(bu_llm::LlmProvider::Bedrock(client));
-    }
-
-    Ok(bu_llm::LlmProvider::Http(bu_llm::LlmClient::new(config)?))
+    bu_llm::LlmProvider::from_config(config).await
 }
 
 /// Writes screenshot bytes to `path`, creating parent directories, and returns
@@ -925,7 +900,7 @@ pub async fn run_stdio_server() -> anyhow::Result<()> {
         let shutdown_actor = actor.clone();
         tokio::spawn(async move {
             wait_for_shutdown_signal().await;
-            if let Err(error) = shutdown_actor.close_all().await {
+            if let Err(error) = shutdown_actor.shutdown().await {
                 tracing::warn!(%error, "failed to close browser on signal");
             }
             // Force exit if the MCP service is stuck waiting on a dead transport.
@@ -933,12 +908,16 @@ pub async fn run_stdio_server() -> anyhow::Result<()> {
         });
     }
 
-    let service = server.serve(stdio()).await?;
-    service.waiting().await?;
-    if let Err(error) = actor.close_all().await {
+    let result = async {
+        let service = server.serve(stdio()).await?;
+        service.waiting().await?;
+        anyhow::Ok(())
+    }
+    .await;
+    if let Err(error) = actor.shutdown().await {
         tracing::warn!(%error, "failed to close browser after MCP stdio end");
     }
-    Ok(())
+    result
 }
 
 /// Resolves when the process should tear down (Ctrl-C / SIGINT / SIGTERM).

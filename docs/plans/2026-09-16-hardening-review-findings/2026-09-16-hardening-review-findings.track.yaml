@@ -3,31 +3,33 @@ task: Harden and fix every retained whole-repository review finding
 coordinator: Codex
 history_file: 2026-09-16-hardening-review-findings.track.history.jsonl
 main:
-  outcome: Every retained finding is fixed and proven, or concretely blocked with evidence
+  outcome: Every retained finding is fixed and proven, or concretely blocked with
+    evidence
   owner: Codex
   status: complete
-  next_evidence: All retained findings have implemented fixes and reproducible evidence
+  next_evidence: 'Environment blocks only: Docker daemon live image build and real
+    provider credentials'
 side_tracks: []
-updated_at: '2026-09-16T10:30:00Z'
+updated_at: '2026-09-16T05:21:38Z'
 plan:
 - step: Baseline, ownership and focused reproductions
   owner: Codex
-  status: complete
+  status: completed
 - step: Python security and data-boundary fixes
   owner: python_static_review
-  status: complete
+  status: completed
 - step: Python browser, DOM and lifecycle fixes
   owner: python_static_review/python_agent_dom
-  status: complete
+  status: completed
 - step: Python agent and beta bridge fixes
   owner: python_static_review/python_agent_agent
-  status: complete
+  status: completed
 - step: Rust CDP, actor, parity and feature fixes
-  owner: rust_static_review
-  status: complete
+  owner: Codex
+  status: completed
 - step: Operations, release and reproducibility fixes
-  owner: ops_contract_review
-  status: complete
+  owner: Codex
+  status: completed
 - step: Integration verification, synthesis and documentation closure
   owner: Codex
-  status: complete
+  status: completed

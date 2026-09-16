@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import tempfile
 from datetime import datetime
 from functools import cache
 from pathlib import Path
@@ -312,7 +313,7 @@ def create_default_config() -> DBStyleConfigJSON:
 
 
 def load_and_migrate_config(config_path: Path) -> DBStyleConfigJSON:
-	"""Load config.json or create fresh one if old format detected."""
+	"""Load config.json, preserving unrecognized or malformed existing files."""
 	if not config_path.exists():
 		# Create fresh config with defaults
 		config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -333,32 +334,29 @@ def load_and_migrate_config(config_path: Path) -> DBStyleConfigJSON:
 				# Already in new format
 				return DBStyleConfigJSON(**data)
 
-		# Old format detected - delete it and create fresh config
-		logger.debug(f'Old config format detected at {config_path}, creating fresh config')
-		new_config = create_default_config()
-
-		# Overwrite with new config
-		_write_config(config_path, new_config)
-
-		logger.debug(f'Created fresh config.json at {config_path}')
-		return new_config
+		raise ValueError('Unrecognized config schema; manual migration is required')
 
 	except Exception as e:
 		logger.error(f'Failed to load config from {config_path}: {type(e).__name__}, using in-memory defaults')
-		# On any error, create fresh config
 		new_config = create_default_config()
 		logger.error('Keeping the existing config file unchanged; repair or remove it to regenerate defaults.')
 		return new_config
 
 
 def _write_config(config_path: Path, config: DBStyleConfigJSON) -> None:
-	"""Write configuration with owner-only permissions."""
+	"""Atomically replace config with an owner-only file after serialization succeeds."""
+	data = json.dumps(config.model_dump(), indent=2)
 	config_path.parent.mkdir(parents=True, exist_ok=True)
-	fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-	with os.fdopen(fd, 'w') as f:
-		if hasattr(os, 'fchmod'):
-			os.fchmod(f.fileno(), 0o600)
-		json.dump(config.model_dump(), f, indent=2)
+	fd, temporary = tempfile.mkstemp(prefix='.config-', suffix='.tmp', dir=config_path.parent)
+	try:
+		with os.fdopen(fd, 'w') as f:
+			f.write(data)
+			f.flush()
+			os.fsync(f.fileno())
+		os.replace(temporary, config_path)
+		os.chmod(config_path, 0o600)
+	finally:
+		Path(temporary).unlink(missing_ok=True)
 
 
 class Config:

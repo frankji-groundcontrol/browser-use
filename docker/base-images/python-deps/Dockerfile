@@ -10,3 +10,6 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     uv venv && \
     uv sync --all-extras --locked --no-dev --no-install-project --compile-bytecode
+
+# The fast build verifies its tracked lock matches this immutable base.
+RUN sha256sum uv.lock > /app/base-uv-lock.sha256

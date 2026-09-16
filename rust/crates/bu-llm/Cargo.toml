@@ -17,7 +17,7 @@ aws-sdk-bedrockruntime = { version = "1", optional = true }
 aws-smithy-types = { version = "1", optional = true }
 
 [features]
-# AWS Bedrock provider parity with the Python MCP server (MODEL_PROVIDER=bedrock).
+# AWS Bedrock provider parity with the Python MCP server (BROWSER_USE_LLM_API=bedrock).
 # Off by default so the OpenAI-compatible binary stays lean; build with
 # `--features bedrock` for AWS deployments.
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]

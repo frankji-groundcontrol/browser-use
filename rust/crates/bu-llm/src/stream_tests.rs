@@ -4,6 +4,98 @@ use crate::LlmApi;
 use serde_json::json;
 
 #[test]
+fn finish_reason_does_not_discard_later_usage_or_accept_truncation() {
+    let mut state = StreamState::new(LlmApi::OpenAiChat);
+    state
+        .event(
+            r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert!(!state.is_done(), "usage can follow finish_reason");
+    state
+        .event(
+            r#"{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}"#,
+            &mut |_| {},
+        )
+        .unwrap();
+    state.event("[DONE]", &mut |_| {}).unwrap();
+    assert_eq!(state.finish().unwrap().usage.unwrap().total_tokens, 7);
+    let mut state = StreamState::new(LlmApi::OpenAiChat);
+    assert!(state
+        .event(r#"{"choices":[{"finish_reason":"length"}]}"#, &mut |_| {})
+        .is_err());
+    let mut state = StreamState::new(LlmApi::AnthropicMessages);
+    state
+        .event(
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert!(!state.is_done());
+    assert!(state.finish().is_err());
+}
+
+#[test]
+fn sparse_content_indices_do_not_create_phantom_tools() {
+    for (api, events) in [
+        (
+            LlmApi::AnthropicMessages,
+            vec![
+                json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"c","name":"lookup","input":{}}}),
+                json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}),
+                json!({"type":"message_stop"}),
+            ],
+        ),
+        (
+            LlmApi::OpenAiResponses,
+            vec![
+                json!({"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"c","name":"lookup"}}),
+                json!({"type":"response.function_call_arguments.delta","output_index":1,"delta":"{}"}),
+                json!({"type":"response.completed","response":{"status":"completed"}}),
+            ],
+        ),
+    ] {
+        let mut state = StreamState::new(api);
+        for event in events {
+            state.event(&event.to_string(), &mut |_| {}).unwrap();
+        }
+        assert_eq!(state.finish().unwrap().tool_calls.len(), 1);
+    }
+}
+
+#[test]
+fn multiline_sse_event_has_a_total_size_limit() {
+    let mut decoder = SseDecoder::default();
+    let line = format!("data: {}\n", "x".repeat(1024 * 1024));
+    for _ in 0..7 {
+        decoder.push(line.as_bytes()).unwrap();
+    }
+    assert!(decoder.push(line.as_bytes()).is_err());
+}
+
+#[test]
+fn responses_completed_does_not_emit_arguments_twice() {
+    let mut state = StreamState::new(LlmApi::OpenAiResponses);
+    let mut args = String::new();
+    for event in [
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"c","name":"lookup"}}),
+        json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":"{}"}),
+        json!({"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","call_id":"c","name":"lookup","arguments":"{}"}]}}),
+    ] {
+        state
+            .event(&event.to_string(), &mut |e| {
+                if let StreamEvent::ToolCallDelta { arguments, .. } = e {
+                    args.push_str(&arguments);
+                }
+            })
+            .unwrap();
+    }
+    assert_eq!(args, "{}");
+    assert_eq!(state.finish().unwrap().tool_calls[0].arguments, json!({}));
+}
+
+#[test]
 fn fragmented_sse_preserves_unicode_multiline_data_and_tool_arguments() {
     let events = [
         json!({"choices":[{"delta":{"content":"Hello 世"}}]}),
@@ -82,4 +174,12 @@ fn responses_stream_requires_terminal_event_and_returns_final_tools() {
     assert!(state
         .event(r#"{"error":{"message":"bad request"}}"#, &mut |_| {})
         .is_err());
+}
+
+#[test]
+fn streamed_tool_arguments_require_an_object() {
+    let mut state = StreamState::new(LlmApi::OpenAiChat);
+    state.event(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"lookup","arguments":"null"}}]}}]}"#, &mut |_| {}).unwrap();
+    state.event("[DONE]", &mut |_| {}).unwrap();
+    assert!(state.finish().is_err());
 }

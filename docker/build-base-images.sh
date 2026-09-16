@@ -12,18 +12,18 @@ build_image() {
     local name=$1
     local dockerfile=$2
     local build_args="${3:-}"
-    
+
     echo "[INFO] Building ${name}..."
-    
+
     local build_cmd="docker build"
     local tag_args="-t ${REGISTRY}/${name}:latest -t ${REGISTRY}/${name}:$(date +%Y%m%d)"
-    
+
     # Use buildx for multi-platform or push
     if [[ "$PLATFORMS" == *","* ]] || [ "$PUSH" = "true" ]; then
         build_cmd="docker buildx build --platform=$PLATFORMS"
         [ "$PUSH" = "true" ] && build_cmd="$build_cmd --push" || build_cmd="$build_cmd"
     fi
-    
+
     $build_cmd $tag_args $build_args -f $dockerfile ..
 }
 
@@ -55,4 +55,6 @@ build_image "base-system" "base-images/system/Dockerfile"
 build_image "base-chromium" "base-images/chromium/Dockerfile" "--build-arg BASE_TAG=latest --build-arg REGISTRY=$REGISTRY"
 build_image "base-python-deps" "base-images/python-deps/Dockerfile" "--build-arg BASE_TAG=latest --build-arg REGISTRY=$REGISTRY"
 
-echo "[INFO] Build complete. Use: FROM ${REGISTRY}/base-python-deps:latest"
+echo "[INFO] Base build complete. Resolve the registry digest before a fast build:"
+echo "docker buildx imagetools inspect ${REGISTRY}/base-python-deps:latest"
+echo 'Pass BASE_IMAGE=<registry>/base-python-deps@sha256:<digest> to Dockerfile.fast.'

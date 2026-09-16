@@ -1,7 +1,7 @@
 # Change records
 
 - [2026-09-16 — Whole-repository hardening and proof](2026-09-16-hardening-review-findings.md)
-  — retained findings fixed with Python/Rust, DevTools, release, and matrix evidence.
+  — retained findings fixed; Bedrock Converse tools/streaming fixture-proven; Docker daemon and live AWS remain blocked.
 
 - [2026-09-16 — Whole-repository adversarial review](2026-09-16-whole-repo-review.md)
   — evidence-ranked findings and explicit proven, refuted, or blocked gates for

@@ -154,7 +154,7 @@ impl LlmClient {
     /// Sends a typed completion request, retaining tool calls and token usage.
     pub async fn complete(&self, request: CompletionRequest) -> Result<Completion> {
         let body = completion::build_request(&self.config, request)?;
-        let text = self.send_json(body, false).await?;
+        let text = self.send_json(body).await?;
         completion::parse_completion(self.config.api, &text)
     }
 
@@ -166,6 +166,9 @@ impl LlmClient {
     ) -> Result<Completion> {
         let mut body = completion::build_request(&self.config, request)?;
         body["stream"] = serde_json::Value::Bool(true);
+        if self.config.api == LlmApi::OpenAiChat {
+            body["stream_options"] = serde_json::json!({"include_usage": true});
+        }
         let mut url = self.config.endpoint_url();
         let mut tried_fallback = false;
         let response = {
@@ -239,7 +242,7 @@ impl LlmClient {
         state.finish()
     }
 
-    async fn send_json(&self, body: serde_json::Value, _stream: bool) -> Result<String> {
+    async fn send_json(&self, body: serde_json::Value) -> Result<String> {
         let mut url = self.config.endpoint_url();
         let mut tried_fallback = false;
         for attempt in 0..=MAX_RETRIES {

@@ -1,7 +1,7 @@
 //! OpenAI **Responses** API (`POST {base}/responses`).
 //!
 //! The default request shape for OpenAI-style endpoints. Chat Completions
-//! remains available behind `BROWSER_USE_OPENAI_API=chat_completions` for
+//! remains available behind `BROWSER_USE_LLM_API=openai-chat` for
 //! gateways that only implement the older route.
 //!
 //! Shapes differ from Chat Completions in three ways that matter here:
@@ -24,6 +24,8 @@ pub(crate) struct ResponsesRequest {
     pub(crate) input: Vec<InputItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) max_output_tokens: Option<u32>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -64,6 +66,7 @@ impl ResponsesRequest {
             model,
             input,
             temperature,
+            max_output_tokens: None,
         }
     }
 }

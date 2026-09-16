@@ -256,6 +256,72 @@ mod http_tests {
             "{lower}"
         );
         assert!(!lower.contains("x-api-key"), "must not send Anthropic auth");
+        assert!(lower.contains("\"max_completion_tokens\":77"));
+    }
+
+    #[tokio::test]
+    async fn typed_complete_and_stream_preserve_tools_and_usage_on_every_http_api() {
+        use crate::{CompletionRequest, StreamEvent, ToolDefinition};
+        use serde_json::{json, Value};
+        for (api, complete, stream) in [
+            (LlmApi::OpenAiChat,
+             r#"{"choices":[{"message":{"content":"ok","tool_calls":[{"id":"c","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}"#,
+             "data: {\"choices\":[{\"delta\":{\"content\":\"ok\",\"tool_calls\":[{\"index\":0,\"id\":\"c\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\ndata: [DONE]\n\n"),
+            (LlmApi::OpenAiResponses,
+             r#"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]},{"type":"function_call","call_id":"c","name":"lookup","arguments":"{}"}],"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}"#,
+             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"c\",\"name\":\"lookup\",\"arguments\":\"{}\"}],\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n"),
+            (LlmApi::AnthropicMessages,
+             r#"{"content":[{"type":"text","text":"ok"},{"type":"tool_use","id":"c","name":"lookup","input":{}}],"stop_reason":"tool_use","usage":{"input_tokens":2,"output_tokens":3}}"#,
+             "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"c\",\"name\":\"lookup\",\"input\":{}}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":3}}\n\ndata: {\"type\":\"message_stop\"}\n\n"),
+        ] {
+            let (base, requests) = serve(vec![json_ok(complete), Reply { status: "503 Unavailable", content_type: "application/json", body: "{}" }, Reply { status: "200 OK", content_type: "text/event-stream", body: stream }]);
+            let client = client(base, api);
+            let mut request: CompletionRequest = vec![message("user", "look")].into();
+            request.tools.push(ToolDefinition { name: "lookup".into(), description: "Look up".into(), parameters: json!({"type":"object"}) });
+            let full = client.complete(request.clone()).await.unwrap();
+            let mut args = String::new();
+            let streamed = client.stream(request, |event| { if let StreamEvent::ToolCallDelta { arguments, .. } = event { args.push_str(&arguments); } }).await.unwrap();
+            assert_eq!(streamed.text, full.text);
+            assert_eq!(streamed.tool_calls, full.tool_calls);
+            assert_eq!(streamed.usage, full.usage);
+            assert_eq!(args, "{}");
+            for index in 0..3 {
+                let raw = requests.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+                let body: Value = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+                assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+                if api == LlmApi::OpenAiChat && index > 0 { assert_eq!(body["stream_options"]["include_usage"], true); }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn body_timeouts_bound_complete_and_stream_without_replaying_output() {
+        use std::time::{Duration, Instant};
+        for streaming in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                drain_request(&mut socket);
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 9999\r\n\r\ndata: {{\"choices\":[{{\"delta\":{{\"content\":\"partial\"}}}}]}}\n\n").unwrap();
+                thread::sleep(Duration::from_millis(300));
+            });
+            let mut client = client(base, LlmApi::OpenAiChat);
+            client.http = reqwest::Client::builder()
+                .timeout(Duration::from_millis(50))
+                .no_proxy()
+                .build()
+                .unwrap();
+            let request = vec![message("user", "hi")].into();
+            let start = Instant::now();
+            let result = if streaming {
+                client.stream(request, |_| {}).await
+            } else {
+                client.complete(request).await
+            };
+            assert!(result.is_err());
+            assert!(start.elapsed() < Duration::from_millis(250));
+        }
     }
 
     fn drain_request(stream: &mut TcpStream) -> Vec<u8> {

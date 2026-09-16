@@ -46,3 +46,42 @@ async def test_detached_element_reports_actionable_error():
 
 	with pytest.raises(RuntimeError, match='detached'):
 		await element._get_node_id()
+
+
+@pytest.mark.asyncio
+async def test_click_uses_geometry_after_scroll():
+	from browser_use.actor.element import Element
+
+	client = SimpleNamespace()
+	client.send = SimpleNamespace(
+		Page=SimpleNamespace(
+			getLayoutMetrics=AsyncMock(return_value={'layoutViewport': {'clientWidth': 100, 'clientHeight': 100}})
+		),
+		DOM=SimpleNamespace(
+			getContentQuads=AsyncMock(
+				side_effect=[{'quads': [[200, 200, 220, 200, 220, 220, 200, 220]]}, {'quads': [[10, 20, 30, 20, 30, 40, 10, 40]]}]
+			),
+			scrollIntoViewIfNeeded=AsyncMock(),
+		),
+		Input=SimpleNamespace(dispatchMouseEvent=AsyncMock()),
+	)
+	element = Element(cast(Any, SimpleNamespace(cdp_client=client)), 7, 'sid')
+	await element.click()
+	move = client.send.Input.dispatchMouseEvent.await_args_list[0].kwargs['params']
+	assert (move['x'], move['y']) == (20, 30)
+
+
+@pytest.mark.asyncio
+async def test_drag_moves_with_held_button_state():
+	from browser_use.actor.element import Element
+
+	client = SimpleNamespace(send=SimpleNamespace(Input=SimpleNamespace(dispatchMouseEvent=AsyncMock())))
+	element = Element(cast(Any, SimpleNamespace(cdp_client=client)), 1, 'sid')
+	await element.drag_to({'x': 100, 'y': 100}, source_position={'x': 0, 'y': 0})
+	moves = [
+		call.args[0]
+		for call in client.send.Input.dispatchMouseEvent.await_args_list
+		if call.args and call.args[0]['type'] == 'mouseMoved'
+	]
+	assert len(moves) == 10
+	assert all(move['buttons'] == 1 for move in moves)

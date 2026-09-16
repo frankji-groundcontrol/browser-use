@@ -142,3 +142,21 @@ async fn wedged_command_times_out_and_actor_survives() {
         "actor must still answer commands after a wedged one: {survived:?}"
     );
 }
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn shutdown_cancels_wedged_work_before_reaping() -> Result<()> {
+    let actor = ActorHandle::spawn();
+    actor
+        .navigate("data:text/html,<title>shutdown</title>".into(), false)
+        .await?;
+    let pending = {
+        let actor = actor.clone();
+        tokio::spawn(async move { actor.evaluate("while (true) {}").await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(18), actor.shutdown()).await??;
+    assert!(pending.await?.is_err());
+    assert!(actor.get_policy().await.is_err());
+    Ok(())
+}

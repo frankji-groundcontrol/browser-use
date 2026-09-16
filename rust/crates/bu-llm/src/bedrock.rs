@@ -1,21 +1,26 @@
 //! AWS Bedrock Converse chat client (feature `bedrock`).
 //!
 //! Provider parity with the Python MCP server's `ChatAWSBedrock` path
-//! (`MODEL_PROVIDER=bedrock`). Auth/SigV4/retries are handled by the AWS SDK;
+//! (`BROWSER_USE_LLM_API=bedrock`). Auth/SigV4/retries are handled by the AWS SDK;
 //! credentials and region come from the standard AWS environment.
 
 use anyhow::{anyhow, Context, Result};
 use aws_sdk_bedrockruntime::{
-    types::{
-        ContentBlock, ConversationRole, ImageBlock, ImageFormat, ImageSource, Message,
-        SystemContentBlock,
-    },
+    types::{ContentBlock, ImageBlock, ImageFormat, ImageSource, InferenceConfiguration},
     Client,
 };
 use aws_smithy_types::Blob;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 use crate::message::{ChatMessage, ContentPart, MessageContent};
+use crate::{Completion, CompletionRequest, StreamEvent};
+use std::time::Duration;
+
+#[path = "bedrock_stream.rs"]
+mod stream;
+#[path = "bedrock_wire.rs"]
+mod wire;
+const TIMEOUT: Duration = Duration::from_secs(120);
 
 const DEFAULT_MODEL: &str = "us.anthropic.claude-sonnet-4-6";
 const DEFAULT_REGION: &str = "us-east-1";
@@ -30,19 +35,19 @@ pub struct BedrockChatConfig {
 }
 
 impl BedrockChatConfig {
-    /// Builds config from `MODEL` / `REGION`, applying an optional model override,
+    /// Builds config from `BROWSER_USE_LLM_MODEL` / `AWS_REGION`, applying an optional model override,
     /// with the same defaults as the Python server.
     pub fn from_env_with_model_override(model_override: Option<String>) -> Self {
         let model = model_override
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
             .or_else(|| {
-                std::env::var("MODEL")
+                std::env::var("BROWSER_USE_LLM_MODEL")
                     .ok()
                     .filter(|value| !value.trim().is_empty())
             })
             .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
-        let region = std::env::var("REGION")
+        let region = std::env::var("AWS_REGION")
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_REGION.to_owned());
@@ -55,6 +60,7 @@ impl BedrockChatConfig {
 pub struct BedrockChatClient {
     client: Client,
     model: String,
+    inference: InferenceConfiguration,
 }
 
 impl BedrockChatClient {
@@ -70,70 +76,104 @@ impl BedrockChatClient {
     pub async fn new(config: BedrockChatConfig) -> Result<Self> {
         let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .region(aws_config::Region::new(config.region))
+            .retry_config(aws_smithy_types::retry::RetryConfig::standard().with_max_attempts(6))
+            .timeout_config(
+                aws_smithy_types::timeout::TimeoutConfig::builder()
+                    .operation_timeout(TIMEOUT)
+                    .operation_attempt_timeout(Duration::from_secs(30))
+                    .connect_timeout(Duration::from_secs(10))
+                    .build(),
+            )
             .load()
             .await;
         Ok(Self {
             client: Client::new(&sdk_config),
             model: config.model,
+            inference: InferenceConfiguration::builder()
+                .max_tokens(crate::DEFAULT_MAX_TOKENS as i32)
+                .build(),
         })
     }
 
-    /// Sends chat messages via the Converse API and returns the assistant text.
+    pub(crate) fn with_inference(
+        mut self,
+        max_tokens: u32,
+        temperature: Option<f32>,
+    ) -> Result<Self> {
+        let max_tokens =
+            i32::try_from(max_tokens).context("Bedrock max_tokens exceeds supported range")?;
+        self.inference = InferenceConfiguration::builder()
+            .max_tokens(max_tokens)
+            .set_temperature(temperature)
+            .build();
+        Ok(self)
+    }
+
+    /// Sends text/image chat through the same typed Converse boundary.
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String> {
-        let mut system_blocks = Vec::new();
-        let mut converse_messages = Vec::new();
-
-        for message in messages {
-            if message.role == "system" {
-                system_blocks.push(SystemContentBlock::Text(message.content.as_text()));
-                continue;
-            }
-
-            let role = match message.role.as_str() {
-                "assistant" => ConversationRole::Assistant,
-                _ => ConversationRole::User,
-            };
-            let mut builder = Message::builder().role(role);
-            for block in content_blocks(&message.content)? {
-                builder = builder.content(block);
-            }
-            converse_messages.push(
-                builder
-                    .build()
-                    .map_err(|error| anyhow!("failed to build Bedrock message: {error}"))?,
-            );
-        }
-
-        let mut request = self
-            .client
-            .converse()
-            .model_id(self.model.clone())
-            .set_messages(Some(converse_messages));
-        if !system_blocks.is_empty() {
-            request = request.set_system(Some(system_blocks));
-        }
-
-        let response = request
-            .send()
-            .await
-            .context("Bedrock converse request failed")?;
-        let output = response
-            .output()
-            .context("Bedrock response had no output")?;
-        let message = output
-            .as_message()
-            .map_err(|_| anyhow!("Bedrock output was not a message"))?;
-        let text = message
-            .content()
-            .iter()
-            .filter_map(|block| block.as_text().ok())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("");
-        if text.trim().is_empty() {
+        let output = self.complete(messages.into()).await?;
+        if output.text.trim().is_empty() {
             return Err(anyhow!("Bedrock response did not include assistant text"));
         }
-        Ok(text)
+        Ok(output.text)
+    }
+
+    /// Preserves tool calls, structured arguments and token accounting.
+    pub async fn complete(&self, request: CompletionRequest) -> Result<Completion> {
+        let (system, messages, tools) = wire::request(request)?;
+        let response = self
+            .client
+            .converse()
+            .model_id(&self.model)
+            .set_system((!system.is_empty()).then_some(system))
+            .set_messages(Some(messages))
+            .set_tool_config(tools)
+            .inference_config(self.inference.clone())
+            .send()
+            .await
+            .map_err(|_| anyhow!("Bedrock Converse request failed"))?;
+        wire::completion(
+            response
+                .output()
+                .context("Bedrock response has no output")?,
+            response.stop_reason(),
+            response.usage(),
+        )
+    }
+
+    /// Reads AWS event-stream frames with an overall deadline, including metadata
+    /// after messageStop; only SDK request establishment can be retried safely.
+    pub async fn stream(
+        &self,
+        request: CompletionRequest,
+        mut emit: impl FnMut(StreamEvent),
+    ) -> Result<Completion> {
+        let (system, messages, tools) = wire::request(request)?;
+        tokio::time::timeout(TIMEOUT, async {
+            let mut response = self
+                .client
+                .converse_stream()
+                .model_id(&self.model)
+                .set_system((!system.is_empty()).then_some(system))
+                .set_messages(Some(messages))
+                .set_tool_config(tools)
+                .inference_config(self.inference.clone())
+                .send()
+                .await
+                .map_err(|_| anyhow!("Bedrock ConverseStream request failed"))?;
+            let mut state = stream::State::default();
+            while let Some(event) = response
+                .stream
+                .recv()
+                .await
+                .map_err(|_| anyhow!("Bedrock stream failed"))?
+            {
+                state.event(event, &mut emit)?;
+            }
+            state.finish()
+        })
+        .await
+        .context("Bedrock stream timed out")?
     }
 }
 
@@ -188,22 +228,6 @@ mod tests {
     }
 
     #[test]
-    fn default_model_is_the_current_bedrock_identifier() {
-        // Upstream replaced the retired `us.anthropic.claude-sonnet-4-20250514-v1:0`
-        // with `us.anthropic.claude-sonnet-4-6` (browser-use d2411b419): the old
-        // id stops resolving on Bedrock, so a stale default breaks every
-        // MODEL_PROVIDER=bedrock deployment that relies on it.
-        let previous_model = std::env::var("MODEL").ok();
-        std::env::remove_var("MODEL");
-        let config = BedrockChatConfig::from_env_with_model_override(None);
-        match previous_model {
-            Some(value) => std::env::set_var("MODEL", value),
-            None => std::env::remove_var("MODEL"),
-        }
-        assert_eq!(config.model, "us.anthropic.claude-sonnet-4-6");
-    }
-
-    #[test]
     fn text_message_maps_to_one_text_block() {
         let blocks = content_blocks(&message("user", "hi").content).unwrap();
         assert_eq!(blocks.len(), 1);
@@ -230,3 +254,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "bedrock_tests.rs"]
+mod wire_tests;

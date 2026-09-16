@@ -15,7 +15,19 @@ pub(crate) async fn devtools_websocket_url(endpoint: &str) -> Result<String> {
     if !path.ends_with("/json/version") {
         endpoint.set_path(&format!("{path}/json/version"));
     }
-    let http = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder();
+    // Never send local DevTools discovery (which returns a control capability)
+    // through an ambient outbound proxy.
+    if endpoint.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    }) {
+        builder = builder.no_proxy();
+    }
+    let http = builder
         .timeout(std::time::Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -86,5 +98,56 @@ mod tests {
             .unwrap()
             .starts_with("ws://"));
         server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_errors_omit_tokens_and_capability_urls() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let endpoint = format!("http://{addr}/json/version?token=secret-token");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let n = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..n]).contains("secret-token"));
+            let body =
+                r#"{"webSocketDebuggerUrl":"ws://localhost:9222/devtools/browser/secret-id"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let err = devtools_websocket_url(&endpoint)
+            .await
+            .unwrap_err()
+            .to_string();
+        server.join().unwrap();
+        for leaked in [
+            "secret-token",
+            "secret-id",
+            "webSocketDebuggerUrl",
+            "/json/version",
+        ] {
+            assert!(!err.contains(leaked), "{leaked} in {err}");
+        }
+
+        let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_addr = closed.local_addr().unwrap();
+        drop(closed);
+        let refused = devtools_websocket_url(&format!(
+            "http://{closed_addr}/json/version?token=secret-token"
+        ))
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(!refused.contains("secret-token"), "{refused}");
+        assert!(!refused.contains("/json/version"), "{refused}");
     }
 }

@@ -195,14 +195,7 @@ class SkillService:
 		# Extract cookie parameters from the skill
 		cookie_params = [p for p in skill.parameters if p.type == 'cookie']
 
-		# Build a dict of cookies from the provided cookie list
-		cookie_dict: dict[str, str] = {}
-		for cookie in cookies:
-			for cookie_param in cookie_params:
-				if cookie_param.name != cookie['name'] or not self._cookie_matches_scope(cookie, cookie_param):
-					continue
-				cookie_dict[cookie['name']] = cookie['value']
-				break
+		cookie_dict = self._scoped_cookie_values(cookies, cookie_params)
 
 		# Check for missing required cookies and fill cookie values
 		if cookie_params:
@@ -284,6 +277,18 @@ class SkillService:
 			)
 
 	@staticmethod
+	def _scoped_cookie_values(cookies: list[Any], cookie_params: list[Any]) -> dict[str, str]:
+		"""Map in-scope cookies onto skill parameter names. Out-of-scope same-name cookies are ignored."""
+		cookie_dict: dict[str, str] = {}
+		for cookie in cookies:
+			for cookie_param in cookie_params:
+				if cookie_param.name != cookie['name'] or not SkillService._cookie_matches_scope(cookie, cookie_param):
+					continue
+				cookie_dict[cookie['name']] = cookie['value']
+				break
+		return cookie_dict
+
+	@staticmethod
 	def _cookie_matches_scope(cookie: Mapping[str, Any], parameter: Any) -> bool:
 		"""Only expose cookies matching a skill's declared domain/path scope."""
 		required_domain = getattr(parameter, 'cookie_domain', None)
@@ -292,7 +297,10 @@ class SkillService:
 		domain = str(cookie.get('domain') or '').lower()
 		required = str(required_domain).lstrip('.').lower()
 		bare_domain = domain.lstrip('.')
-		if not bare_domain or not (required == bare_domain or (domain.startswith('.') and required.endswith('.' + bare_domain))):
+		# Single-label domains such as `.com` would otherwise suffix-match any host.
+		if not bare_domain or '.' not in bare_domain:
+			return False
+		if not (bare_domain == required or required.endswith('.' + bare_domain)):
 			return False
 		path = str(cookie.get('path') or '/')
 		required_path = str(getattr(parameter, 'cookie_path', None) or '/')

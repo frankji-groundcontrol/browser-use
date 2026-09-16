@@ -200,6 +200,14 @@ class SecurityWatchdog(BaseWatchdog):
 		if parsed.scheme in ['data', 'blob']:
 			return True
 
+		# Reject ambiguous authority syntax rather than applying urllib semantics
+		# that differ from Chromium (notably backslashes before userinfo).
+		if (
+			'\\' in url
+			or any(segment.lower().replace('%2e', '.') in {'.', '..'} for segment in parsed.path.split('/'))
+		):
+			return False
+
 		# Get the actual host (domain)
 		host = parsed.hostname
 		if not host:
@@ -250,68 +258,41 @@ class SecurityWatchdog(BaseWatchdog):
 		return True
 
 	def _is_url_match(self, url: str, host: str, scheme: str, pattern: str) -> bool:
-		"""Check if a URL matches a pattern."""
+		"""Match URL components independently so globs cannot cross authority boundaries."""
+		from fnmatch import fnmatchcase
+		from urllib.parse import urlsplit
 
-		# Full URL for matching (scheme + host)
-		full_url_pattern = f'{scheme}://{host}'
-
-		# Handle glob patterns
 		if '*' in pattern:
 			self._log_glob_warning()
-			import fnmatch
-
-			# Check if pattern matches the host
-			if pattern.startswith('*.'):
-				# Pattern like *.example.com should match subdomains and main domain
-				domain_part = pattern[2:]  # Remove *.
-				if host == domain_part or host.endswith('.' + domain_part):
-					# Only match http/https URLs for domain-only patterns
-					if scheme in ['http', 'https']:
-						return True
-			elif pattern.endswith('/*'):
-				# Pattern like brave://* or http*://example.com/*
-				if fnmatch.fnmatch(url, pattern):
-					return True
-			else:
-				# Use fnmatch for other glob patterns
-				if fnmatch.fnmatch(
-					full_url_pattern if '://' in pattern else host,
-					pattern,
+		if '://' in pattern:
+			pattern_scheme, authority_path = pattern.split('://', 1)
+			try:
+				expected = urlsplit(f'{scheme}://{authority_path}')
+				actual = urlsplit(url)
+				default_port = {'http': 80, 'https': 443}.get(scheme)
+				if (
+					'\\' in pattern
+					or not fnmatchcase(scheme, pattern_scheme.lower())
+					or not expected.hostname
+					or expected.username is not None
+					or expected.password is not None
+					or not fnmatchcase(host.lower(), expected.hostname.lower())
+					or (expected.port if expected.port is not None else default_port)
+					!= (actual.port if actual.port is not None else default_port)
+					or (expected.query and expected.query != actual.query)
+					or (expected.fragment and expected.fragment != actual.fragment)
 				):
-					return True
-		else:
-			# Exact match
-			if '://' in pattern:
-				# Full URL pattern
-				from urllib.parse import urlparse
-
-				try:
-					pattern_url = urlparse(pattern)
-					actual_url = urlparse(url)
-					default_port = {'http': 80, 'https': 443}
-					if (
-						pattern_url.scheme != actual_url.scheme
-						or not pattern_url.hostname
-						or pattern_url.hostname.lower() != (actual_url.hostname or '').lower()
-						or pattern_url.username is not None
-						or pattern_url.password is not None
-						or (pattern_url.port or default_port.get(pattern_url.scheme))
-						!= (actual_url.port or default_port.get(actual_url.scheme))
-						or (pattern_url.query and pattern_url.query != actual_url.query)
-						or (pattern_url.fragment and pattern_url.fragment != actual_url.fragment)
-					):
-						return False
-				except ValueError:
 					return False
+			except ValueError:
+				return False
+			if '*' in expected.path:
+				return fnmatchcase(actual.path or '/', expected.path)
+			path = expected.path.rstrip('/')
+			return not path or actual.path == path or actual.path.startswith(path + '/')
 
-				pattern_path = pattern_url.path.rstrip('/')
-				return not pattern_path or actual_url.path == pattern_path or actual_url.path.startswith(pattern_path + '/')
-			else:
-				# Domain-only pattern (case-insensitive comparison)
-				if host.lower() == pattern.lower():
-					return True
-				# If pattern is a root domain, also check www subdomain
-				if self._is_root_domain(pattern) and host.lower() == f'www.{pattern.lower()}':
-					return True
-
-		return False
+		pattern = pattern.lower()
+		if pattern.startswith('*.'):
+			return scheme in {'http', 'https'} and (host == pattern[2:] or host.endswith('.' + pattern[2:]))
+		if '*' in pattern:
+			return fnmatchcase(host.lower(), pattern)
+		return host.lower() == pattern or (self._is_root_domain(pattern) and host.lower() == f'www.{pattern}')

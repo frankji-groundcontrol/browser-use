@@ -1311,6 +1311,11 @@ async fn extract_content_posts_chat_request_and_returns_framed_answer() -> anyho
         ("BROWSER_USE_LLM_API_KEY", "test-key"),
         ("BROWSER_USE_LLM_BASE_URL", &llm_server.base_url()),
         ("BROWSER_USE_LLM_MODEL", "test-model"),
+        ("BROWSER_USE_LLM_API", "openai-responses"),
+        (
+            "BROWSER_USE_ENV_FILE",
+            "/nonexistent/browser-use-test-isolation.env",
+        ),
     ]);
     let server = BrowserUseMcpServer::new();
 
@@ -1551,7 +1556,12 @@ async fn guard_resets_active_page_that_became_disallowed() -> anyhow::Result<()>
         })
         .await?;
 
-    // get_state's guard must reset the now-disallowed active page to about:blank.
+    // The triggering observation must fail; resetting does not resume it.
+    let denied = mcp
+        .call_browser_tool(call("browser_get_state", json!({})))
+        .await?;
+    assert!(denied.is_error.unwrap_or(false));
+    // A subsequent explicit observation sees the reset blank page.
     let state = mcp
         .call_browser_tool(call("browser_get_state", json!({})))
         .await?

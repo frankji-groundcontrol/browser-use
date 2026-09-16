@@ -74,7 +74,7 @@ fn validate_tool(name: &str, parameters: &Value) -> Result<()> {
     }
     Ok(())
 }
-fn validate(req: &CompletionRequest) -> Result<()> {
+pub(crate) fn validate(req: &CompletionRequest) -> Result<()> {
     for t in &req.tools {
         validate_tool(&t.name, &t.parameters)?;
     }
@@ -121,7 +121,7 @@ fn build_chat(config: &LlmConfig, req: CompletionRequest) -> Result<Value> {
             }
         }
     }
-    let mut out = json!({"model": config.model, "messages": messages});
+    let mut out = json!({"model": config.model, "messages": messages, "max_completion_tokens": config.max_tokens});
     if let Some(t) = config.temperature {
         out["temperature"] = json!(t);
     }
@@ -154,7 +154,8 @@ fn build_responses(config: &LlmConfig, req: CompletionRequest) -> Result<Value> 
         .into_iter()
         .flat_map(response_input)
         .collect::<Vec<_>>();
-    let mut out = json!({"model": config.model, "input": input});
+    let mut out =
+        json!({"model": config.model, "input": input, "max_output_tokens": config.max_tokens});
     if let Some(t) = config.temperature {
         out["temperature"] = json!(t);
     }
@@ -275,6 +276,14 @@ fn parse_chat(body: &str) -> Result<Completion> {
 }
 fn parse_resp(body: &str) -> Result<Completion> {
     let v: Value = serde_json::from_str(body).context("failed to parse responses body")?;
+    if v.get("error").is_some_and(|error| !error.is_null())
+        || matches!(
+            v["status"].as_str(),
+            Some("incomplete" | "failed" | "cancelled")
+        )
+    {
+        return Err(anyhow!("LLM response did not complete"));
+    }
     let mut text = String::new();
     let mut calls = Vec::new();
     for i in v["output"].as_array().into_iter().flatten() {
@@ -368,6 +377,19 @@ fn usage(v: &Value, inp: &str, out: &str) -> Option<TokenUsage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn typed_responses_reject_incomplete_results_and_include_output_budget() {
+        assert!(parse_resp(r#"{"status":"incomplete","output":[]}"#).is_err());
+        for (api, key) in [
+            (LlmApi::OpenAiChat, "max_completion_tokens"),
+            (LlmApi::OpenAiResponses, "max_output_tokens"),
+        ] {
+            let body =
+                build_request(&cfg(api), vec![crate::message("user", "hello")].into()).unwrap();
+            assert_eq!(body[key], 100);
+        }
+    }
+
     fn cfg(api: LlmApi) -> LlmConfig {
         LlmConfig {
             api_key: "k".into(),

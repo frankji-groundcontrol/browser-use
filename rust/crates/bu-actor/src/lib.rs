@@ -49,6 +49,7 @@ pub struct BrowserStateSnapshot {
 #[derive(Debug, Clone)]
 pub struct ActorHandle {
     tx: mpsc::Sender<Command>,
+    shutdown_tx: mpsc::UnboundedSender<Reply<bool>>,
 }
 
 /// Result of an index-based click.
@@ -75,22 +76,24 @@ impl ActorHandle {
 
     fn spawn_with_observer(launch_counter: Option<Arc<AtomicUsize>>) -> Self {
         let (tx, rx) = mpsc::channel(64);
+        let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
-            BrowserActor::new(launch_counter).run(rx).await;
+            BrowserActor::new(launch_counter).run(rx, shutdown_rx).await;
         });
-        Self { tx }
+        Self { tx, shutdown_tx }
     }
 
     /// Spawns an actor with an explicit per-command timeout (deterministic tests).
     #[cfg(feature = "live-chrome")]
     pub fn spawn_with_command_timeout(timeout: std::time::Duration) -> Self {
         let (tx, rx) = mpsc::channel(64);
+        let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             let mut actor = BrowserActor::new(None);
             actor.command_timeout = timeout;
-            actor.run(rx).await;
+            actor.run(rx, shutdown_rx).await;
         });
-        Self { tx }
+        Self { tx, shutdown_tx }
     }
 
     /// Changes the timeout after browser startup in live tests, avoiding a slow
@@ -264,6 +267,16 @@ impl ActorHandle {
     /// Closes all sessions.
     pub async fn close_all(&self) -> Result<bool> {
         self.request(|reply| Command::CloseAll { reply }).await
+    }
+
+    /// Stops the actor, cancelling a wedged command and bypassing queued work.
+    /// Callers await owned-browser reaping before shutting down their runtime.
+    pub async fn shutdown(&self) -> Result<bool> {
+        let (reply, response) = oneshot::channel();
+        self.shutdown_tx
+            .send(reply)
+            .map_err(|_| anyhow!("browser actor stopped"))?;
+        response.await.context("browser actor dropped shutdown")?
     }
 
     /// Evaluates JavaScript in live Chrome tests without exposing an MCP tool.
@@ -443,24 +456,37 @@ impl BrowserActor {
         }
     }
 
-    async fn run(mut self, mut rx: mpsc::Receiver<Command>) {
-        while let Some(command) = rx.recv().await {
-            // Cancelling the dispatch future on timeout drops its reply sender,
-            // so the caller gets an error and the actor moves to the next command.
+    async fn run(
+        mut self,
+        mut rx: mpsc::Receiver<Command>,
+        mut shutdown: mpsc::UnboundedReceiver<Reply<bool>>,
+    ) {
+        loop {
+            let command = tokio::select! {
+                biased;
+                Some(reply) = shutdown.recv() => {
+                    rx.close();
+                    let _ = reply.send(self.close_all().await);
+                    return;
+                }
+                command = rx.recv() => match command { Some(command) => command, None => break },
+            };
             let timeout = self.command_timeout;
-            if tokio::time::timeout(timeout, self.dispatch(command))
-                .await
-                .is_err()
-            {
-                // A cancelled command left the page unverified mid-flight, so the
-                // cached index -> node mapping can no longer be trusted.
-                self.selector_cache.clear();
-                tracing::warn!("browser command timed out; dropping it and continuing");
+            tokio::select! {
+                biased;
+                Some(reply) = shutdown.recv() => {
+                    rx.close();
+                    let _ = reply.send(self.close_all().await);
+                    return;
+                }
+                result = tokio::time::timeout(timeout, self.dispatch(command)) => {
+                    if result.is_err() {
+                        self.selector_cache.clear();
+                        tracing::warn!("browser command timed out; dropping it and continuing");
+                    }
+                }
             }
         }
-        // Host dropped every ActorHandle (MCP stdio closed, process exiting).
-        // Without an explicit close(), Chromium can outlive us as an orphan and
-        // keep hundreds of FDs open until the next launch's profile sweep.
         if let Err(error) = self.close_all().await {
             tracing::warn!(%error, "failed to close browser on actor shutdown");
         }
@@ -508,11 +534,12 @@ impl BrowserActor {
                 let _ = reply.send(self.click(index, new_tab).await);
             }
             Command::ClickCoordinates { x, y, reply } => {
-                self.guard_active_url().await;
-                let result = match self.active_page().await {
-                    Ok(page) => page.click_coordinates(x, y).await,
-                    Err(e) => Err(e),
-                };
+                let result = async {
+                    self.guard_active_url().await?;
+                    self.active_page().await?.click_coordinates(x, y).await
+                }
+                .await;
+                self.selector_cache.clear();
                 let _ = reply.send(result);
             }
             Command::Type { index, text, reply } => {
@@ -528,11 +555,11 @@ impl BrowserActor {
                 let _ = reply.send(self.select_option(index, value, label, option_index).await);
             }
             Command::Scroll { direction, reply } => {
-                self.guard_active_url().await;
-                let result = match self.active_page().await {
-                    Ok(page) => page.scroll(&direction).await,
-                    Err(e) => Err(e),
-                };
+                let result = async {
+                    self.guard_active_url().await?;
+                    self.active_page().await?.scroll(&direction).await
+                }
+                .await;
                 self.selector_cache.clear();
                 let _ = reply.send(result);
             }
@@ -587,17 +614,18 @@ impl BrowserActor {
 
     /// Navigates back and invalidates the selector cache (the document changed).
     async fn go_back(&mut self) -> Result<()> {
+        self.guard_active_url().await?;
         let page = self.active_page().await?;
         page.go_back().await?;
         self.selector_cache.clear();
         // History may hold a disallowed URL; reset it if so.
-        self.guard_active_url().await;
+        self.guard_active_url().await?;
         Ok(())
     }
 
     /// Returns current page metadata, resetting a disallowed active page first.
     async fn page_state(&mut self) -> Result<PageState> {
-        self.guard_active_url().await;
+        self.guard_active_url().await?;
         self.active_page().await?.state().await
     }
 
@@ -648,25 +676,28 @@ impl BrowserActor {
         Ok(())
     }
 
-    /// Enforcement point #4: catch a disallowed URL reached by ANY path (a DOM
-    /// click that navigated, JS `window.open`/`location=`, a redirect) at the
-    /// observation boundary, resetting it to about:blank so disallowed content is
-    /// never returned. Best-effort; mirrors Python's on_NavigationCompleteEvent.
-    async fn guard_active_url(&mut self) {
-        if self.policy.is_unrestricted() || self.page.is_none() {
-            return;
+    /// Resolve even the first attached tab before checking policy. Unreadable
+    /// state is not proof of permission, and a denied action never resumes after
+    /// resetting the tab; the caller must request a new observation.
+    async fn guard_active_url(&mut self) -> Result<()> {
+        if self.policy.is_unrestricted() {
+            return Ok(());
         }
-        let Ok(page) = self.active_page().await else {
-            return;
-        };
-        let Ok(state) = page.state().await else {
-            return;
-        };
+        let page = self.active_page().await?;
+        let state = page
+            .state()
+            .await
+            .context("cannot verify active page URL")?;
         if !self.policy.is_url_allowed(&state.url) {
-            tracing::warn!(url = %state.url, "resetting disallowed page to about:blank (security policy)");
-            let _ = page.navigate("about:blank").await;
             self.selector_cache.clear();
+            page.navigate("about:blank")
+                .await
+                .context("security policy denied page; failed to reset it")?;
+            return Err(anyhow!(
+                "active page blocked by security policy; reset to about:blank"
+            ));
         }
+        Ok(())
     }
 
     async fn get_state(&mut self, include_screenshot: bool) -> Result<BrowserStateSnapshot> {
@@ -677,7 +708,7 @@ impl BrowserActor {
         // stale index behind for a later click/type. Safe because the actor owns
         // the browser exclusively, so nothing observes the empty window.
         self.selector_cache.clear();
-        self.guard_active_url().await;
+        self.guard_active_url().await?;
         let page = self.active_page().await?;
         let state = page.state().await?;
         let elements = page.selector_map().await?;
@@ -702,9 +733,10 @@ impl BrowserActor {
     }
 
     async fn click(&mut self, index: usize, new_tab: bool) -> Result<ClickOutcome> {
-        self.guard_active_url().await;
+        self.guard_active_url().await?;
         let backend_node_id = self.backend_node_id_for_index(index).await?;
         let href = self.selector_cache.href_for_index(index);
+        self.guard_active_url().await?;
         let page = self.active_page().await?;
 
         if new_tab {
@@ -712,7 +744,7 @@ impl BrowserActor {
                 let url = page.resolve_url(&href).await?;
                 // Enforcement point #3: block disallowed new-tab targets.
                 self.ensure_url_allowed(&url)?;
-                self.new_active_page().await?.navigate(&url).await?;
+                self.navigate(&url, true).await?;
                 self.selector_cache.clear();
                 return Ok(ClickOutcome::OpenedNewTab(url));
             }
@@ -727,14 +759,16 @@ impl BrowserActor {
     }
 
     async fn type_text(&mut self, index: usize, text: &str) -> Result<()> {
-        self.guard_active_url().await;
+        self.guard_active_url().await?;
         let backend_node_id = self.backend_node_id_for_index(index).await?;
+        self.guard_active_url().await?;
         let page = self.active_page().await?;
         page.clear_backend_node_id(backend_node_id).await?;
         if text.is_empty() {
             self.selector_cache.clear();
             return Ok(());
         }
+        self.guard_active_url().await?;
         let result = page.type_into_backend_node_id(backend_node_id, text).await;
         self.selector_cache.clear();
         result
@@ -747,8 +781,9 @@ impl BrowserActor {
         label: Option<String>,
         option_index: Option<usize>,
     ) -> Result<SelectOptionOutcome> {
-        self.guard_active_url().await;
+        self.guard_active_url().await?;
         let backend_node_id = self.backend_node_id_for_index(index).await?;
+        self.guard_active_url().await?;
         let page = self.active_page().await?;
         let result = page
             .select_option_backend_node_id(
@@ -763,7 +798,7 @@ impl BrowserActor {
     }
 
     async fn screenshot(&mut self, full_page: bool, format: ScreenshotFormat) -> Result<Vec<u8>> {
-        self.guard_active_url().await;
+        self.guard_active_url().await?;
         self.active_page()
             .await?
             .screenshot_image(full_page, format)
@@ -771,12 +806,12 @@ impl BrowserActor {
     }
 
     async fn read_clipboard(&mut self) -> Result<String> {
-        self.guard_active_url().await;
+        self.guard_active_url().await?;
         self.active_page().await?.read_clipboard().await
     }
 
     async fn set_viewport(&mut self, width: u32, height: u32, mobile: bool) -> Result<()> {
-        self.guard_active_url().await;
+        self.guard_active_url().await?;
         self.active_page()
             .await?
             .set_viewport(width, height, mobile)
@@ -784,7 +819,7 @@ impl BrowserActor {
     }
 
     async fn get_html(&mut self, selector: Option<&str>) -> Result<String> {
-        self.guard_active_url().await;
+        self.guard_active_url().await?;
         let page = self.active_page().await?;
         if let Some(selector) = selector {
             let exists = page.query_selector_exists(selector).await?;
@@ -814,7 +849,7 @@ impl BrowserActor {
         self.page = Some(page);
         self.selector_cache.clear();
         // Reset the tab if it (e.g. a JS-opened tab) is on a disallowed URL.
-        self.guard_active_url().await;
+        self.guard_active_url().await?;
         self.active_page().await?.state().await
     }
 
@@ -831,7 +866,7 @@ impl BrowserActor {
 
         self.selector_cache.clear();
         // Reset a disallowed active page before returning its URL.
-        self.guard_active_url().await;
+        self.guard_active_url().await?;
         let current_url = match self.page.as_ref() {
             Some(page) => page
                 .state()
@@ -844,8 +879,11 @@ impl BrowserActor {
     }
 
     async fn list_sessions(&mut self) -> Result<Option<String>> {
+        if self.session.is_none() {
+            return Ok(None);
+        }
         // Reset a disallowed active page before surfacing its URL.
-        self.guard_active_url().await;
+        self.guard_active_url().await?;
         let Some(page) = self.page.as_ref() else {
             return Ok(None);
         };
@@ -878,6 +916,7 @@ impl BrowserActor {
 
     #[cfg(feature = "live-chrome")]
     async fn evaluate(&mut self, script: &str) -> Result<serde_json::Value> {
+        self.guard_active_url().await?;
         self.active_page().await?.evaluate_json(script).await
     }
 
@@ -979,3 +1018,6 @@ impl SelectorCache {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "live-chrome"))]
+mod policy_tests;

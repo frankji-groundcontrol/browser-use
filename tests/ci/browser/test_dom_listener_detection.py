@@ -11,7 +11,7 @@ from browser_use.browser.profile import BrowserProfile
 from browser_use.browser.session import BrowserSession
 from browser_use.browser.watchdogs import dom_watchdog
 from browser_use.browser.watchdogs.dom_watchdog import DOMWatchdog
-from browser_use.dom.service import _MAX_JS_CLICK_LISTENER_ELEMENTS, DomService
+from browser_use.dom.service import _DESCRIBE_NODE_BATCH_SIZE, _MAX_JS_CLICK_LISTENER_ELEMENTS, DomService
 
 
 @pytest.fixture
@@ -20,6 +20,45 @@ async def browser_session():
 	await session.start()
 	yield session
 	await session.kill()
+
+
+async def test_accessibility_frame_fanout_is_bounded(httpserver, browser_session: BrowserSession):
+	"""Count real CDP requests to prove both total work and concurrent work are bounded."""
+	frame_count = _DESCRIBE_NODE_BATCH_SIZE + 3
+	httpserver.expect_request('/frames').respond_with_data(
+		'<html><body>' + '<iframe srcdoc="<button>Child</button>"></iframe>' * frame_count + '</body></html>',
+		content_type='text/html',
+	)
+	await browser_session.navigate_to(httpserver.url_for('/frames'))
+	cdp_session = await browser_session.get_or_create_cdp_session()
+	frame_tree = await cdp_session.cdp_client.send.Page.getFrameTree(session_id=cdp_session.session_id)
+	assert len(frame_tree['frameTree'].get('childFrames', [])) == frame_count
+	original_send_raw = cdp_session.cdp_client.send_raw
+	active = peak = calls = 0
+
+	async def counted_send_raw(method, params=None, session_id=None):
+		nonlocal active, peak, calls
+		if method != 'Accessibility.getFullAXTree':
+			return await original_send_raw(method=method, params=params, session_id=session_id)
+		active += 1
+		peak = max(peak, active)
+		calls += 1
+		try:
+			return await original_send_raw(method=method, params=params, session_id=session_id)
+		finally:
+			active -= 1
+
+	cdp_session.cdp_client.send_raw = counted_send_raw
+	try:
+		for limit, depth, expected in ((3, 1, 3), (frame_count, 0, 1), (frame_count, 1, frame_count)):
+			calls = peak = 0
+			service = DomService(browser_session, max_iframes=limit, max_iframe_depth=depth)
+			result = await service._get_ax_tree_for_all_frames(cdp_session.target_id)
+			assert result['nodes']
+			assert calls == expected
+			assert peak <= _DESCRIBE_NODE_BATCH_SIZE
+	finally:
+		cdp_session.cdp_client.send_raw = original_send_raw
 
 
 async def test_listener_detection_preserves_small_pages_and_skips_cdp_fanout(httpserver, browser_session: BrowserSession):

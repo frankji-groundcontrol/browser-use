@@ -15,6 +15,7 @@ use crate::responses::ResponsesRequest;
 pub(crate) struct ChatCompletionRequest {
     model: String,
     messages: Vec<ChatMessage>,
+    max_completion_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
 }
@@ -27,6 +28,7 @@ pub(crate) fn build_chat_request(
     ChatCompletionRequest {
         model: config.model.clone(),
         messages,
+        max_completion_tokens: config.max_tokens,
         temperature: config.temperature,
     }
 }
@@ -36,7 +38,9 @@ pub(crate) fn build_responses_request(
     config: &LlmConfig,
     messages: Vec<ChatMessage>,
 ) -> ResponsesRequest {
-    ResponsesRequest::new(config.model.clone(), messages, config.temperature)
+    let mut request = ResponsesRequest::new(config.model.clone(), messages, config.temperature);
+    request.max_output_tokens = Some(config.max_tokens);
+    request
 }
 
 #[derive(Debug, Deserialize)]

@@ -6,13 +6,9 @@
 
 use anyhow::{Context, Result};
 use bu_actor::ActorHandle;
-use bu_llm::{LlmClient, LlmProvider};
+use bu_llm::LlmProvider;
 
 use crate::cli::RunOptions;
-
-/// Best-effort browser shutdown budget. Short on purpose: the answer is already
-/// computed by this point, so the caller should not wait on cleanup.
-const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub async fn run_task(options: RunOptions) -> Result<()> {
     // Set before the actor spawns: headless-ness is read from the environment
@@ -24,7 +20,7 @@ pub async fn run_task(options: RunOptions) -> Result<()> {
     let config = bu_llm::LlmConfig::from_env_with_model_override(options.model)
         .context("could not resolve LLM configuration")?;
     let model = config.model.clone();
-    let provider: LlmProvider = LlmClient::new(config)?.into();
+    let provider: LlmProvider = LlmProvider::from_config(config).await?;
 
     eprintln!("· model {model}, up to {} steps", options.max_steps);
 
@@ -38,16 +34,12 @@ pub async fn run_task(options: RunOptions) -> Result<()> {
     )
     .await;
 
-    // Bounded, because a browser that already died makes this block for the
-    // full command timeout — 90 seconds of silence *after* the answer is ready.
-    // The answer is what the caller wants; cleanup is best-effort, and the
-    // actor's orphan sweep reclaims anything left behind.
-    if tokio::time::timeout(CLOSE_TIMEOUT, actor.close_all())
+    // Prioritized shutdown cancels pending work and reaps owned Chromium before
+    // the runtime exits, including on unsuccessful agent reports.
+    actor
+        .shutdown()
         .await
-        .is_err()
-    {
-        // Not an error worth the caller's attention; the sweep handles it.
-    }
+        .context("failed to shut down browser")?;
 
     // The report goes to stdout so it can be piped; progress notes went to
     // stderr above for the same reason.
@@ -67,7 +59,7 @@ pub async fn run_task(options: RunOptions) -> Result<()> {
     // Exit non-zero when the agent did not succeed, so the CLI composes with
     // shell control flow instead of always looking like it worked.
     if !report.success {
-        std::process::exit(1);
+        anyhow::bail!("agent did not complete successfully");
     }
     Ok(())
 }

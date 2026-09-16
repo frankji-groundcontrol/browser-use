@@ -56,6 +56,9 @@ impl UrlPolicy {
             Err(_) => return false,
         };
 
+        if url.contains('\\') {
+            return false;
+        }
         let scheme = parsed.scheme();
         // data: and blob: URLs have no host.
         if scheme == "data" || scheme == "blob" {
@@ -95,60 +98,45 @@ impl UrlPolicy {
 
 /// Mirrors `SecurityWatchdog._is_url_match`.
 fn is_url_match(url: &str, host: &str, scheme: &str, pattern: &str) -> bool {
-    let full_url_pattern = format!("{scheme}://{host}");
-
-    if pattern.contains('*') {
-        if let Some(domain_part) = pattern.strip_prefix("*.") {
-            // *.example.com matches subdomains AND the main domain, http(s) only.
-            if (host == domain_part || host.ends_with(&format!(".{domain_part}")))
-                && (scheme == "http" || scheme == "https")
-            {
-                return true;
-            }
-        } else if pattern.ends_with("/*") {
-            if glob_match(pattern, url) {
-                return true;
-            }
-        } else {
-            let target = if pattern.contains("://") {
-                full_url_pattern.as_str()
-            } else {
-                host
-            };
-            if glob_match(pattern, target) {
-                return true;
-            }
+    if let Some((scheme_pattern, authority_path)) = pattern.split_once("://") {
+        if pattern.contains('\\') || !glob_match(&scheme_pattern.to_ascii_lowercase(), scheme) {
+            return false;
         }
-        false
-    } else if pattern.contains("://") {
-        // Full-URL prefix with authority/path boundaries. A raw starts_with
-        // would let `https://example.com.evil` match `https://example.com`.
-        let Ok(expected) = Url::parse(pattern) else {
+        let Ok(expected) = Url::parse(&format!("{scheme}://{authority_path}")) else {
             return false;
         };
         let Ok(actual) = Url::parse(url) else {
             return false;
         };
-        if expected.scheme() != actual.scheme()
-            || expected.host_str() != actual.host_str()
+        let Some(expected_host) = expected.host_str() else {
+            return false;
+        };
+        if !expected.username().is_empty()
+            || expected.password().is_some()
+            || !glob_match(expected_host, host)
             || expected.port_or_known_default() != actual.port_or_known_default()
+            || expected.query().is_some_and(|q| Some(q) != actual.query())
+            || expected
+                .fragment()
+                .is_some_and(|f| Some(f) != actual.fragment())
         {
             return false;
         }
-        let expected_path = expected.path().trim_end_matches('/');
-        let actual_path = actual.path();
-        (actual_path == expected_path || actual_path.starts_with(&format!("{expected_path}/")))
-            && actual
-                .query()
-                .is_none_or(|query| expected.query().is_none() || Some(query) == expected.query())
-    } else {
-        // Domain-only, case-insensitive.
-        let pattern_lower = pattern.to_ascii_lowercase();
-        if host == pattern_lower {
-            return true;
+        if expected.path().contains('*') {
+            return glob_match(expected.path(), actual.path());
         }
-        is_root_domain(pattern) && host == format!("www.{pattern_lower}")
+        let path = expected.path().trim_end_matches('/');
+        return actual.path() == path || actual.path().starts_with(&format!("{path}/"));
     }
+    let pattern = pattern.to_ascii_lowercase();
+    if let Some(domain) = pattern.strip_prefix("*.") {
+        return matches!(scheme, "http" | "https")
+            && (host == domain || host.ends_with(&format!(".{domain}")));
+    }
+    if pattern.contains('*') {
+        return glob_match(&pattern, host);
+    }
+    host == pattern || (is_root_domain(&pattern) && host == format!("www.{pattern}"))
 }
 
 /// A simple root domain (exactly one dot, no wildcard/scheme) — mirrors
@@ -353,6 +341,24 @@ mod tests {
     }
 
     #[test]
+    fn full_url_components_cannot_be_omitted_or_reinterpreted() {
+        let scoped = policy(&["https://example.com/safe?scope=a#part"]);
+        assert!(scoped.is_url_allowed("https://user:secret@example.com/safe?scope=a#part"));
+        assert!(scoped.is_url_allowed("https://example.com/safe?scope=a#part"));
+        for url in [
+            "https://example.com/safe",
+            "https://example.com/safe?scope=b#part",
+            "https://example.com/safe?scope=a#other",
+            "https://example.com/safe/%2e%2e/private?scope=a#part",
+        ] {
+            assert!(!scoped.is_url_allowed(url), "accepted {url}");
+        }
+        assert!(
+            !policy(&["https://user@example.com/safe"]).is_url_allowed("https://example.com/safe")
+        );
+    }
+
+    #[test]
     fn prohibited_list_blocks_only_matches() {
         let p = UrlPolicy {
             prohibited_domains: vec!["evil.com".into()],
@@ -381,6 +387,22 @@ mod tests {
     fn invalid_url_is_rejected_under_a_policy() {
         let p = policy(&["example.com"]);
         assert!(!p.is_url_allowed("not a url"));
+    }
+
+    #[test]
+    fn full_url_globs_cannot_cross_authority() {
+        let policy = UrlPolicy {
+            allowed_domains: vec!["http*://*.example.com/safe/*".into()],
+            ..Default::default()
+        };
+        assert!(policy.is_url_allowed("https://sub.example.com/safe/page"));
+        for url in [
+            "https://evil.test/?next=.example.com/safe/page",
+            "https://sub.example.com:8443/safe/page",
+            "https://sub.example.com/safe/../private",
+        ] {
+            assert!(!policy.is_url_allowed(url), "{url}");
+        }
     }
 
     #[test]

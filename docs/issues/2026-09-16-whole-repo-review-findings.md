@@ -102,7 +102,7 @@ represented as a pass.
 
 The hardening plan in
 [`docs/plans/2026-09-16-hardening-review-findings/2026-09-16-hardening-review-findings.md`](../plans/2026-09-16-hardening-review-findings/2026-09-16-hardening-review-findings.md)
-implemented every retained finding. The original observations above remain as
+implemented fixes across all packages. RST-04 Bedrock Converse typed tools and streaming are fixture-proven; live AWS remains blocked. The original observations above remain as
 historical evidence; this table records the final disposition and reproducible
 proof.
 
@@ -112,18 +112,19 @@ proof.
 | SEC-02 / RST-01 | Fixed and proven | Rust actor guards every mutating action immediately before dispatch; MCP live policy/action tests pass in the all-feature matrix. |
 | SEC-03 | Fixed and proven | Malformed config preservation and owner-only file mode tests pass; writes use mode `0600` and never replace unreadable input. |
 | SEC-04 | Fixed and proven | Telemetry is opt-in, metrics-only by default, and disables task/action/error/URL/geo-IP/autocapture fields; focused data-boundary tests pass. |
-| SEC-05 | Fixed and proven | Cookie injection requires declared domain scope and enforces domain/path boundaries; focused scope regression passes. |
-| REL-01 | Fixed and proven | Setup script resolves the repository root, creates and verifies one environment, and shell syntax checks pass. |
+| SEC-05 | Fixed and proven | Cookie injection requires declared domain/path scope, rejects single-label suffix cookies such as `.com`, and ignores colliding out-of-scope same-name cookies. |
+| REL-01 | Fixed and proven | `bin/setup.sh` cds to the repository root, sets `UV_PROJECT_ENVIRONMENT`, and verifies that Python. `test_setup_script_creates_and_verifies_one_repo_root_environment` drives the shipped script. |
 | REL-02 | Fixed and proven | Release contract tests pass; publish waits for the exact tag and validates source, wheel, and sdist versions before upload. |
 | REL-03 | Fixed and proven | `uv.lock` is tracked and Docker fast/base builds use the pinned lock with `--locked`; lock consistency and static Docker checks pass. Docker daemon execution was unavailable locally. |
 | RST-02 | Fixed and proven | Attach starts the handler before `fetch_targets`; `bu-cdp` live test attaches to a pre-existing browser and preserves external ownership. |
 | RST-03 | Fixed and proven | Architecture and contracts now state the implemented Rust boundary and explicitly reserve empty crates; no full-parity claim remains. |
-| RST-04 | Fixed and proven | Typed completion/stream APIs cover OpenAI Responses/Chat and Anthropic tool calls, retries, timeouts, truncation, and usage fixtures. Bedrock Converse remains text/image-only and returns a tested explicit unsupported error for typed tools/streaming. `bu-llm --all-features`: 61 passed. |
+| RST-04 | Fixed and proven (fixtures); live AWS blocked | `BedrockChatClient::complete`/`stream` send Converse tools, preserve usage, retry on 503, bound timeouts, and decode event-stream tool deltas. Proof: `typed_provider_uses_converse_tools_usage_and_sdk_retry`, `converse_stream_decodes_frames_and_preserves_usage_after_stop`, `bedrock_rejects_truncation_bad_crc_and_timeout`; `bu-llm --features bedrock` 70 passed twice. Real AWS credentials were not used. |
 | RST-05 | Fixed and proven | DevTools resolver accepts raw HTTP/WS endpoints, avoids duplicate `/json/version`, preserves query handling, bounds requests, and redacts capability URLs from errors. |
-| TEST-01 | Fixed and proven | Env-isolated `cargo test --workspace --all-features -- --test-threads=1`: all workspace unit/doc tests passed, including 21 CDP, 37 MCP, 61 LLM, and 9 agent tests. |
-| Candidate lifecycle/DOM items | Fixed and proven | Focused Python actor/lifecycle tests cover stale geometry, drag buttons, concurrent attach, keep-alive ownership, subprocess pipes/reaping, crash target selection, async callbacks, beta timeout/cleanup/cancellation, and bounded frame traversal. Rust close/reap is bounded and MCP live tests pass. |
+| TEST-01 | Fixed and proven | Two agreeing env-isolated `cargo test --workspace --all-features -- --test-threads=1` runs: actor 6, agent 9, CDP 25, LLM 70, MCP 37, plus the live attach/policy subset. |
+| Candidate lifecycle/DOM items | Fixed and proven | Focused Python actor/lifecycle tests cover stale geometry, drag buttons, concurrent attach, keep-alive reconnect after `stop()` (session handlers rebound on the new bus), subprocess pipes/reaping, crash target selection, async callbacks, beta timeout/cleanup/cancellation/child death, and bounded frame traversal. Rust close/reap is bounded and MCP live tests pass. |
 
-External-provider credentials, Docker daemon execution, and a controlled beta
-child-process death harness remain unavailable in this environment. Their
-wire-contract, static, and isolated-fixture checks pass; those unavailable
-external runs are recorded as blocked rather than claimed as live proof.
+External-provider credentials and Docker daemon execution remain unavailable in
+this environment. Their wire-contract, static, and isolated-fixture checks pass;
+those unavailable external runs are recorded as blocked rather than claimed as
+live proof. Beta JSON-RPC child death and framing are proven against the shipped
+`RustSdkClient` using local subprocesses.

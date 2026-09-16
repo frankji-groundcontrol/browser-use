@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 
@@ -21,17 +23,23 @@ pub enum StreamEvent {
 pub(crate) struct SseDecoder {
     line: Vec<u8>,
     data: Vec<String>,
+    event_bytes: usize,
 }
 
 impl SseDecoder {
     pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>> {
         let mut out = Vec::new();
         for &byte in bytes {
+            self.event_bytes += 1;
+            if self.event_bytes > 8 * 1024 * 1024 {
+                return Err(anyhow!("LLM stream event exceeded 8 MiB"));
+            }
             if byte == b'\n' {
                 let line = std::mem::take(&mut self.line);
                 let line = String::from_utf8(line).context("LLM stream contained invalid UTF-8")?;
                 let line = line.strip_suffix('\r').unwrap_or(&line);
                 if line.is_empty() {
+                    self.event_bytes = 0;
                     if !self.data.is_empty() {
                         out.push(self.data.join("\n"));
                         self.data.clear();
@@ -61,7 +69,7 @@ struct PartialTool {
 pub(crate) struct StreamState {
     api: LlmApi,
     text: String,
-    tools: Vec<PartialTool>,
+    tools: BTreeMap<usize, PartialTool>,
     usage: Option<TokenUsage>,
     finish_reason: Option<String>,
     done: bool,
@@ -72,7 +80,7 @@ impl StreamState {
         Self {
             api,
             text: String::new(),
-            tools: Vec::new(),
+            tools: BTreeMap::new(),
             usage: None,
             finish_reason: None,
             done: false,
@@ -83,14 +91,14 @@ impl StreamState {
     }
 
     pub(crate) fn event(&mut self, data: &str, emit: &mut impl FnMut(StreamEvent)) -> Result<()> {
-        if data == "[DONE]" {
+        if data == "[DONE]" && self.api == LlmApi::OpenAiChat {
             self.done = true;
             return Ok(());
         }
         let value: Value =
             serde_json::from_str(data).context("failed to parse LLM stream event")?;
         if value.get("error").is_some() {
-            return Err(anyhow!("LLM stream returned an error: {}", value["error"]));
+            return Err(anyhow!("LLM stream returned a provider error"));
         }
         match self.api {
             LlmApi::OpenAiChat => self.chat_event(&value, emit),
@@ -110,8 +118,10 @@ impl StreamState {
             return Ok(());
         };
         if let Some(reason) = choice["finish_reason"].as_str() {
+            if reason == "length" || reason == "content_filter" {
+                return Err(anyhow!("LLM stream did not complete: {reason}"));
+            }
             self.finish_reason = Some(reason.to_owned());
-            self.done = true;
         }
         if let Some(text) = choice["delta"]["content"].as_str() {
             self.text.push_str(text);
@@ -120,8 +130,7 @@ impl StreamState {
         if let Some(calls) = choice["delta"]["tool_calls"].as_array() {
             for call in calls {
                 let index = call["index"].as_u64().unwrap_or(self.tools.len() as u64) as usize;
-                self.ensure_tool(index);
-                let tool = &mut self.tools[index];
+                let tool = self.ensure_tool(index)?;
                 if let Some(id) = call["id"].as_str() {
                     tool.id = id.to_owned();
                 }
@@ -153,9 +162,8 @@ impl StreamState {
                 let index = value["output_index"]
                     .as_u64()
                     .unwrap_or(self.tools.len() as u64) as usize;
-                self.ensure_tool(index);
                 let args = value["delta"].as_str().unwrap_or_default();
-                self.tools[index].arguments.push_str(args);
+                self.ensure_tool(index)?.arguments.push_str(args);
                 emit(StreamEvent::ToolCallDelta {
                     index,
                     id: None,
@@ -169,12 +177,12 @@ impl StreamState {
                         .as_u64()
                         .unwrap_or(self.tools.len() as u64)
                         as usize;
-                    self.ensure_tool(index);
-                    self.tools[index].id = value["item"]["call_id"]
+                    let tool = self.ensure_tool(index)?;
+                    tool.id = value["item"]["call_id"]
                         .as_str()
                         .unwrap_or_default()
                         .to_owned();
-                    self.tools[index].name = value["item"]["name"]
+                    tool.name = value["item"]["name"]
                         .as_str()
                         .unwrap_or_default()
                         .to_owned();
@@ -189,30 +197,42 @@ impl StreamState {
                         emit(StreamEvent::Usage(usage));
                     }
                     if let Some(output) = response["output"].as_array() {
-                        for item in output.iter().filter(|item| item["type"] == "function_call") {
+                        for (output_index, item) in output
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, item)| item["type"] == "function_call")
+                        {
                             let id = item["call_id"].as_str().unwrap_or_default().to_owned();
                             let index = self
                                 .tools
                                 .iter()
-                                .position(|tool| tool.id == id)
-                                .unwrap_or_else(|| {
-                                    self.tools.push(PartialTool::default());
-                                    self.tools.len() - 1
+                                .find_map(|(index, tool)| (tool.id == id).then_some(*index))
+                                .unwrap_or(output_index);
+                            let tool = self.ensure_tool(index)?;
+                            tool.id = id;
+                            tool.name = item["name"].as_str().unwrap_or_default().to_owned();
+                            let arguments = item["arguments"].as_str().unwrap_or("{}");
+                            let remaining = arguments
+                                .strip_prefix(&tool.arguments)
+                                .ok_or_else(|| {
+                                    anyhow!("final tool arguments differ from streamed arguments")
+                                })?
+                                .to_owned();
+                            tool.arguments = arguments.to_owned();
+                            if !remaining.is_empty() {
+                                emit(StreamEvent::ToolCallDelta {
+                                    index,
+                                    id: Some(tool.id.clone()),
+                                    name: Some(tool.name.clone()),
+                                    arguments: remaining,
                                 });
-                            self.tools[index].id = id;
-                            self.tools[index].name =
-                                item["name"].as_str().unwrap_or_default().to_owned();
-                            self.tools[index].arguments =
-                                item["arguments"].as_str().unwrap_or("{}").to_owned();
-                            emit(StreamEvent::ToolCallDelta {
-                                index,
-                                id: Some(self.tools[index].id.clone()),
-                                name: Some(self.tools[index].name.clone()),
-                                arguments: self.tools[index].arguments.clone(),
-                            });
+                            }
                         }
                     }
                 }
+            }
+            "response.failed" | "response.incomplete" | "error" => {
+                return Err(anyhow!("LLM response stream did not complete"))
             }
             _ => {}
         }
@@ -233,12 +253,12 @@ impl StreamState {
             "content_block_start" => {
                 if value["content_block"]["type"] == "tool_use" {
                     let index = value["index"].as_u64().unwrap_or(self.tools.len() as u64) as usize;
-                    self.ensure_tool(index);
-                    self.tools[index].id = value["content_block"]["id"]
+                    let tool = self.ensure_tool(index)?;
+                    tool.id = value["content_block"]["id"]
                         .as_str()
                         .unwrap_or_default()
                         .to_owned();
-                    self.tools[index].name = value["content_block"]["name"]
+                    tool.name = value["content_block"]["name"]
                         .as_str()
                         .unwrap_or_default()
                         .to_owned();
@@ -252,9 +272,8 @@ impl StreamState {
                         emit(StreamEvent::TextDelta(text.to_owned()));
                     }
                 } else if value["delta"]["type"] == "input_json_delta" {
-                    self.ensure_tool(index);
                     let args = value["delta"]["partial_json"].as_str().unwrap_or_default();
-                    self.tools[index].arguments.push_str(args);
+                    self.ensure_tool(index)?.arguments.push_str(args);
                     emit(StreamEvent::ToolCallDelta {
                         index,
                         id: None,
@@ -266,7 +285,6 @@ impl StreamState {
             "message_delta" => {
                 if let Some(reason) = value["delta"]["stop_reason"].as_str() {
                     self.finish_reason = Some(reason.to_owned());
-                    self.done = true;
                     if reason == "max_tokens" {
                         return Err(anyhow!("Anthropic stream truncated at max_tokens"));
                     }
@@ -288,10 +306,11 @@ impl StreamState {
         Ok(())
     }
 
-    fn ensure_tool(&mut self, index: usize) {
-        while self.tools.len() <= index {
-            self.tools.push(PartialTool::default());
+    fn ensure_tool(&mut self, index: usize) -> Result<&mut PartialTool> {
+        if self.tools.len() >= 1024 && !self.tools.contains_key(&index) {
+            return Err(anyhow!("LLM stream exceeded 1024 tool calls"));
         }
+        Ok(self.tools.entry(index).or_default())
     }
 
     pub(crate) fn finish(self) -> Result<Completion> {
@@ -300,13 +319,20 @@ impl StreamState {
         }
         let tool_calls = self
             .tools
-            .into_iter()
+            .into_values()
             .map(|tool| {
+                if tool.id.is_empty() || tool.name.is_empty() {
+                    return Err(anyhow!("tool call is missing its id or name"));
+                }
+                let arguments: Value = serde_json::from_str(&tool.arguments)
+                    .context("tool call arguments were not valid JSON")?;
+                if !arguments.is_object() {
+                    return Err(anyhow!("tool call arguments must be an object"));
+                }
                 Ok(ToolCall {
                     id: tool.id,
                     name: tool.name,
-                    arguments: serde_json::from_str(&tool.arguments)
-                        .context("tool call arguments were not valid JSON")?,
+                    arguments,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -323,14 +349,24 @@ fn parse_openai_usage(value: &Value) -> Option<TokenUsage> {
     Some(TokenUsage {
         input_tokens: value["prompt_tokens"].as_u64()?,
         output_tokens: value["completion_tokens"].as_u64()?,
-        total_tokens: value["total_tokens"].as_u64().unwrap_or(0),
+        total_tokens: value["total_tokens"].as_u64().unwrap_or_else(|| {
+            value["prompt_tokens"]
+                .as_u64()
+                .unwrap_or(0)
+                .saturating_add(value["completion_tokens"].as_u64().unwrap_or(0))
+        }),
     })
 }
 fn parse_responses_usage(value: &Value) -> Option<TokenUsage> {
     Some(TokenUsage {
         input_tokens: value["input_tokens"].as_u64()?,
         output_tokens: value["output_tokens"].as_u64()?,
-        total_tokens: value["total_tokens"].as_u64().unwrap_or(0),
+        total_tokens: value["total_tokens"].as_u64().unwrap_or_else(|| {
+            value["input_tokens"]
+                .as_u64()
+                .unwrap_or(0)
+                .saturating_add(value["output_tokens"].as_u64().unwrap_or(0))
+        }),
     })
 }
 fn parse_anthropic_usage(value: &serde_json::Map<String, Value>) -> Option<TokenUsage> {

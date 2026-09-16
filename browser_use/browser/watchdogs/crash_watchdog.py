@@ -74,8 +74,7 @@ class CrashWatchdog(BaseWatchdog):
 
 	async def on_TabCreatedEvent(self, event: TabCreatedEvent) -> None:
 		"""Attach to new tab."""
-		assert self.browser_session.agent_focus_target_id is not None, 'No current target ID'
-		await self.attach_to_target(self.browser_session.agent_focus_target_id)
+		await self.attach_to_target(event.target_id)
 
 	async def on_TabClosedEvent(self, event: TabClosedEvent) -> None:
 		"""Clean up tracking when tab closes."""
