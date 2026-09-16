@@ -1,5 +1,6 @@
 import asyncio
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -15,7 +16,7 @@ async def test_page_attaches_once_when_session_is_requested_concurrently():
 	for domain in ('Page', 'DOM', 'Runtime', 'Network'):
 		setattr(client.send, domain, SimpleNamespace(enable=AsyncMock()))
 	session = SimpleNamespace(cdp_client=client)
-	page = Page(session, 'target')
+	page = Page(cast(Any, session), 'target')
 
 	assert await asyncio.gather(page.session_id, page.session_id) == ['sid', 'sid']
 	client.send.Target.attachToTarget.assert_awaited_once()
@@ -27,7 +28,7 @@ async def test_mouse_down_uses_last_moved_position():
 
 	client = SimpleNamespace()
 	client.send = SimpleNamespace(Input=SimpleNamespace(dispatchMouseEvent=AsyncMock()))
-	m = Mouse(SimpleNamespace(cdp_client=client), session_id='sid')
+	m = Mouse(cast(Any, SimpleNamespace(cdp_client=client)), session_id='sid')
 	await m.move(23, 41)
 	await m.down()
 
@@ -40,10 +41,8 @@ async def test_detached_element_reports_actionable_error():
 	from browser_use.actor.element import Element
 
 	client = SimpleNamespace()
-	client.send = SimpleNamespace(
-		DOM=SimpleNamespace(pushNodesByBackendIdsToFrontend=AsyncMock(return_value={'nodeIds': []}))
-	)
-	element = Element(SimpleNamespace(cdp_client=client), 7, 'sid')
+	client.send = SimpleNamespace(DOM=SimpleNamespace(pushNodesByBackendIdsToFrontend=AsyncMock(return_value={'nodeIds': []})))
+	element = Element(cast(Any, SimpleNamespace(cdp_client=client)), 7, 'sid')
 
 	with pytest.raises(RuntimeError, match='detached'):
 		await element._get_node_id()
