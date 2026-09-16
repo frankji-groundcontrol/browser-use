@@ -18,5 +18,7 @@ Date: 2026-09-16
   fixtures that treat `WouldBlock` as EOF will flake on AWS SDK retries.
 - Chrome DevTools `GET /json/new` can return 405; seeding an existing tab with
   the Chromium launch URL is the portable attach proof.
+- A non-interactive SSH session on franky-frank does not load `~/.cargo/env`;
+  `cargo` is missing from `PATH` until that file is sourced.
 
 Related: [hardening changelog](../changelogs/2026-09-16-hardening-review-findings.md), [finding resolutions](../issues/2026-09-16-whole-repo-review-findings.md), [hardening plan](../plans/2026-09-16-hardening-review-findings/2026-09-16-hardening-review-findings.md).

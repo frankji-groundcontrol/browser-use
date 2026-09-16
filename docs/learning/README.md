@@ -1,7 +1,7 @@
 # Learning records
 
 - [2026-09-16 — Hardening lessons from the whole-repository review](2026-09-16-hardening-review-findings.md)
-  — parsed URL boundaries, keep-alive event-bus rebind, blocking HTTP fixtures, and explicit Rust capability boundaries.
+  — parsed URL boundaries, keep-alive event-bus rebind, blocking HTTP fixtures, and non-interactive cargo PATH.
 - [2026-09-16 — Lessons from the whole-repository review](2026-09-16-whole-repo-review.md)
   — default-feature green tests, semantic shell proofs, documentation drift,
   and raw data hidden behind “anonymized” telemetry.

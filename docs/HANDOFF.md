@@ -38,8 +38,9 @@ remain unavailable locally and are recorded as blocked rather than passed.
 
 Recent slice (2026-09-16): Bedrock Converse tools/streaming fixtures, keep-alive
 event-bus rebind, cookie public-suffix rejection, setup-script environment
-proof, DevTools error redaction, and existing-tab attach. The MCP fixture uses
-the explicit `BROWSER_USE_LLM_*` environment surface.
+proof, DevTools error redaction, and existing-tab attach. Pushed `e35b0a882`
+and installed on local, MBP2, and franky-frank; trees are at `7763dece4`. The
+MCP fixture uses the explicit `BROWSER_USE_LLM_*` environment surface.
 
 **The LLM environment surface changed on 2026-08-27 and is a breaking change.**
 Configure the model with `BROWSER_USE_LLM_BASE_URL`, `_API_KEY`, `_API`
