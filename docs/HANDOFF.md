@@ -24,8 +24,10 @@ implemented and fixture-proven (`bu-llm --features bedrock`: 70 tests, twice).
 Keep-alive `stop()`/`start()` rebinds session handlers. Cookie scope rejects
 single-label suffix domains. Setup creates and verifies one repo-root
 environment. See the [hardening plan](plans/2026-09-16-hardening-review-findings/2026-09-16-hardening-review-findings.md).
-The previously deployed source is `b4d67c7e8`; this slice is uncommitted until
-the next install.
+The deployed source is `e35b0a882` on local, MBP2 and franky-frank. Each host
+rebuilt `browser-use-rs` from that commit, installed a fresh inode, and
+answered a sequential MCP `initialize` + `tools/list` with 19 tools (exec
+check exit 1, not 137).
 
 Python Ruff, format, Pyright, focused regressions, package build, release
 contracts, and `tests/ci` (1116 passed, 34 skipped) pass. Rust format, Clippy

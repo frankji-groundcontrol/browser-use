@@ -24,4 +24,8 @@ Clippy, default tests, two agreeing env-isolated all-feature runs (70 LLM tests
 with Bedrock), and live CDP/MCP attach/policy tests. Docker daemon execution
 and real provider credentials were unavailable and remain explicitly blocked.
 
+Installed `e35b0a882` on local, MBP2, and franky-frank after push: each host
+rebuilt the release binary, replaced `~/.local/bin/browser-use-rs` with a fresh
+inode, and probed 19 MCP tools.
+
 Related: [hardening plan](../plans/2026-09-16-hardening-review-findings/2026-09-16-hardening-review-findings.md), [finding resolutions](../issues/2026-09-16-whole-repo-review-findings.md), [learning record](../learning/2026-09-16-hardening-review-findings.md).
