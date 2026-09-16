@@ -2,11 +2,10 @@
 
 The MCP server deployed on this host is a from-scratch **Rust reimplementation**
 of `browser-use --mcp`, living in the Cargo workspace under
-[`rust/`](../../rust) on branch `franky-rust`. It reaches **full parity** with the
-Python MCP surface — `tools/list` is byte-identical (16 tools, same order, 0
-schema diffs, same `readOnlyHint` annotations as upstream's read-only five) —
-and is hardened beyond it. This doc is the map from that code to
-the design described in docs `00`–`11` (which remain the porting oracle).
+[`rust/`](../../rust) on branch `franky-rust`. It exposes 19 MCP tools: the
+shared browser surface plus Rust-specific additions. This is a partial port,
+not byte-identical Python API or implementation parity. Docs `00`–`11` describe
+the Python design; the table below names the Rust runtime boundaries.
 
 The living build log is
 [plans/2026-07-05-rust-rewrite/progress.md](../plans/2026-07-05-rust-rewrite/progress.md);
@@ -17,15 +16,17 @@ the staged plan is [parity-plan.md](../plans/2026-07-05-rust-rewrite/parity-plan
 | Crate | Concern | Design doc |
 | --- | --- | --- |
 | `bu-core` | The `browser-use-rs` binary (`--mcp` entry). | [07](07-mcp-integration.md) |
-| `bu-mcp` | rmcp server: `lib.rs` (16 tool handlers + dispatch), `tools.rs` (tool defs), `tests.rs`. | [04](04-tools-and-action-registry.md), [07](07-mcp-integration.md) |
+| `bu-mcp` | rmcp server: `lib.rs` (19 tool handlers + dispatch), `tools.rs` (tool defs), `tests.rs`. | [04](04-tools-and-action-registry.md), [07](07-mcp-integration.md) |
 | `bu-actor` | Single-owner actor serializing all browser work; URL-policy enforcement; per-command timeout. | [00](00-system-overview.md), [02](02-event-bus-and-watchdogs.md), [08](08-actor-scripting-api.md) |
 | `bu-cdp` | Chromium via `chromiumoxide`: `lib.rs` (`BrowserSession`/`BrowserPage`), `dom.rs` (three-tree fusion + filtering), `geometry.rs` (`Rect`/`RectUnion`), `security.rs` (`UrlPolicy`), `discovery.rs` (Chromium/env). | [01](01-cdp-transport-and-session-manager.md), [03](03-dom-perception-pipeline.md) |
 | `bu-agent` | Perceive→decide→act loop: `action.rs` (multi-action + reasoning schema), `lib.rs` (loop + vision), `report.rs`. | [05](05-agent-control-loop.md) |
 | `bu-llm` | Provider-agnostic LLM: `message.rs` (multimodal), `openai.rs` (client + retry), `bedrock.rs` (feature-gated), `LlmProvider` enum. | [06](06-llm-provider-abstraction.md) |
 | `bu-dom` | `extract_clean_markdown` for `browser_extract_content`. | [03](03-dom-perception-pipeline.md) |
+| `bu-bus`, `bu-config`, `bu-session`, `bu-tools` | Reserved empty crates, not runtime implementations. Their proposed responsibilities currently live in `bu-actor`, `bu-cdp`, `bu-llm`, and `bu-mcp`; do not depend on them for functionality. | — |
 
-No production file is oversized; each crate is a single concern and tests live in
-sibling `tests.rs` / `live_tests.rs` files.
+Several implementation files exceed the repository's preferred module size.
+Tests live in sibling `tests.rs` / `live_tests.rs` files. A crate name alone is
+not evidence that the corresponding Python subsystem has been ported.
 
 ## Concurrency: the single-owner actor
 
@@ -107,11 +108,10 @@ adversarial verification surfaced.
 
 ## Hardening provenance
 
-A 10-dimension adversarial audit (each finding cross-examined by 3 lenses)
-surfaced 33 confirmed defects; three verification rounds on the fixes found 7
-more; a re-run of the initially-failed DOM-filtering dimension found 5 more — all
-closed, and the reasoned-only fixes are now covered by executed tests. See
-[progress.md](../plans/2026-07-05-rust-rewrite/progress.md).
+Historical audits and fixes are recorded in
+[progress.md](../plans/2026-07-05-rust-rewrite/progress.md). Current acceptance is
+tracked by the [hardening plan](../plans/2026-09-16-hardening-review-findings/2026-09-16-hardening-review-findings.md);
+historical test counts do not establish current or full parity.
 
 ## Build, test, deploy
 

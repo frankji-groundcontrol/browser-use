@@ -1,5 +1,11 @@
 # Learning records
 
+- [2026-09-16 — Hardening lessons from the whole-repository review](2026-09-16-hardening-review-findings.md)
+  — parsed URL boundaries, bounded shutdown, isolated provider tests, and explicit Rust capability boundaries.
+- [2026-09-16 — Lessons from the whole-repository review](2026-09-16-whole-repo-review.md)
+  — default-feature green tests, semantic shell proofs, documentation drift,
+  and raw data hidden behind “anonymized” telemetry.
+
 Reusable lessons captured from tasks: what was learned, the evidence, its scope,
 and when to apply it again. One dated file (or dated folder) per lesson.
 

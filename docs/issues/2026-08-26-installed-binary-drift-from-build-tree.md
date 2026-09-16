@@ -54,7 +54,7 @@ per [practices/deploy-browser-use-rs.md](../practices/deploy-browser-use-rs.md)
 ```bash
 # The check that git cannot do for you, run per host:
 shasum -a256 ~/.local/bin/browser-use-rs \
-             ~/Softwares/browser-use/rust/target/release/browser-use-rs
+             ~/Software/browser-use/rust/target/release/browser-use-rs
 ```
 
 Post-deploy the two hashes matched (`915114e4…`), `codesign -v` returned 0, and

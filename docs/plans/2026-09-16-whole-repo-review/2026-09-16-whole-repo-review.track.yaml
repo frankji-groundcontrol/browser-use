@@ -1,0 +1,31 @@
+version: 2
+task: Adversarial evidence-driven whole-repository code review
+coordinator: Codex
+history_file: 2026-09-16-whole-repo-review.track.history.jsonl
+main:
+  outcome: Every tracked production surface has a proven, refuted, or concretely blocked
+    disposition with reproducible evidence
+  owner: Codex
+  status: complete
+  next_evidence: Remediate SEC-01/02/03/04/05 and REL-01/02; complete blocked provider, Docker, and beta-process proofs when those environments are available
+side_tracks: []
+updated_at: '2026-09-16T08:20:00Z'
+plan:
+- step: Inventory and baseline deterministic gates
+  owner: Codex
+  status: complete
+- step: Python production and bridge review
+  owner: python_static_review
+  status: complete
+- step: Rust workspace and CDP review
+  owner: rust_static_review
+  status: complete
+- step: Operations, packaging, CI and documentation review
+  owner: ops_contract_review
+  status: complete
+- step: End-to-end, adversarial and parity proofs
+  owner: Codex
+  status: complete
+- step: Findings synthesis and false-positive review
+  owner: Codex
+  status: complete

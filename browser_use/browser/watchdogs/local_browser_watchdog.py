@@ -195,7 +195,7 @@ class LocalBrowserWatchdog(BaseWatchdog):
 						subprocess.terminate()
 					try:
 						await asyncio.wait_for(subprocess.wait(), timeout=5.0)
-					except asyncio.TimeoutError:
+					except TimeoutError:
 						if subprocess.returncode is None:
 							subprocess.kill()
 						await subprocess.wait()

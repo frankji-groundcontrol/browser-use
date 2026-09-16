@@ -56,7 +56,7 @@ class OldConfig:
 
 	@property
 	def ANONYMIZED_TELEMETRY(self) -> bool:
-		return os.getenv('ANONYMIZED_TELEMETRY', 'true').lower()[:1] in 'ty1'
+		return os.getenv('ANONYMIZED_TELEMETRY', 'false').lower()[:1] in 'ty1'
 
 	@property
 	def BROWSER_USE_CLOUD_SYNC(self) -> bool:
@@ -198,7 +198,7 @@ class FlatEnvConfig(BaseSettings):
 	CDP_LOGGING_LEVEL: str = Field(default='WARNING')
 	BROWSER_USE_DEBUG_LOG_FILE: str | None = Field(default=None)
 	BROWSER_USE_INFO_LOG_FILE: str | None = Field(default=None)
-	ANONYMIZED_TELEMETRY: bool = Field(default=True)
+	ANONYMIZED_TELEMETRY: bool = Field(default=False)
 	BROWSER_USE_CLOUD_SYNC: bool | None = Field(default=None)
 	BROWSER_USE_CLOUD_API_URL: str = Field(default='https://api.browser-use.com')
 	BROWSER_USE_CLOUD_UI_URL: str = Field(default='')
@@ -317,8 +317,7 @@ def load_and_migrate_config(config_path: Path) -> DBStyleConfigJSON:
 		# Create fresh config with defaults
 		config_path.parent.mkdir(parents=True, exist_ok=True)
 		new_config = create_default_config()
-		with open(config_path, 'w') as f:
-			json.dump(new_config.model_dump(), f, indent=2)
+		_write_config(config_path, new_config)
 		return new_config
 
 	try:
@@ -339,22 +338,27 @@ def load_and_migrate_config(config_path: Path) -> DBStyleConfigJSON:
 		new_config = create_default_config()
 
 		# Overwrite with new config
-		with open(config_path, 'w') as f:
-			json.dump(new_config.model_dump(), f, indent=2)
+		_write_config(config_path, new_config)
 
 		logger.debug(f'Created fresh config.json at {config_path}')
 		return new_config
 
 	except Exception as e:
-		logger.error(f'Failed to load config from {config_path}: {e}, creating fresh config')
+		logger.error(f'Failed to load config from {config_path}: {type(e).__name__}, using in-memory defaults')
 		# On any error, create fresh config
 		new_config = create_default_config()
-		try:
-			with open(config_path, 'w') as f:
-				json.dump(new_config.model_dump(), f, indent=2)
-		except Exception as write_error:
-			logger.error(f'Failed to write fresh config: {write_error}')
+		logger.error('Keeping the existing config file unchanged; repair or remove it to regenerate defaults.')
 		return new_config
+
+
+def _write_config(config_path: Path, config: DBStyleConfigJSON) -> None:
+	"""Write configuration with owner-only permissions."""
+	config_path.parent.mkdir(parents=True, exist_ok=True)
+	fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+	with os.fdopen(fd, 'w') as f:
+		if hasattr(os, 'fchmod'):
+			os.fchmod(f.fileno(), 0o600)
+		json.dump(config.model_dump(), f, indent=2)
 
 
 class Config:

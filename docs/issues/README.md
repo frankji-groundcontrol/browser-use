@@ -1,5 +1,9 @@
 # Issue records
 
+- [2026-09-16 — Whole-repository review findings](2026-09-16-whole-repo-review-findings.md)
+  — security, Rust parity, release reliability, and test-quality findings with
+  reproducible evidence and rejected/blocked claims.
+
 Concrete, dated records of implementation issues found and how they were
 resolved (or deferred). Keep each record scoped to one problem with evidence and
 a resolution.

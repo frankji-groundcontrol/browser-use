@@ -121,8 +121,26 @@ fn is_url_match(url: &str, host: &str, scheme: &str, pattern: &str) -> bool {
         }
         false
     } else if pattern.contains("://") {
-        // Full-URL exact prefix.
-        url.starts_with(pattern)
+        // Full-URL prefix with authority/path boundaries. A raw starts_with
+        // would let `https://example.com.evil` match `https://example.com`.
+        let Ok(expected) = Url::parse(pattern) else {
+            return false;
+        };
+        let Ok(actual) = Url::parse(url) else {
+            return false;
+        };
+        if expected.scheme() != actual.scheme()
+            || expected.host_str() != actual.host_str()
+            || expected.port_or_known_default() != actual.port_or_known_default()
+        {
+            return false;
+        }
+        let expected_path = expected.path().trim_end_matches('/');
+        let actual_path = actual.path();
+        (actual_path == expected_path || actual_path.starts_with(&format!("{expected_path}/")))
+            && actual
+                .query()
+                .is_none_or(|query| expected.query().is_none() || Some(query) == expected.query())
     } else {
         // Domain-only, case-insensitive.
         let pattern_lower = pattern.to_ascii_lowercase();
@@ -330,6 +348,8 @@ mod tests {
         let p = policy(&["https://example.com/safe"]);
         assert!(p.is_url_allowed("https://example.com/safe/page"));
         assert!(!p.is_url_allowed("https://example.com/other"));
+        assert!(!p.is_url_allowed("https://example.com.evil/safe"));
+        assert!(!p.is_url_allowed("https://example.com@evil/safe"));
     }
 
     #[test]

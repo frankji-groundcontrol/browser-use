@@ -506,12 +506,15 @@ mod tests {
             max_tokens: 4096,
         })?);
 
-        let actor = ActorHandle::spawn_with_command_timeout(std::time::Duration::from_secs(2));
+        let actor = ActorHandle::spawn();
         actor
             .navigate(
                 "data:text/html,<title>Wedge</title><button>Nope</button>".to_owned(),
                 false,
             )
+            .await?;
+        actor
+            .set_command_timeout(std::time::Duration::from_secs(2))
             .await?;
         // Wedge the renderer so every capture inside the run times out.
         let _ = actor.evaluate("while (true) {}").await;

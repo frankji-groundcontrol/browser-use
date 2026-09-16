@@ -18,19 +18,27 @@ Current status for every task is on the board:
 
 ## What is true now
 
-The server is registered with **seven** agents (Claude Code, Codex CLI, OpenCode,
-Hermes, Grok, Qoder, Kimi Code) on both hosts, all verified against the Rust
-MCP handshake at 19 tools. Local, MBP2 and franky-frank now sit on commit
-`c2595bbde`; the release binary was rebuilt and installed on both remote hosts,
-and the local symlink points at the rebuilt target. The
-docs-recording guardrail is active on both.
+The whole-repository hardening pass completed on 2026-09-16. Every retained
+finding in [the review record](issues/2026-09-16-whole-repo-review-findings.md)
+has an implemented fix and reproducible local evidence, or an explicit blocked
+external proof. The active [hardening plan](plans/2026-09-16-hardening-review-findings/2026-09-16-hardening-review-findings.md)
+and tracker are complete.
 
-Recent slice (2026-09-16): verified Rust attachment to a temporary Chrome
-DevTools endpoint, fixed HTTP endpoint resolution, pushed the source-remote port
-and CLI changes, and deployed
-the release binary to MBP2 and franky-frank. No persistent user Chrome exposed
-DevTools locally, so `BROWSER_USE_CDP_URL` attachment to the user's current
-browser remains an explicit follow-up.
+Python Ruff, format, Pyright, focused regressions, package build, release
+contracts, and the full `tests/ci` suite pass. Rust format, Clippy, default and
+env-isolated all-feature workspace tests, live CDP/MCP tests, and provider
+fixtures pass. Docker daemon execution, real external provider credentials, and
+a controlled beta child-process death harness remain unavailable locally and
+are recorded as blocked rather than passed.
+
+Recent slice (2026-09-16): hardened URL authority checks, config preservation and
+permissions, opt-in telemetry, cookie scope, browser/DOM lifecycle, beta RPC
+cleanup, Rust DevTools existing-target attach, pre-action policy guards,
+bounded shutdown, provider wire contracts, release serialization, and pinned
+Docker locks. The Rust all-feature matrix completed with 4 actor, 9 agent, 21
+CDP, 37 MCP, and 61 LLM tests passing. The MCP fixture now uses the explicit
+`BROWSER_USE_LLM_*` environment surface, keeping the matrix isolated from
+ambient credentials.
 
 **The LLM environment surface changed on 2026-08-27 and is a breaking change.**
 Configure the model with `BROWSER_USE_LLM_BASE_URL`, `_API_KEY`, `_API`

@@ -24,7 +24,10 @@ def check_version(tag: str, root: Path = Path('.'), *, artifacts: bool = False) 
 		for path in sdists:
 			with tarfile.open(path) as archive:
 				metadata = next(member for member in archive.getmembers() if member.name.endswith('/PKG-INFO'))
-				versions[path.name] = email.message_from_bytes(archive.extractfile(metadata).read())['Version']
+				file = archive.extractfile(metadata)
+				if file is None:
+					raise ValueError(f'{path.name} is missing PKG-INFO')
+				versions[path.name] = email.message_from_bytes(file.read())['Version']
 	for name, version in versions.items():
 		if version != expected:
 			raise ValueError(f'{name} version {version} does not match release tag {expected}')

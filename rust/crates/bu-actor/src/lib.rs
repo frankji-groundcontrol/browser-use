@@ -93,6 +93,14 @@ impl ActorHandle {
         Self { tx }
     }
 
+    /// Changes the timeout after browser startup in live tests, avoiding a slow
+    /// launch being mistaken for the renderer stall the test intends to create.
+    #[cfg(feature = "live-chrome")]
+    pub async fn set_command_timeout(&self, timeout: std::time::Duration) -> Result<()> {
+        self.request(|reply| Command::SetCommandTimeout { timeout, reply })
+            .await
+    }
+
     /// Navigates the active (or a new) tab. `Ok(Some(status))` means the page
     /// committed but never finished loading; the DOM is still usable.
     pub async fn navigate(&self, url: String, new_tab: bool) -> Result<Option<String>> {
@@ -282,6 +290,11 @@ impl ActorHandle {
 }
 
 enum Command {
+    #[cfg(feature = "live-chrome")]
+    SetCommandTimeout {
+        timeout: std::time::Duration,
+        reply: Reply<()>,
+    },
     SetPolicy {
         policy: UrlPolicy,
         reply: Reply<UrlPolicy>,
@@ -455,6 +468,11 @@ impl BrowserActor {
 
     async fn dispatch(&mut self, command: Command) {
         match command {
+            #[cfg(feature = "live-chrome")]
+            Command::SetCommandTimeout { timeout, reply } => {
+                self.command_timeout = timeout;
+                let _ = reply.send(Ok(()));
+            }
             Command::SetPolicy { policy, reply } => {
                 let previous = std::mem::replace(&mut self.policy, policy);
                 let _ = reply.send(Ok(previous));
@@ -490,6 +508,7 @@ impl BrowserActor {
                 let _ = reply.send(self.click(index, new_tab).await);
             }
             Command::ClickCoordinates { x, y, reply } => {
+                self.guard_active_url().await;
                 let result = match self.active_page().await {
                     Ok(page) => page.click_coordinates(x, y).await,
                     Err(e) => Err(e),
@@ -509,10 +528,12 @@ impl BrowserActor {
                 let _ = reply.send(self.select_option(index, value, label, option_index).await);
             }
             Command::Scroll { direction, reply } => {
+                self.guard_active_url().await;
                 let result = match self.active_page().await {
                     Ok(page) => page.scroll(&direction).await,
                     Err(e) => Err(e),
                 };
+                self.selector_cache.clear();
                 let _ = reply.send(result);
             }
             Command::GoBack { reply } => {
@@ -588,7 +609,19 @@ impl BrowserActor {
         } else {
             self.active_page().await?
         };
-        let loading_status = page.navigate(url).await?;
+        let new_target = new_tab.then(|| page.target_id());
+        let loading_status = match page.navigate(url).await {
+            Ok(status) => status,
+            Err(error) => {
+                if let Some(target) = new_target {
+                    if let Ok(session) = self.active_session().await {
+                        let _ = session.close_tab(&target).await;
+                    }
+                    self.page = None;
+                }
+                return Err(error);
+            }
+        };
         self.selector_cache.clear();
         // Enforcement point #2: catch redirects into a disallowed domain and
         // reset to about:blank (mirrors on_NavigationCompleteEvent).
@@ -669,6 +702,7 @@ impl BrowserActor {
     }
 
     async fn click(&mut self, index: usize, new_tab: bool) -> Result<ClickOutcome> {
+        self.guard_active_url().await;
         let backend_node_id = self.backend_node_id_for_index(index).await?;
         let href = self.selector_cache.href_for_index(index);
         let page = self.active_page().await?;
@@ -688,17 +722,22 @@ impl BrowserActor {
         }
 
         page.click_backend_node_id(backend_node_id).await?;
+        self.selector_cache.clear();
         Ok(ClickOutcome::Clicked)
     }
 
     async fn type_text(&mut self, index: usize, text: &str) -> Result<()> {
+        self.guard_active_url().await;
         let backend_node_id = self.backend_node_id_for_index(index).await?;
         let page = self.active_page().await?;
         page.clear_backend_node_id(backend_node_id).await?;
         if text.is_empty() {
+            self.selector_cache.clear();
             return Ok(());
         }
-        page.type_into_backend_node_id(backend_node_id, text).await
+        let result = page.type_into_backend_node_id(backend_node_id, text).await;
+        self.selector_cache.clear();
+        result
     }
 
     async fn select_option(
@@ -708,15 +747,19 @@ impl BrowserActor {
         label: Option<String>,
         option_index: Option<usize>,
     ) -> Result<SelectOptionOutcome> {
+        self.guard_active_url().await;
         let backend_node_id = self.backend_node_id_for_index(index).await?;
         let page = self.active_page().await?;
-        page.select_option_backend_node_id(
-            backend_node_id,
-            value.as_deref(),
-            label.as_deref(),
-            option_index,
-        )
-        .await
+        let result = page
+            .select_option_backend_node_id(
+                backend_node_id,
+                value.as_deref(),
+                label.as_deref(),
+                option_index,
+            )
+            .await;
+        self.selector_cache.clear();
+        result
     }
 
     async fn screenshot(&mut self, full_page: bool, format: ScreenshotFormat) -> Result<Vec<u8>> {

@@ -25,6 +25,7 @@ Example usage:
 import asyncio
 import logging
 import time
+from contextlib import suppress
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
@@ -88,6 +89,7 @@ class MCPClient:
 
 		try:
 			logger.info(f"🔌 Connecting to MCP server '{self.server_name}': {self.command} {' '.join(self.args)}")
+			self._disconnect_event.clear()
 
 			# Create server parameters
 			server_params = StdioServerParameters(command=self.command, args=self.args, env=self.env)
@@ -110,8 +112,13 @@ class MCPClient:
 
 			logger.info(f"📦 Discovered {len(self._tools)} tools from '{self.server_name}': {list(self._tools.keys())}")
 
-		except Exception as e:
+		except BaseException as e:
 			error_msg = str(e)
+			if self._stdio_task and not self._stdio_task.done():
+				self._disconnect_event.set()
+				self._stdio_task.cancel()
+				with suppress(asyncio.CancelledError):
+					await self._stdio_task
 			raise
 		finally:
 			# Capture telemetry for connect action
@@ -162,7 +169,7 @@ class MCPClient:
 
 	async def disconnect(self) -> None:
 		"""Disconnect from the MCP server."""
-		if not self._connected:
+		if not self._connected and (self._stdio_task is None or self._stdio_task.done()):
 			return
 
 		start_time = time.time()

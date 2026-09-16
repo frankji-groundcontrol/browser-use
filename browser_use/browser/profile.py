@@ -15,7 +15,6 @@ from browser_use.browser.cloud.views import CloudBrowserParams
 from browser_use.config import CONFIG
 from browser_use.utils import _log_pretty_path, logger
 
-
 # Extension downloads happen inside get_args() during browser launch, so an
 # unbounded fetch wedges the launch itself on a stalled or unreachable network.
 # The caller already downgrades a failed download to a warning and launches
@@ -745,16 +744,12 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 	@field_validator('allowed_domains', 'prohibited_domains', mode='after')
 	@classmethod
 	def optimize_large_domain_lists(cls, v: list[str] | set[str] | None) -> list[str] | set[str] | None:
-		"""Convert large domain lists (>=100 items) to sets for O(1) lookup performance."""
+		"""Convert large exact-domain lists to sets while preserving wildcard policies."""
 		if v is None or isinstance(v, set):
 			return v
 
-		if len(v) >= DOMAIN_OPTIMIZATION_THRESHOLD:
-			logger.warning(
-				f'🔧 Optimizing domain list with {len(v)} items to set for O(1) lookup. '
-				f'Note: Pattern matching (*.domain.com, etc.) is not supported for lists >= {DOMAIN_OPTIMIZATION_THRESHOLD} items. '
-				f'Use exact domains only or keep list size < {DOMAIN_OPTIMIZATION_THRESHOLD} for pattern support.'
-			)
+		if len(v) >= DOMAIN_OPTIMIZATION_THRESHOLD and not any('*' in pattern for pattern in v):
+			logger.warning(f'🔧 Optimizing exact-domain list with {len(v)} items to set for O(1) lookup.')
 			return set(v)
 
 		return v

@@ -341,7 +341,9 @@ class RustSdkClient:
 
 	async def start(self) -> None:
 		if self.process is not None and self.process.returncode is None:
-			return
+			if self._reader_task is None or not self._reader_task.done():
+				return
+			await self.close()
 		try:
 			self.process = await asyncio.create_subprocess_exec(
 				*self.command,
@@ -450,6 +452,9 @@ class RustSdkClient:
 				self._fail_all(BetaAgentError(message))
 
 	def _handle_stdout_line(self, raw_line: bytes) -> bool:
+		if len(raw_line) > self.max_line_bytes:
+			self._fail_all(BetaAgentError(f'Rust SDK JSON-RPC line exceeded {self.max_line_bytes} bytes'))
+			return False
 		line = raw_line.decode('utf-8', errors='replace').strip()
 		if not line:
 			return True
@@ -5213,7 +5218,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		process_error: str | None = None
 		result: Any = None
 		sdk = await self._ensure_sdk_client()
-		_ = step_timeout, enqueue_timeout
 		method = 'agent.run' if self._sdk_agent_id or followups else 'agent.run_task'
 		params = self._sdk_run_params(max_steps=max_steps, task=task, followups=followups)
 		self._active_sdk_run_id = self.terminal_session_id or self._sdk_agent_id
@@ -5229,7 +5233,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if hasattr(sdk, 'notification_queue'):
 			progress_task = asyncio.create_task(self._log_sdk_progress(sdk))
 		try:
-			result = await sdk.call(method, params)
+			timeouts = [value for value in (step_timeout, enqueue_timeout) if value is not None and value > 0]
+			call = sdk.call(method, params)
+			result = await asyncio.wait_for(call, timeout=min(timeouts)) if timeouts else await call
 		except asyncio.CancelledError:
 			await self._preserve_sdk_notification_history(
 				sdk,
@@ -6297,10 +6303,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		browser_id = self._sdk_browser_id
 		if agent_id:
 			with suppress(Exception):
-				await client.call('agent.close', {'agent_id': agent_id})
+				await asyncio.wait_for(client.call('agent.close', {'agent_id': agent_id}), timeout=2.0)
 		if browser_id:
 			with suppress(Exception):
-				await client.call('browser.close', {'browser_id': browser_id})
+				await asyncio.wait_for(client.call('browser.close', {'browser_id': browser_id}), timeout=2.0)
 		self._sdk_agent_id = None
 		self._sdk_browser_id = None
 		self.terminal_session_id = None

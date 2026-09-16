@@ -51,27 +51,8 @@ const MAX_LISTENER_PROBE_NODES: usize = 500;
 /// not race menus and SPA updates mounted by the click handler.
 const POST_CLICK_SETTLE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Chromium exposes a browser WebSocket URL through its HTTP DevTools endpoint.
-/// `chromiumoxide` connects to that WebSocket, so resolve HTTP inputs first.
-async fn devtools_websocket_url(endpoint: &str) -> Result<String> {
-    if endpoint.starts_with("ws://") || endpoint.starts_with("wss://") {
-        return Ok(endpoint.to_owned());
-    }
-    let version_url = format!("{}/json/version", endpoint.trim_end_matches('/'));
-    let response = reqwest::get(&version_url)
-        .await
-        .with_context(|| format!("failed to query DevTools endpoint {version_url}"))?
-        .error_for_status()
-        .with_context(|| format!("DevTools endpoint rejected {version_url}"))?;
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .with_context(|| format!("invalid DevTools version response from {version_url}"))?;
-    body.get("webSocketDebuggerUrl")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("DevTools version response has no webSocketDebuggerUrl"))
-}
+mod devtools;
+use devtools::devtools_websocket_url;
 
 use discovery::{
     cdp_url_from_env, chromium_path_from_env, find_playwright_chromium, headless_from_env,
@@ -354,8 +335,19 @@ impl BrowserSession {
         let websocket_url = devtools_websocket_url(cdp_url).await?;
         let (browser, handler) = Browser::connect(websocket_url.clone())
             .await
-            .with_context(|| format!("failed to attach to Chromium at {websocket_url}"))?;
-        Ok(Self::from_parts(browser, handler, None, true))
+            .map_err(|_| anyhow!("failed to attach to Chromium DevTools WebSocket"))?;
+        // Start the handler before fetching targets: chromiumoxide needs its
+        // event loop running to receive the fetch response. Without this,
+        // attaching to a browser with pre-existing tabs deadlocks here.
+        let session = Self::from_parts(browser, handler, None, true);
+        session
+            .browser
+            .lock()
+            .await
+            .fetch_targets()
+            .await
+            .map_err(|_| anyhow!("failed to discover existing Chromium targets"))?;
+        Ok(session)
     }
 
     /// Returns whether the Chromium handler task still reports a live browser.
@@ -468,19 +460,18 @@ impl BrowserSession {
             return Ok(());
         }
         let mut browser = self.browser.lock().await;
-        browser
-            .close()
-            .await
-            .context("failed to close Chromium browser")?;
-        // Wait for the process to actually exit, not just for the close request
-        // to be acknowledged. Chromium holds a SingletonLock on its profile, so a
-        // persistent profile cannot be reused until the previous instance is
-        // really gone — relaunching too early silently yields a browser with none
-        // of the stored cookies. Also reaps the child instead of leaving a zombie.
-        if let Err(error) = browser.wait().await {
-            tracing::warn!(%error, "failed to reap Chromium after close");
+        // Chromium can acknowledge Browser.close without exiting (or stop
+        // answering CDP entirely). Bound both graceful stages, then kill and
+        // reap the process we own so shutdown cannot wedge the actor forever.
+        let shutdown_timeout = std::time::Duration::from_secs(5);
+        let _ = tokio::time::timeout(shutdown_timeout, browser.close()).await;
+        match tokio::time::timeout(shutdown_timeout, browser.wait()).await {
+            Ok(Ok(_)) => Ok(()),
+            _ => match browser.kill().await {
+                Some(result) => result.context("failed to kill and reap Chromium browser"),
+                None => Ok(()),
+            },
         }
-        Ok(())
     }
 
     async fn resolve_tab(&self, tab_ref: &str) -> Result<BrowserPage> {

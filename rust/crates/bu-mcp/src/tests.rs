@@ -1308,8 +1308,8 @@ async fn extract_content_posts_chat_request_and_returns_framed_answer() -> anyho
     )
     .await?;
     let _env = EnvGuard::set_many(&[
-        ("OPENAI_API_KEY", "test-key"),
-        ("OPENAI_BASE_URL", &llm_server.base_url()),
+        ("BROWSER_USE_LLM_API_KEY", "test-key"),
+        ("BROWSER_USE_LLM_BASE_URL", &llm_server.base_url()),
         ("BROWSER_USE_LLM_MODEL", "test-model"),
     ]);
     let server = BrowserUseMcpServer::new();
@@ -1337,13 +1337,13 @@ async fn extract_content_posts_chat_request_and_returns_framed_answer() -> anyho
         );
     let request = llm_server.received_request().await?;
     assert_eq!(
-        request.path, "/v1/responses",
-        "OpenAI-style calls use the Responses API, with the bare-host mock base URL normalized to /v1"
+        request.path, "/responses",
+        "OpenAI-style calls use the Responses API at the configured bare-host route"
     );
     assert_eq!(
         request.header("authorization"),
         Some("Bearer test-key"),
-        "LLM client should use OPENAI_API_KEY as bearer auth"
+        "LLM client should use BROWSER_USE_LLM_API_KEY as bearer auth"
     );
     assert!(
         !request
@@ -1627,7 +1627,7 @@ struct EnvGuard {
 }
 
 /// Serializes tests that mutate the LLM environment. The happy-path extraction
-/// test pins OPENAI_* to a mock server while the missing-credentials test blanks
+/// test pins BROWSER_USE_LLM_* to a mock server while the missing-credentials test blanks
 /// them; without the lock the two race and either can fail spuriously. Tokio's
 /// mutex because the guard is held across awaits.
 #[cfg(feature = "live-chrome")]

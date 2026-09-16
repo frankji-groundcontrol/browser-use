@@ -68,7 +68,7 @@ async fn a_capture_that_never_completes_leaves_no_stale_indices() {
     // it. Both mechanisms enforce this: get_state drops the mapping before
     // capturing and only repopulates on success, and a command cancelled on the
     // actor timeout (which runs no error branch at all) drops it too.
-    let actor = ActorHandle::spawn_with_command_timeout(std::time::Duration::from_secs(2));
+    let actor = ActorHandle::spawn();
     actor
         .navigate(
             "data:text/html,<title>cache</title><button>One</button><button>Two</button>"
@@ -77,6 +77,10 @@ async fn a_capture_that_never_completes_leaves_no_stale_indices() {
         )
         .await
         .expect("navigate should launch the browser");
+    actor
+        .set_command_timeout(std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
 
     actor.get_state(false).await.expect("first capture");
     assert!(
@@ -110,12 +114,16 @@ async fn a_capture_that_never_completes_leaves_no_stale_indices() {
 async fn wedged_command_times_out_and_actor_survives() {
     // A renderer that spins forever must not hang the actor: the command is
     // dropped on the per-command timeout and later commands still respond.
-    let actor = ActorHandle::spawn_with_command_timeout(std::time::Duration::from_secs(2));
+    let actor = ActorHandle::spawn();
 
     actor
         .navigate("data:text/html,<title>wedge</title>".to_owned(), false)
         .await
         .expect("initial navigate should launch the browser");
+    actor
+        .set_command_timeout(std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
 
     // Runtime.evaluate on an infinite loop never returns; the actor must drop
     // it at the ~2s timeout rather than hang forever.

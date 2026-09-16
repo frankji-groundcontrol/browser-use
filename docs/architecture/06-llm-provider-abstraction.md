@@ -71,7 +71,7 @@ handling. Example from [`openai/chat.py`](../../browser_use/llm/openai/chat.py):
   using `response_format` (for endpoints that don't support it).
 - `reasoning_models` list → sets `reasoning_effort` (default `'low'`) and adjusts
   token accounting (reasoning_tokens are a subset of completion_tokens).
-- On unparseable output, raises `ModelProviderError('Failed to parse structured
+- On unparsable output, raises `ModelProviderError('Failed to parse structured
   output…')`.
 
 Other families diverge: Anthropic uses **forced `tool_choice`** + cache_control

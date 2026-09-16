@@ -42,30 +42,30 @@ import sys
 
 
 def _truthy(value: str | None) -> bool:
-	return str(value).strip().lower() in ("1", "true", "yes", "on")
+	return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
 
 
 # 1) Optional: append /v1 when the gateway serves its API there (opt-in).
-_base = os.environ.get("OPENAI_BASE_URL", "").strip().rstrip("/")
-if _base and _truthy(os.environ.get("BROWSER_USE_MCP_FORCE_V1")) and not _base.endswith("/v1"):
-	os.environ["OPENAI_BASE_URL"] = _base + "/v1"
+_base = os.environ.get('OPENAI_BASE_URL', '').strip().rstrip('/')
+if _base and _truthy(os.environ.get('BROWSER_USE_MCP_FORCE_V1')) and not _base.endswith('/v1'):
+	os.environ['OPENAI_BASE_URL'] = _base + '/v1'
 
 # 2) Server-friendly defaults (only applied if the caller left them unset).
-os.environ.setdefault("BROWSER_USE_HEADLESS", "true")
-os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
+os.environ.setdefault('BROWSER_USE_HEADLESS', 'true')
+os.environ.setdefault('ANONYMIZED_TELEMETRY', 'false')
 
 # 3) Force a neutral User-Agent so SDK-fingerprint-blocking gateways stop 403ing.
 #    default_headers overrides the openai SDK's built-in "OpenAI/Python ..." UA.
 import openai
 
-_user_agent = os.environ.get("BROWSER_USE_MCP_USER_AGENT", "browser-use-mcp")
+_user_agent = os.environ.get('BROWSER_USE_MCP_USER_AGENT', 'browser-use-mcp')
 _orig_async_init = openai.AsyncOpenAI.__init__
 
 
 def _async_init_with_ua(self, *args, **kwargs):
-	headers = dict(kwargs.get("default_headers") or {})
-	headers["User-Agent"] = _user_agent
-	kwargs["default_headers"] = headers
+	headers = dict(kwargs.get('default_headers') or {})
+	headers['User-Agent'] = _user_agent
+	kwargs['default_headers'] = headers
 	return _orig_async_init(self, *args, **kwargs)
 
 
@@ -74,7 +74,7 @@ openai.AsyncOpenAI.__init__ = _async_init_with_ua
 # 4) Run the standard browser-use MCP server (identical to `browser-use --mcp`).
 from browser_use.cli import main
 
-if "--mcp" not in sys.argv:
-	sys.argv = [sys.argv[0], "--mcp"]
+if '--mcp' not in sys.argv:
+	sys.argv = [sys.argv[0], '--mcp']
 
 main()

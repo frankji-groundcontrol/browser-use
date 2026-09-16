@@ -9,10 +9,12 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 
 use crate::anthropic::{build_request as build_anthropic, parse_messages_body, ANTHROPIC_VERSION};
+use crate::completion::{self, Completion, CompletionRequest};
 use crate::config::{alternate_api_root, LlmApi, LlmConfig};
 use crate::message::ChatMessage;
 use crate::openai::{build_chat_request, build_responses_request, parse_chat_body};
 use crate::responses::parse_responses_body;
+use crate::stream::{SseDecoder, StreamEvent, StreamState};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// Transient-failure retries, mirroring the OpenAI SDK's `max_retries=5`.
@@ -149,6 +151,146 @@ impl LlmClient {
         }
     }
 
+    /// Sends a typed completion request, retaining tool calls and token usage.
+    pub async fn complete(&self, request: CompletionRequest) -> Result<Completion> {
+        let body = completion::build_request(&self.config, request)?;
+        let text = self.send_json(body, false).await?;
+        completion::parse_completion(self.config.api, &text)
+    }
+
+    /// Streams a completion's text, tool arguments, and usage via server-sent events.
+    pub async fn stream(
+        &self,
+        request: CompletionRequest,
+        mut emit: impl FnMut(StreamEvent),
+    ) -> Result<Completion> {
+        let mut body = completion::build_request(&self.config, request)?;
+        body["stream"] = serde_json::Value::Bool(true);
+        let mut url = self.config.endpoint_url();
+        let mut tried_fallback = false;
+        let response = {
+            let mut attempt = 0;
+            loop {
+                let result = self
+                    .authenticate(self.http.post(&url))
+                    .json(&body)
+                    .send()
+                    .await;
+                match result {
+                    Ok(response) if response.status().as_u16() == 404 && !tried_fallback => {
+                        if let Some(fallback) = self.config.fallback_url() {
+                            url = fallback;
+                            tried_fallback = true;
+                            continue;
+                        }
+                        break response;
+                    }
+                    Ok(response)
+                        if (response.status().as_u16() == 429
+                            || response.status().is_server_error())
+                            && attempt < MAX_RETRIES =>
+                    {
+                        let retry_after = response
+                            .headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.parse().ok());
+                        Self::backoff_sleep(attempt, retry_after).await;
+                        attempt += 1;
+                    }
+                    Ok(response) => break response,
+                    Err(error)
+                        if attempt < MAX_RETRIES && (error.is_timeout() || error.is_connect()) =>
+                    {
+                        Self::backoff_sleep(attempt, None).await;
+                        attempt += 1;
+                    }
+                    Err(error) => {
+                        return Err(anyhow::Error::new(error).context("LLM stream request failed"))
+                    }
+                }
+            }
+        };
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "LLM stream request failed with HTTP {status}: {body}"
+            ));
+        }
+        let mut response = response;
+        let mut decoder = SseDecoder::default();
+        let mut state = StreamState::new(self.config.api);
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .context("failed reading LLM stream")?
+        {
+            for event in decoder.push(&chunk)? {
+                state.event(&event, &mut emit)?;
+                if state.is_done() {
+                    break;
+                }
+            }
+            if state.is_done() {
+                break;
+            }
+        }
+        state.finish()
+    }
+
+    async fn send_json(&self, body: serde_json::Value, _stream: bool) -> Result<String> {
+        let mut url = self.config.endpoint_url();
+        let mut tried_fallback = false;
+        for attempt in 0..=MAX_RETRIES {
+            let response = self
+                .authenticate(self.http.post(&url))
+                .json(&body)
+                .send()
+                .await;
+            let response = match response {
+                Ok(response) => response,
+                Err(error)
+                    if attempt < MAX_RETRIES && (error.is_timeout() || error.is_connect()) =>
+                {
+                    Self::backoff_sleep(attempt, None).await;
+                    continue;
+                }
+                Err(error) => {
+                    return Err(anyhow::Error::new(error).context("LLM completion request failed"))
+                }
+            };
+            if response.status().is_success() {
+                return response
+                    .text()
+                    .await
+                    .context("failed to read LLM response body");
+            }
+            let status = response.status();
+            if status.as_u16() == 404 && !tried_fallback {
+                if let Some(fallback) = self.config.fallback_url() {
+                    url = fallback;
+                    tried_fallback = true;
+                    continue;
+                }
+            }
+            if (status.as_u16() == 429 || status.is_server_error()) && attempt < MAX_RETRIES {
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse().ok());
+                Self::backoff_sleep(attempt, retry_after).await;
+                continue;
+            }
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "LLM completion request failed with HTTP {status}: {body}"
+            ));
+        }
+        Err(anyhow!("LLM completion request exhausted retries"))
+    }
+
     fn build_body(&self, messages: Vec<ChatMessage>) -> Result<serde_json::Value> {
         let value = match self.config.api {
             LlmApi::OpenAiResponses => {
@@ -242,296 +384,5 @@ impl LlmApi {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn browser_use_host_gets_actionable_hints() {
-        let base = "https://llm.api.browser-use.com/v1";
-        assert!(status_hint(base, 401)
-            .unwrap()
-            .contains("BROWSER_USE_LLM_API_KEY"));
-        assert!(status_hint(base, 402).unwrap().contains("credits"));
-        assert!(
-            status_hint(base, 500).is_none(),
-            "5xx is not operator-fixable"
-        );
-    }
-
-    #[test]
-    fn other_hosts_keep_the_plain_error() {
-        assert!(status_hint("https://api.openai.com/v1", 401).is_none());
-        assert!(status_hint("https://api.anthropic.com/v1", 402).is_none());
-    }
-}
-
-#[cfg(test)]
-mod http_tests {
-    use super::*;
-    use crate::message::{message, message_with_image};
-    use std::{
-        io::{Read, Write},
-        net::{TcpListener, TcpStream},
-        sync::mpsc,
-        thread,
-    };
-
-    struct Reply {
-        status: &'static str,
-        content_type: &'static str,
-        body: &'static str,
-    }
-
-    fn json_ok(body: &'static str) -> Reply {
-        Reply {
-            status: "200 OK",
-            content_type: "application/json",
-            body,
-        }
-    }
-
-    /// Serves `replies` in order, returning the base URL and the request lines
-    /// (request-line + headers + body) each attempt actually sent.
-    fn serve(replies: Vec<Reply>) -> (String, mpsc::Receiver<String>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            for reply in replies {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    return;
-                };
-                let raw = drain_request(&mut stream);
-                let _ = tx.send(String::from_utf8_lossy(&raw).into_owned());
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                    reply.status,
-                    reply.content_type,
-                    reply.body.len(),
-                    reply.body
-                );
-            }
-        });
-        (base_url, rx)
-    }
-
-    fn client(base_url: String, api: LlmApi) -> LlmClient {
-        LlmClient::new(LlmConfig {
-            api_key: "secret-key".to_owned(),
-            base_url,
-            model: "m".to_owned(),
-            api,
-            temperature: None,
-            max_tokens: 77,
-        })
-        .unwrap()
-    }
-
-    fn request_line(raw: &str) -> String {
-        raw.lines().next().unwrap_or_default().to_owned()
-    }
-
-    #[tokio::test]
-    async fn exact_url_is_used_first_without_any_v1_guessing() {
-        // Bare host + chat: the exact route is {base}/chat/completions.
-        let (base_url, requests) = serve(vec![json_ok(
-            r#"{"choices":[{"message":{"content":"ok"}}]}"#,
-        )]);
-        let out = client(base_url, LlmApi::OpenAiChat)
-            .chat(vec![message("user", "hi")])
-            .await
-            .unwrap();
-        assert_eq!(out, "ok");
-        let first = request_line(&requests.recv().unwrap());
-        assert!(
-            first.contains("POST /chat/completions "),
-            "exact URL must be tried first, got: {first}"
-        );
-        assert!(
-            requests.try_recv().is_err(),
-            "a working exact URL must not trigger a fallback attempt"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_404_at_the_exact_url_falls_back_to_the_v1_root() {
-        let (base_url, requests) = serve(vec![
-            Reply {
-                status: "404 Not Found",
-                content_type: "application/json",
-                body: r#"{"error":"no route"}"#,
-            },
-            json_ok(r#"{"choices":[{"message":{"content":"recovered"}}]}"#),
-        ]);
-        let out = client(base_url, LlmApi::OpenAiChat)
-            .chat(vec![message("user", "hi")])
-            .await
-            .unwrap();
-        assert_eq!(out, "recovered");
-        assert!(request_line(&requests.recv().unwrap()).contains("POST /chat/completions "));
-        assert!(
-            request_line(&requests.recv().unwrap()).contains("POST /v1/chat/completions "),
-            "fallback should append /v1"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_html_landing_page_also_triggers_the_fallback() {
-        let (base_url, requests) = serve(vec![
-            Reply {
-                status: "200 OK",
-                content_type: "text/html; charset=utf-8",
-                body: "<html><body>gateway</body></html>",
-            },
-            json_ok(r#"{"choices":[{"message":{"content":"recovered"}}]}"#),
-        ]);
-        let out = client(base_url, LlmApi::OpenAiChat)
-            .chat(vec![message("user", "hi")])
-            .await
-            .unwrap();
-        assert_eq!(
-            out, "recovered",
-            "a 200 HTML page is a wrong route, not an answer"
-        );
-        drop(requests);
-    }
-
-    #[tokio::test]
-    async fn neither_root_working_names_both_urls_tried() {
-        let (base_url, _requests) = serve(vec![
-            Reply {
-                status: "404 Not Found",
-                content_type: "application/json",
-                body: "{}",
-            },
-            Reply {
-                status: "404 Not Found",
-                content_type: "application/json",
-                body: "{}",
-            },
-        ]);
-        let error = client(base_url, LlmApi::AnthropicMessages)
-            .chat(vec![message("user", "hi")])
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("/messages"),
-            "should name the route: {error}"
-        );
-        assert!(
-            error.contains("/v1/messages"),
-            "should name both roots tried: {error}"
-        );
-        assert!(
-            error.contains("BROWSER_USE_LLM_BASE_URL"),
-            "should name the variable to fix: {error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn retries_on_429_then_succeeds() {
-        let (base_url, _requests) = serve(vec![
-            Reply {
-                status: "429 Too Many Requests",
-                content_type: "application/json",
-                body: r#"{"error":"slow down"}"#,
-            },
-            json_ok(r#"{"choices":[{"message":{"content":"recovered"}}]}"#),
-        ]);
-        let out = client(base_url, LlmApi::OpenAiChat)
-            .chat(vec![message("user", "hi")])
-            .await
-            .unwrap();
-        assert_eq!(out, "recovered");
-    }
-
-    #[tokio::test]
-    async fn anthropic_sends_its_own_auth_headers_and_body_shape() {
-        let (base_url, requests) = serve(vec![json_ok(
-            r#"{"content":[{"type":"text","text":"hi back"}]}"#,
-        )]);
-        let out = client(base_url, LlmApi::AnthropicMessages)
-            .chat(vec![
-                message("system", "be terse"),
-                message_with_image("user", "look", b"\x89PNG\r\n\x1a\nrest"),
-            ])
-            .await
-            .unwrap();
-        assert_eq!(out, "hi back");
-
-        let raw = requests.recv().unwrap();
-        let lower = raw.to_ascii_lowercase();
-        assert!(lower.contains("post /messages "), "wrong route: {raw}");
-        assert!(
-            lower.contains("x-api-key: secret-key"),
-            "Anthropic authenticates with x-api-key, not bearer: {raw}"
-        );
-        assert!(
-            lower.contains(&format!("anthropic-version: {ANTHROPIC_VERSION}")),
-            "the dated version header is required: {raw}"
-        );
-        assert!(
-            !lower.contains("authorization: bearer"),
-            "must not also send OpenAI bearer auth: {raw}"
-        );
-
-        let body = raw.split("\r\n\r\n").nth(1).unwrap_or_default();
-        let json: serde_json::Value = serde_json::from_str(body).expect("body is JSON");
-        assert_eq!(json["system"], "be terse", "system must be hoisted");
-        assert_eq!(json["max_tokens"], 77, "max_tokens is required");
-        assert_eq!(json["messages"][0]["content"][1]["type"], "image");
-        assert_eq!(
-            json["messages"][0]["content"][1]["source"]["type"],
-            "base64"
-        );
-    }
-
-    #[tokio::test]
-    async fn openai_sends_bearer_auth() {
-        let (base_url, requests) = serve(vec![json_ok(
-            r#"{"choices":[{"message":{"content":"ok"}}]}"#,
-        )]);
-        client(base_url, LlmApi::OpenAiChat)
-            .chat(vec![message("user", "hi")])
-            .await
-            .unwrap();
-        let lower = requests.recv().unwrap().to_ascii_lowercase();
-        assert!(
-            lower.contains("authorization: bearer secret-key"),
-            "{lower}"
-        );
-        assert!(!lower.contains("x-api-key"), "must not send Anthropic auth");
-    }
-
-    fn drain_request(stream: &mut TcpStream) -> Vec<u8> {
-        let mut buffer = Vec::new();
-        let mut chunk = [0u8; 1024];
-        loop {
-            let Ok(read) = stream.read(&mut chunk) else {
-                break;
-            };
-            if read == 0 {
-                break;
-            }
-            buffer.extend_from_slice(&chunk[..read]);
-            if let Some(end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
-                let headers = String::from_utf8_lossy(&buffer[..end]);
-                let content_length = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().ok())
-                            .flatten()
-                    })
-                    .unwrap_or(0);
-                if buffer.len() >= end + 4 + content_length {
-                    break;
-                }
-            }
-        }
-        buffer
-    }
-}
+#[path = "client_tests.rs"]
+mod tests;

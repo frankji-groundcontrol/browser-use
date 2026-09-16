@@ -283,8 +283,29 @@ class SecurityWatchdog(BaseWatchdog):
 			# Exact match
 			if '://' in pattern:
 				# Full URL pattern
-				if url.startswith(pattern):
-					return True
+				from urllib.parse import urlparse
+
+				try:
+					pattern_url = urlparse(pattern)
+					actual_url = urlparse(url)
+					default_port = {'http': 80, 'https': 443}
+					if (
+						pattern_url.scheme != actual_url.scheme
+						or not pattern_url.hostname
+						or pattern_url.hostname.lower() != (actual_url.hostname or '').lower()
+						or pattern_url.username is not None
+						or pattern_url.password is not None
+						or (pattern_url.port or default_port.get(pattern_url.scheme))
+						!= (actual_url.port or default_port.get(actual_url.scheme))
+						or (pattern_url.query and pattern_url.query != actual_url.query)
+						or (pattern_url.fragment and pattern_url.fragment != actual_url.fragment)
+					):
+						return False
+				except ValueError:
+					return False
+
+				pattern_path = pattern_url.path.rstrip('/')
+				return not pattern_path or actual_url.path == pattern_path or actual_url.path.startswith(pattern_path + '/')
 			else:
 				# Domain-only pattern (case-insensitive comparison)
 				if host.lower() == pattern.lower():

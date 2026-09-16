@@ -15,7 +15,11 @@ class BaseTelemetryEvent(ABC):
 
 	@property
 	def properties(self) -> dict[str, Any]:
-		props = {k: v for k, v in asdict(self).items() if k != 'name'}
+		props = {
+			k: v
+			for k, v in asdict(self).items()
+			if k not in {'name', 'error_message', 'parent_process_cmdline', 'server_name', 'command'}
+		}
 		# Add Docker context if running in Docker
 		props['is_docker'] = is_running_in_docker()
 		return props
@@ -56,6 +60,28 @@ class AgentTelemetryEvent(BaseTelemetryEvent):
 	judge_impossible_task: bool | None = None
 
 	name: str = 'agent_event'
+
+	@property
+	def properties(self) -> dict[str, Any]:
+		"""Return operational metrics without user prompts, URLs, actions, or results."""
+		return {
+			'model': self.model,
+			'model_provider': self.model_provider,
+			'max_steps': self.max_steps,
+			'max_actions_per_step': self.max_actions_per_step,
+			'use_vision': self.use_vision,
+			'version': self.version,
+			'source': self.source,
+			'agent_type': self.agent_type,
+			'steps': self.steps,
+			'total_input_tokens': self.total_input_tokens,
+			'total_output_tokens': self.total_output_tokens,
+			'prompt_cached_tokens': self.prompt_cached_tokens,
+			'total_tokens': self.total_tokens,
+			'total_duration_seconds': self.total_duration_seconds,
+			'success': self.success,
+			'is_docker': is_running_in_docker(),
+		}
 
 
 @dataclass

@@ -40,7 +40,7 @@ toolchains:
 
 ```bash
 shasum -a256 ~/.local/bin/browser-use-rs \
-             ~/Softwares/browser-use/rust/target/release/browser-use-rs
+             ~/Software/browser-use/rust/target/release/browser-use-rs
 ```
 
 See [issues/2026-08-26-installed-binary-drift-from-build-tree.md](../issues/2026-08-26-installed-binary-drift-from-build-tree.md).

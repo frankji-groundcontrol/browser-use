@@ -1704,18 +1704,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 	) -> None:
 		"""Handle callbacks and conversation saving after LLM interaction"""
 		if self.register_new_step_callback and self.state.last_model_output:
-			if inspect.iscoroutinefunction(self.register_new_step_callback):
-				await self.register_new_step_callback(
-					browser_state_summary,
-					self.state.last_model_output,
-					self.state.n_steps,
-				)
-			else:
-				self.register_new_step_callback(
-					browser_state_summary,
-					self.state.last_model_output,
-					self.state.n_steps,
-				)
+			callback_result = self.register_new_step_callback(
+				browser_state_summary,
+				self.state.last_model_output,
+				self.state.n_steps,
+			)
+			if inspect.isawaitable(callback_result):
+				await callback_result
 
 		if self.settings.save_conversation_path and self.state.last_model_output:
 			# Treat save_conversation_path as a directory (consistent with other recording paths)
@@ -2272,10 +2267,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				await self._judge_and_log()
 
 			if self.register_done_callback:
-				if inspect.iscoroutinefunction(self.register_done_callback):
-					await self.register_done_callback(self.history)
-				else:
-					self.register_done_callback(self.history)
+				callback_result = self.register_done_callback(self.history)
+				if inspect.isawaitable(callback_result):
+					await callback_result
 			return True, True
 
 		return False, False
@@ -2492,10 +2486,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				await self._judge_and_log()
 
 			if self.register_done_callback:
-				if inspect.iscoroutinefunction(self.register_done_callback):
-					await self.register_done_callback(self.history)
-				else:
-					self.register_done_callback(self.history)
+				callback_result = self.register_done_callback(self.history)
+				if inspect.isawaitable(callback_result):
+					await callback_result
 
 			return True
 

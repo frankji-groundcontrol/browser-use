@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 POSTHOG_EVENT_SETTINGS = {
-	'process_person_profile': True,
+	'process_person_profile': False,
 }
 
 POSTHOG_PROJECT_API_KEY = 'phc_F8JMNjW1i2KbGUTaW1unnDdLSPCoyc52SGRU0JecaUh'
@@ -67,7 +67,7 @@ class ProductTelemetry:
 	"""
 	Service for capturing anonymized telemetry data.
 
-	If the environment variable `ANONYMIZED_TELEMETRY=False`, anonymized telemetry will be disabled.
+	Telemetry is disabled unless `ANONYMIZED_TELEMETRY=True` is explicitly set.
 	"""
 
 	PROJECT_API_KEY = POSTHOG_PROJECT_API_KEY
@@ -88,8 +88,8 @@ class ProductTelemetry:
 			self._posthog_client = Posthog(
 				project_api_key=self.PROJECT_API_KEY,
 				host=self.HOST,
-				disable_geoip=False,
-				enable_exception_autocapture=True,
+				disable_geoip=True,
+				enable_exception_autocapture=False,
 			)
 
 			# Silence posthog's logging

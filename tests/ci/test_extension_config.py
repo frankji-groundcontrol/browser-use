@@ -162,9 +162,7 @@ class TestExtensionDownloadTimeout:
 		started = time.monotonic()
 		try:
 			with pytest.raises(Exception, match='Failed to download extension'):
-				BrowserProfile()._download_extension(
-					f'http://127.0.0.1:{port}/ext.crx', tmp_path / 'ext.crx'
-				)
+				BrowserProfile()._download_extension(f'http://127.0.0.1:{port}/ext.crx', tmp_path / 'ext.crx')
 			assert time.monotonic() - started < 10, 'download should be bounded by the timeout'
 		finally:
 			for connection in accepted:

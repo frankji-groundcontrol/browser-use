@@ -11,20 +11,29 @@
 
 mod anthropic;
 mod client;
+mod completion;
 mod config;
 mod message;
 mod openai;
 mod responses;
+mod stream;
 
 #[cfg(feature = "bedrock")]
 mod bedrock;
 
 pub use anthropic::ANTHROPIC_VERSION;
 pub use client::LlmClient;
+pub use completion::{
+    Completion, CompletionRequest, ConversationMessage, TokenUsage, ToolCall, ToolDefinition,
+};
 pub use config::{LlmApi, LlmConfig, DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE};
 pub use message::{
     message, message_with_image, ChatMessage, ContentPart, ImageUrl, MessageContent,
 };
+pub use stream::StreamEvent;
+#[cfg(test)]
+#[path = "stream_tests.rs"]
+mod stream_tests;
 
 #[cfg(feature = "bedrock")]
 pub use bedrock::{BedrockChatClient, BedrockChatConfig};
@@ -49,6 +58,28 @@ impl LlmProvider {
         }
     }
 
+    /// Sends a typed request and preserves tool calls and token usage.
+    pub async fn complete(&self, request: CompletionRequest) -> anyhow::Result<Completion> {
+        match self {
+            Self::Http(client) => client.complete(request).await,
+            #[cfg(feature = "bedrock")]
+            Self::Bedrock(_) => Err(bedrock_typed_boundary()),
+        }
+    }
+
+    /// Streams provider events as they arrive. Bedrock remains available through `chat`.
+    pub async fn stream(
+        &self,
+        request: CompletionRequest,
+        emit: impl FnMut(StreamEvent),
+    ) -> anyhow::Result<Completion> {
+        match self {
+            Self::Http(client) => client.stream(request, emit).await,
+            #[cfg(feature = "bedrock")]
+            Self::Bedrock(_) => Err(bedrock_typed_boundary()),
+        }
+    }
+
     /// Human-readable provider + model label for logs and reports.
     pub fn label(&self) -> String {
         match self {
@@ -56,6 +87,24 @@ impl LlmProvider {
             #[cfg(feature = "bedrock")]
             Self::Bedrock(_) => "bedrock".to_owned(),
         }
+    }
+}
+
+#[cfg(feature = "bedrock")]
+fn bedrock_typed_boundary() -> anyhow::Error {
+    anyhow::anyhow!(
+        "Bedrock typed completions and streaming are unavailable: the Converse adapter currently supports text/image chat only"
+    )
+}
+
+#[cfg(all(test, feature = "bedrock"))]
+mod bedrock_boundary_tests {
+    use super::bedrock_typed_boundary;
+
+    #[test]
+    fn typed_boundary_is_explicit() {
+        let message = bedrock_typed_boundary().to_string();
+        assert!(message.contains("text/image chat only"));
     }
 }
 

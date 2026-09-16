@@ -2,6 +2,7 @@
 
 import logging
 import os
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from browser_use_sdk import AsyncBrowserUse, ExecuteSkillResponse, SkillListResponse
@@ -195,7 +196,13 @@ class SkillService:
 		cookie_params = [p for p in skill.parameters if p.type == 'cookie']
 
 		# Build a dict of cookies from the provided cookie list
-		cookie_dict: dict[str, str] = {cookie['name']: cookie['value'] for cookie in cookies}
+		cookie_dict: dict[str, str] = {}
+		for cookie in cookies:
+			for cookie_param in cookie_params:
+				if cookie_param.name != cookie['name'] or not self._cookie_matches_scope(cookie, cookie_param):
+					continue
+				cookie_dict[cookie['name']] = cookie['value']
+				break
 
 		# Check for missing required cookies and fill cookie values
 		if cookie_params:
@@ -275,6 +282,21 @@ class SkillService:
 				stderr=None,
 				latencyMs=None,
 			)
+
+	@staticmethod
+	def _cookie_matches_scope(cookie: Mapping[str, Any], parameter: Any) -> bool:
+		"""Only expose cookies matching a skill's declared domain/path scope."""
+		required_domain = getattr(parameter, 'cookie_domain', None)
+		if not required_domain:
+			return False
+		domain = str(cookie.get('domain') or '').lower()
+		required = str(required_domain).lstrip('.').lower()
+		bare_domain = domain.lstrip('.')
+		if not bare_domain or not (required == bare_domain or (domain.startswith('.') and required.endswith('.' + bare_domain))):
+			return False
+		path = str(cookie.get('path') or '/')
+		required_path = str(getattr(parameter, 'cookie_path', None) or '/')
+		return required_path == path or required_path.startswith(path.rstrip('/') + '/')
 
 	async def close(self) -> None:
 		"""Close the SDK client and cleanup resources"""

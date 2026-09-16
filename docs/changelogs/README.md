@@ -1,5 +1,12 @@
 # Change records
 
+- [2026-09-16 — Whole-repository hardening and proof](2026-09-16-hardening-review-findings.md)
+  — retained findings fixed with Python/Rust, DevTools, release, and matrix evidence.
+
+- [2026-09-16 — Whole-repository adversarial review](2026-09-16-whole-repo-review.md)
+  — evidence-ranked findings and explicit proven, refuted, or blocked gates for
+  every tracked production surface.
+
 - [2026-09-16 — DevTools MCP verification and deployment](2026-09-16-devtools-mcp-deployment.md)
 
 Human-readable records of meaningful repository changes — what changed, why, and
