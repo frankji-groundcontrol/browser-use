@@ -59,8 +59,9 @@ check passed on a real Flutter Web page, the generated skill files were re-synce
 (they drift again whenever upstream `browser-harness` moves), the reveal-toggled
 password redaction gap was narrowed, and the policy-test stall turned out to be a
 real stale-execution-context race in `state()`, now fixed. That live check also
-found that `browser_type` by index silently drops text on Flutter fields; it is
-[an open issue](issues/2026-10-15-flutter-index-typing-drops-text.md).
+found that `browser_type` by index silently dropped text on Flutter fields; that
+is [fixed locally](issues/2026-10-15-flutter-index-typing-drops-text.md) (real
+Flutter 3.44.8 verified, not deployed).
 
 **The LLM environment surface changed on 2026-08-27 and is a breaking change.**
 Configure the model with `BROWSER_USE_LLM_BASE_URL`, `_API_KEY`, `_API`
@@ -128,10 +129,9 @@ the sequential attach probe in the deployment plan. See
 
 7. **Deploy the 21-tool build.** Follow
    [deploy-browser-use-rs.md](practices/deploy-browser-use-rs.md) on each host (the
-   probe expects 21 tools) and reconnect the MCP client. The live Flutter check
-   already passed on a local debug build (2026-10-15); decide on the
-   [index-typing issue](issues/2026-10-15-flutter-index-typing-drops-text.md)
-   first if you want it fixed in the same rollout.
+   probe expects 21 tools) and reconnect the MCP client. The live Flutter check and
+   the [index-typing fix](issues/2026-10-15-flutter-index-typing-drops-text.md)
+   both passed on a local debug build (2026-10-15).
    Done when: the deploy probe passes on each host.
 
 ## How to pick up the work

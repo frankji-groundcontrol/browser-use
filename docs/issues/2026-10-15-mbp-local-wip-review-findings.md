@@ -112,8 +112,8 @@ revisited on 2026-10-15, see
   3.44.8 login page: the placeholder click exposed `Email`, `Password` and
   `Log in`, and `Log in` changed the app's state. One Flutter version, headless
   only, a debug build from this tree rather than an installed binary. The page
-  also showed that `browser_type` by index silently drops text, now
-  [its own issue](2026-10-15-flutter-index-typing-drops-text.md).
+  also showed that `browser_type` by index silently dropped text, now
+  [its own issue](2026-10-15-flutter-index-typing-drops-text.md), fixed locally.
 - **The skill sync CI job (resolved 2026-10-15).** `scripts/sync_browser_harness_skill.py
   --check` fetches upstream `browser-harness` `main` live; it exited 1 with a
   298-line diff, none of it from this fork. The script was re-run and both

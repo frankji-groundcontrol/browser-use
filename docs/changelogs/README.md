@@ -1,5 +1,9 @@
 # Change records
 
+- [2026-10-15 — Flutter index typing](2026-10-15-flutter-index-typing.md)
+  — `browser_type` by index taps Flutter fields with a real click first, so the
+  text reaches the app; replace and clear work too.
+
 - [2026-10-15 — Closing the review gaps](2026-10-15-close-review-gaps.md)
   — live Flutter check passed, skill copies re-synced, reveal-toggled password
   redaction narrowed, and a stale-execution-context race in `state()` fixed.

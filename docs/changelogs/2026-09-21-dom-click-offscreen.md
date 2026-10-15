@@ -56,6 +56,6 @@ Headless CanvasKit did inject the placeholder for this build, so the earlier wor
 that it never would did not hold here; another Flutter version or a hosted app
 may differ. No cargo test drives this page, because it needs the Flutter SDK; the
 check is a manual probe. The same page showed that `browser_type` by index
-silently drops text: [issue](../issues/2026-10-15-flutter-index-typing-drops-text.md).
+silently dropped text; [fixed afterwards](2026-10-15-flutter-index-typing.md).
 
 [Plan](../plans/2026-09-21-dom-click-offscreen.md) · [Changelog index](README.md)

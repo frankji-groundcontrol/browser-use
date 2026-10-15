@@ -50,10 +50,12 @@ a `browser_screenshot` and use `browser_type` or `browser_paste_at_coordinates`
 with coordinates. Checked on a real Flutter Web 3.44.8 login page (2026-10-15,
 headless, locally built; the binary was a debug build from this tree): the index
 click removes the placeholder and `Email`, `Password` and `Log in` appear.
-**Type with coordinates, not an index.** `browser_type` by index into a Flutter
-field reports success but the app never receives the text
-([issue](../../issues/2026-10-15-flutter-index-typing-drops-text.md)); a button
-such as `Log in` can be clicked by index.
+`browser_type` by index into a Flutter field taps the field with a real click
+first; a plain focus plus insert was silently discarded
+([issue](../../issues/2026-10-15-flutter-index-typing-drops-text.md)). That was
+checked on Flutter 3.44.8 only. A field outside the viewport returns an error
+rather than being scrolled to, so scroll it into view first. If the typed text
+does not show up, fall back to coordinates.
 
 ## 1. Build & install the Rust binary
 

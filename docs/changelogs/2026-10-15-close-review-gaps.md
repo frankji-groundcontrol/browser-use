@@ -55,9 +55,9 @@ Results are in the two changelogs linked above.
 
 ## Found on the way
 
-- `browser_type` by index into a Flutter field reports success and the app never
-  receives the text; coordinates work. Open, recommendation only:
-  [issue](../issues/2026-10-15-flutter-index-typing-drops-text.md).
+- `browser_type` by index into a Flutter field reported success and the app never
+  received the text; coordinates worked. Fixed in the next change:
+  [Flutter index typing](2026-10-15-flutter-index-typing.md).
 - `masked_typed_text` masks by content shape (an email address), not by field
   type, so a password typed into a password field is echoed in the tool result.
   Unchanged; the agent already holds that string.
@@ -70,8 +70,7 @@ Results are in the two changelogs linked above.
 
 ## Not changed
 
-Nothing was deployed or installed on any host, the commit is local and not
-pushed, and MBP-local's tree is untouched. The remaining deferred nits (10, 11
+Nothing was deployed or installed on any host, and MBP-local's tree is untouched. The remaining deferred nits (10, 11
 and the coordinate-mode remainder of 13) are still deferred. A residual
 reveal-toggle gap remains for a field never seen as a password and with none of
 the tells.

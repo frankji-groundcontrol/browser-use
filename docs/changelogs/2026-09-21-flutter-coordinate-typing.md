@@ -69,8 +69,8 @@ into the Email field followed by `Log in` made the app's status label read
 `welcome <typed email>`. The password field was typed the same way and its text
 never appears in `browser_get_state`. `browser_paste_at_coordinates` and
 `browser_press_key` were not exercised on that page. Index-mode typing on the
-same page silently drops the text:
-[issue](../issues/2026-10-15-flutter-index-typing-drops-text.md).
+same page silently dropped the text, [fixed afterwards](2026-10-15-flutter-index-typing.md)
+([issue](../issues/2026-10-15-flutter-index-typing-drops-text.md)).
 
 ## Verification
 
