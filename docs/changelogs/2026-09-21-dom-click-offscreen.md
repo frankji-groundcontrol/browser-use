@@ -11,36 +11,43 @@
 `browser_click(index)` used a compositor mouse event at the node's box
 centre. Flutter Web's `flt-semantics-placeholder` ("Enable accessibility")
 is 1×1 CSS px at `(-1, -1)`, so that click never reached the node and the
-semantics tree stayed empty. Tiny or off-viewport boxes now call
-`HTMLElement.click()` (with `focus()` and CDP `userGesture`) on the node
-itself. In-viewport widgets still get a mouse event at the centre, which
-canvas overlays need.
+semantics tree stayed empty. Tiny nodes, and nodes whose box
+centre is outside the viewport, now get `click()` (after `focus()`, with CDP
+`userGesture`) on the node itself; SVG and MathML elements have no `click()`, so
+a `click` event is dispatched instead. Widgets whose centre is in the viewport
+still get a trusted mouse event at the centre (`isTrusted`, with `pointerdown`),
+which canvas overlays and pointer-driven widgets need.
 
 ## Behaviour
 
 | Box | Action |
 | --- | --- |
 | Width and height both &lt; 2 CSS px | DOM `click()` |
-| Left or top edge &lt; 0 | DOM `click()` |
-| In-viewport, large enough | Mouse press/release at centre |
-| No content quad | DOM `click()` |
+| Box centre outside the viewport (x or y &lt; 0, or at or past its width or height) | DOM `click()` |
+| Centre inside the viewport and large enough, including a tall element only partly scrolled in | Mouse press/release at centre |
+| No content quad (hidden or detached) | Refused unless the node is still in the live selector map, then DOM `click()` |
+
+The first version tested only the box's left and top edge, which sent a tall,
+partly scrolled element down the untrusted DOM path and dropped its
+`pointerdown`; the 2026-10-15 fix pass moved the test to the click point.
 
 ## Verification
 
 ```bash
 cd rust
 cargo test -p bu-cdp --lib -- --test-threads=1
-cargo test -p bu-cdp --features live-chrome click_element -- --test-threads=1
+cargo test -p bu-cdp --features live-chrome click_ -- --test-threads=1
 cargo clippy -p bu-cdp --all-targets -- -D warnings
 ```
 
 The offscreen 1×1 button fixture fails under mouse-centre clicks (title stays
 `Offscreen` or becomes `cover`) and passes once DOM-activated (title
-`clicked`). An in-viewport `Log in` button still clicks.
+`clicked`). In-viewport buttons are asserted to receive a trusted
+`pointerdown` and `click`.
 
-Live mu H5 is checked after installing `browser-use-rs` and reconnecting the
-MCP client (the login page's `Enable accessibility` placeholder). A cargo
-test against that URL is not used: `navigate`'s 8s `stopLoading` plus
+The live check is still **open**: install `browser-use-rs`, reconnect the MCP
+client, and click the `Enable accessibility` placeholder on a real Flutter login
+page. A cargo test against such a page is not used: `navigate`'s 8s `stopLoading` plus
 headless CanvasKit often never injects the placeholder.
 
 [Plan](../plans/2026-09-21-dom-click-offscreen.md) · [Changelog index](README.md)

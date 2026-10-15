@@ -374,15 +374,22 @@ onclick='document.title=\"clicked\"'>Enable accessibility</button>",
     Ok(())
 }
 
+/// Records, on the page title, whether the pointer sequence a click produced was
+/// a real one. A synthetic `HTMLElement.click()` is untrusted and emits no
+/// `pointerdown`, so this tells the two activation paths apart where "the handler
+/// ran" does not.
+const POINTER_LOG: &str = "onpointerdown='(window.log=window.log||[]).push(\"pd:\"+event.isTrusted)' \
+onclick='(window.log=window.log||[]).push(\"click:\"+event.isTrusted);document.title=window.log.join()'";
+
 #[tokio::test]
-async fn click_element_still_clicks_an_in_viewport_button() -> anyhow::Result<()> {
+async fn click_element_uses_a_trusted_mouse_event_for_an_in_viewport_button() -> anyhow::Result<()>
+{
     let session = BrowserSession::launch_headless().await?;
     let page = session.new_page().await?;
-    page.navigate(
+    page.navigate(&format!(
         "data:text/html,<title>Onscreen</title>\
-<button style='position:absolute;left:20px;top:20px;width:200px;height:40px' \
-onclick='document.title=\"clicked\"'>Log in</button>",
-    )
+<button style='position:absolute;left:20px;top:20px;width:200px;height:40px' {POINTER_LOG}>Log in</button>"
+    ))
     .await?;
 
     let elements = page.selector_map().await?;
@@ -392,6 +399,113 @@ onclick='document.title=\"clicked\"'>Log in</button>",
         .expect("in-viewport button must be in the selector map");
     page.click_element(target.index).await?;
 
-    assert_eq!(page.state().await?.title, "clicked");
+    assert_eq!(
+        page.state().await?.title,
+        "pd:true,click:true",
+        "an in-viewport button needs the trusted pointer sequence, not a synthetic click()"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn click_element_keeps_the_mouse_for_a_partly_scrolled_tall_element() -> anyhow::Result<()> {
+    // The box starts 30px above the viewport but its centre is on screen. Testing
+    // the box's top-left would send it down the synthetic path, which pointer-driven
+    // widgets ignore while the tool still reports success.
+    let session = BrowserSession::launch_headless().await?;
+    let page = session.new_page().await?;
+    page.navigate(&format!(
+        "data:text/html,<title>Clipped</title>\
+<button style='position:absolute;left:20px;top:-30px;width:200px;height:400px' {POINTER_LOG}>Tall menu item</button>"
+    ))
+    .await?;
+
+    let elements = page.selector_map().await?;
+    let target = elements
+        .iter()
+        .find(|element| element.text.contains("Tall menu item"))
+        .expect("a partly visible button must be in the selector map");
+    page.click_element(target.index).await?;
+
+    assert_eq!(page.state().await?.title, "pd:true,click:true");
+    Ok(())
+}
+
+#[tokio::test]
+async fn selector_map_reports_checked_false_when_nothing_on_the_page_is_checked(
+) -> anyhow::Result<()> {
+    // Chromium's sparse `inputChecked` data may be absent when no box is checked;
+    // that must read as "unchecked", not as "no checked state".
+    let session = BrowserSession::launch_headless().await?;
+    let page = session.new_page().await?;
+    page.navigate(
+        "data:text/html,<title>Unchecked</title>\
+<input type='CHECKBOX' aria-label='Newsletter'><input type=radio aria-label='Plan'>",
+    )
+    .await?;
+
+    let elements = page.selector_map().await?;
+    for label in ["Newsletter", "Plan"] {
+        let element = elements
+            .iter()
+            .find(|element| element.text.contains(label))
+            .unwrap_or_else(|| panic!("{label} must be in the selector map"));
+        assert_eq!(element.checked, Some(false), "{label}: {element:?}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn click_by_stale_node_id_refuses_a_button_hidden_since_the_snapshot() -> anyhow::Result<()> {
+    // A node with no box (display:none) has no content quad. It used to be
+    // re-checked against the live selector map and refused; the DOM-click path
+    // must keep that check rather than `.click()` something the user cannot see.
+    let session = BrowserSession::launch_headless().await?;
+    let page = session.new_page().await?;
+    page.navigate(
+        "data:text/html,<title>Hidden</title>\
+<button id='b' onclick='document.title=\"clicked\"'>Delete account</button>",
+    )
+    .await?;
+
+    let elements = page.selector_map().await?;
+    let target = elements
+        .iter()
+        .find(|element| element.text.contains("Delete account"))
+        .expect("the button is visible when the snapshot is taken");
+    let backend_node_id = target.backend_node_id_value();
+    page.evaluate_json("document.getElementById('b').style.display='none'; true")
+        .await?;
+
+    assert!(
+        page.click_backend_node_id(backend_node_id).await.is_err(),
+        "a hidden node must not be clicked"
+    );
+    assert_eq!(page.state().await?.title, "Hidden");
+    Ok(())
+}
+
+#[tokio::test]
+async fn click_element_activates_an_offscreen_svg_node() -> anyhow::Result<()> {
+    // SVG elements have no click(); the DOM path has to dispatch the event, and
+    // must not report the TypeError as a bare "Uncaught".
+    let session = BrowserSession::launch_headless().await?;
+    let page = session.new_page().await?;
+    page.navigate(
+        "data:text/html,<title>Svg</title>\
+<svg role='button' aria-label='Close dialog' tabindex='0' width='1' height='1' \
+style='position:absolute;left:-1px;top:-1px' \
+onclick='document.title=\"svg-clicked\"'><rect width='1' height='1'/></svg>",
+    )
+    .await?;
+
+    let elements = page.selector_map().await?;
+    let target = elements
+        .iter()
+        .find(|element| element.text.contains("Close dialog"))
+        .expect("the offscreen svg button must be in the selector map");
+    page.click_element(target.index).await?;
+
+    assert_eq!(page.state().await?.title, "svg-clicked");
     Ok(())
 }

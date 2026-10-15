@@ -37,6 +37,9 @@ async fn forbidden_first_page_and_mutations_fail_closed() -> Result<()> {
     );
     for action in [
         "coordinates",
+        "type_at",
+        "paste_at",
+        "press_key",
         "click",
         "type",
         "select",
@@ -47,19 +50,36 @@ async fn forbidden_first_page_and_mutations_fail_closed() -> Result<()> {
         page.navigate(&url).await?;
         actor.page = Some(page.clone());
         let result = match action {
-            "coordinates" | "scroll" => {
+            "coordinates" | "type_at" | "paste_at" | "press_key" | "scroll" => {
                 let (reply, rx) = oneshot::channel();
-                let command = if action == "coordinates" {
-                    Command::ClickCoordinates {
+                let command = match action {
+                    "coordinates" => Command::ClickCoordinates {
                         x: 10.0,
                         y: 10.0,
                         reply,
-                    }
-                } else {
-                    Command::Scroll {
+                    },
+                    "type_at" => Command::TypeAtCoordinates {
+                        x: 10.0,
+                        y: 10.0,
+                        text: "private".into(),
+                        clear: true,
+                        reply,
+                    },
+                    "paste_at" => Command::PasteAtCoordinates {
+                        x: 10.0,
+                        y: 10.0,
+                        text: "private".into(),
+                        clear: true,
+                        reply,
+                    },
+                    "press_key" => Command::PressKey {
+                        key: "Enter".into(),
+                        reply,
+                    },
+                    _ => Command::Scroll {
                         direction: "down".into(),
                         reply,
-                    }
+                    },
                 };
                 actor.dispatch(command).await;
                 rx.await?

@@ -44,7 +44,7 @@ Read these for the real, source-grounded detail (each cites specific files):
 
 > **Deployed server.** The MCP server running on this host is the Rust
 > reimplementation ([12](12-rust-implementation.md)); docs 00–11 describe the
-> Python design it ports. Rust exposes 19 tools and has a different internal
+> Python design it ports. Rust exposes 21 tools and has a different internal
 > architecture; full Python parity is not claimed. Its plan + living build log are at
 > [docs/plans/2026-07-05-rust-rewrite/](../plans/2026-07-05-rust-rewrite/index.md).
 

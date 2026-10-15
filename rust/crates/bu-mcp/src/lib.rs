@@ -264,6 +264,20 @@ impl BrowserUseMcpServer {
         let text = required_str(arguments.as_ref(), "text", "browser_type")?.to_owned();
         let coordinate_x = optional_i64(arguments.as_ref(), "coordinate_x");
         let coordinate_y = optional_i64(arguments.as_ref(), "coordinate_y");
+        let has_index = arguments
+            .as_ref()
+            .and_then(|args| args.get("index"))
+            .is_some();
+        // Unlike `browser_click`, `browser_type` has no Python precedent for
+        // preferring one mode silently, so mixing them is an error rather than a
+        // guess about which target the caller meant.
+        if has_index && (coordinate_x.is_some() || coordinate_y.is_some()) {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "browser_type takes either index or coordinate_x+coordinate_y, not both",
+                None,
+            ));
+        }
         if let (Some(x), Some(y)) = (coordinate_x, coordinate_y) {
             let clear = optional_bool(arguments.as_ref(), "clear").unwrap_or(true);
             if let Err(error) = self
@@ -279,11 +293,7 @@ impl BrowserUseMcpServer {
             ))]));
         }
 
-        let has_index = arguments
-            .as_ref()
-            .and_then(|args| args.get("index"))
-            .is_some();
-        if (coordinate_x.is_some() || coordinate_y.is_some()) && !has_index {
+        if coordinate_x.is_some() || coordinate_y.is_some() {
             return Err(ErrorData::new(
                 ErrorCode::INVALID_PARAMS,
                 "browser_type requires both coordinate_x and coordinate_y when using coordinate mode",

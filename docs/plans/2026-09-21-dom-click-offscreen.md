@@ -37,8 +37,11 @@ slice.
 - [x] `click_backend_node_id` uses `HTMLElement.click()` when the box is tiny
       or off-viewport; in-viewport boxes still use mouse
 - [x] Headless test passes
-- [x] Changelog + skill note
-- [x] Release build installed (MCP client must reconnect to pick it up)
+- [x] Changelog + usage note in `docs/usage/tools/mcp-multi-agent-setup.md` (the
+      generated skill file is not hand-edited; CI regenerates it from upstream)
+- [ ] Release build installed (the claim was not reproduced: MBP-local's
+      installed binary predates the last edits; nothing from this tree is
+      deployed yet)
 - [ ] Live H5 after reconnect: click index 0, `get_state` lists Log in / Email / terms
 
 ## Verification
@@ -46,6 +49,7 @@ slice.
 ```bash
 cd rust
 cargo test -p bu-cdp --lib -- --test-threads=1
+cargo test -p bu-cdp --features live-chrome click_ -- --test-threads=1
 cargo clippy -p bu-cdp --all-targets -- -D warnings
 cargo fmt --check
 ```

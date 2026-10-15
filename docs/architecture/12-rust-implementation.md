@@ -16,7 +16,7 @@ the staged plan is [parity-plan.md](../plans/2026-07-05-rust-rewrite/parity-plan
 | Crate | Concern | Design doc |
 | --- | --- | --- |
 | `bu-core` | The `browser-use-rs` binary (`--mcp` entry). | [07](07-mcp-integration.md) |
-| `bu-mcp` | rmcp server: `lib.rs` (19 tool handlers + dispatch), `tools.rs` (tool defs), `tests.rs`. | [04](04-tools-and-action-registry.md), [07](07-mcp-integration.md) |
+| `bu-mcp` | rmcp server: `lib.rs` (21 tool handlers + dispatch), `tools.rs` (tool defs), `tests.rs`. | [04](04-tools-and-action-registry.md), [07](07-mcp-integration.md) |
 | `bu-actor` | Single-owner actor serializing all browser work; URL-policy enforcement; per-command timeout. | [00](00-system-overview.md), [02](02-event-bus-and-watchdogs.md), [08](08-actor-scripting-api.md) |
 | `bu-cdp` | Chromium via `chromiumoxide`: `lib.rs` (`BrowserSession`/`BrowserPage`), `dom.rs` (three-tree fusion + filtering), `geometry.rs` (`Rect`/`RectUnion`), `security.rs` (`UrlPolicy`), `discovery.rs` (Chromium/env). | [01](01-cdp-transport-and-session-manager.md), [03](03-dom-perception-pipeline.md) |
 | `bu-agent` | Perceive→decide→act loop: `action.rs` (multi-action + reasoning schema), `lib.rs` (loop + vision), `report.rs`. | [05](05-agent-control-loop.md) |

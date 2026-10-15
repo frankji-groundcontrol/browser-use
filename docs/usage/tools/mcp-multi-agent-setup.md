@@ -8,16 +8,17 @@ tools.
 > **What's deployed here.** The server in production on this host is the Rust
 > reimplementation, **`browser-use-rs --mcp`** (crate workspace under
 > [`rust/`](../../../rust), branch `franky-rust`) — a drop-in replacement for the
-> Python `browser-use --mcp` with byte-identical `tools/list` output and full
-> behavioural parity. See
+> Python `browser-use --mcp`: its `tools/list` is a superset of Python's, with
+> 15 of Python's 16 tools byte-identical (see [the tool surface](#the-tool-surface)). See
 > [architecture/12-rust-implementation.md](../../architecture/12-rust-implementation.md)
 > for the design. The original Python setup is kept at the end as a rollback
 > path. Secrets and private endpoints are shown as placeholders.
 
 ## The tool surface
 
-`browser-use-rs --mcp` speaks MCP over stdio and exposes **19 tools** — 16 with
-names/schemas byte-identical to the Python server, plus 3 additions:
+`browser-use-rs --mcp` speaks MCP over stdio and exposes **21 tools** — 15 with
+names/schemas byte-identical to the Python server, `browser_type` (Python's
+schema plus a coordinate mode, so `index` is optional), and 5 additions:
 
 - **14 low-level primitives** — `browser_navigate`, `browser_click`,
   `browser_type`, `browser_get_state`, `browser_get_html`, `browser_screenshot`,
@@ -28,12 +29,26 @@ names/schemas byte-identical to the Python server, plus 3 additions:
   and `retry_with_browser_use_agent` (a full autonomous sub-agent with vision,
   multi-action, and reasoning). These call the server's own OpenAI-compatible (or
   AWS Bedrock) model, so they need `BROWSER_USE_LLM_*` configured (§3).
-- **3 fork-only additions** — `browser_set_viewport` (check responsive layouts
+- **5 fork-only additions** — `browser_paste_at_coordinates` and
+  `browser_press_key` (keyboard input for canvas pages such as Flutter Web, where
+  there is no element to index; `browser_press_key` takes combos like `Meta+a`
+  and runs the editing command, not just the key event),
+  `browser_set_viewport` (check responsive layouts
   at a real width without relaunching, so the session survives),
   `browser_read_clipboard` (capture text a page only exposes via a "Copy"
   button), and `browser_select_option` (drive native `<select>` dropdowns, which
   cannot be opened by synthetic mouse clicks under CDP). See
   [browser-sessions-and-login.md](browser-sessions-and-login.md).
+
+### Flutter Web and canvas pages
+
+Click the `Enable accessibility` control first (a 1×1 `flt-semantics-placeholder`
+at (-1, -1), index 0). An index click on a tiny or off-screen node is activated
+with a DOM `click()` instead of a mouse event, which would miss it; afterwards
+`browser_get_state` should list the real controls. If the tree stays empty, take
+a `browser_screenshot` and use `browser_type` or `browser_paste_at_coordinates`
+with coordinates. **Not yet verified against a real Flutter app:** the test
+stand-in is a plain 1×1 button, and the live check is still open.
 
 ## 1. Build & install the Rust binary
 
@@ -298,7 +313,7 @@ browser-use`, `hermes gateway restart && hermes gateway status`, `qoder mcp list
 and `grok mcp doctor browser-use` (naming the server matters — a bare `grok mcp
 doctor` probes *every* configured server and stalls on any unreachable one). A
 quick manual smoke test — pipe `initialize` then `tools/list` into
-`browser-use-rs --mcp` and expect 19 tools.
+`browser-use-rs --mcp` and expect 21 tools.
 
 > `qoder mcp get <name>` prints the server's `env` block in plaintext, API key
 > included. Prefer `qoder mcp list` when the output might be shared.

@@ -25,9 +25,11 @@ fn tools_list_returns_21_low_level_tools() {
     let tools = low_level_tools();
     let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
 
-    // 16 are byte-identical to Python's set; browser_set_viewport,
-    // browser_read_clipboard, browser_select_option, browser_paste_at_coordinates,
-    // and browser_press_key are this fork's deliberate additions.
+    // Python has 16 tools; 15 are byte-identical here and browser_type extends
+    // its schema with coordinate mode (index is no longer required).
+    // browser_set_viewport, browser_read_clipboard, browser_select_option,
+    // browser_paste_at_coordinates, and browser_press_key are this fork's
+    // deliberate additions.
     assert_eq!(tools.len(), 21);
     assert_eq!(
         names,
@@ -1368,6 +1370,41 @@ async fn pasting_at_coordinates_replaces_prefilled_value() -> anyhow::Result<()>
 
 #[tokio::test]
 #[cfg(feature = "live-chrome")]
+async fn typing_rejects_an_index_combined_with_coordinates() -> anyhow::Result<()> {
+    // Mixing the two modes used to type at the coordinates and ignore the index
+    // without saying so.
+    let server = BrowserUseMcpServer::new();
+    open_coordinate_input_page(&server).await?;
+
+    let error = server
+        .call_browser_tool(call(
+            "browser_type",
+            json!({"index": 0, "coordinate_x": 150, "coordinate_y": 30, "text": "x"}),
+        ))
+        .await
+        .expect_err("index plus coordinates is ambiguous and must be rejected");
+    assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+    assert_eq!(
+        input_value(&server).await?,
+        json!("old value"),
+        "a rejected call must not have typed anywhere"
+    );
+
+    // One stray coordinate with an index is the same mistake.
+    let error = server
+        .call_browser_tool(call(
+            "browser_type",
+            json!({"index": 0, "coordinate_x": 150, "text": "x"}),
+        ))
+        .await
+        .expect_err("a stray coordinate next to an index must be rejected");
+    assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
 async fn pasting_without_a_secure_context_explains_the_requirement() -> anyhow::Result<()> {
     // navigator.clipboard is undefined outside a secure context. Without this
     // check the failure surfaced as "Cannot read properties of undefined", which
@@ -1387,6 +1424,59 @@ async fn pasting_without_a_secure_context_explains_the_requirement() -> anyhow::
     assert!(
         message.contains("secure context") && message.contains("browser_type"),
         "the error should name the cause and the alternative: {message}"
+    );
+
+    // The clipboard is staged before the field is cleared, so a paste that cannot
+    // work must not leave the field wiped.
+    assert_eq!(
+        input_value(&server).await?,
+        json!("old value"),
+        "a failed paste must leave the field as it found it"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn pasting_leaves_no_pasted_text_or_clipboard_grant_behind() -> anyhow::Result<()> {
+    // The pasted text may be a credential, and the clipboard permission was
+    // granted to the page's origin only for the length of the call.
+    let page = MockHttpServer::spawn_html(COORDINATE_INPUT_PAGE).await?;
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call("browser_navigate", json!({"url": page.base_url()})))
+        .await?;
+
+    server
+        .call_browser_tool(call(
+            "browser_paste_at_coordinates",
+            json!({"coordinate_x": 150, "coordinate_y": 30, "text": "s3cret-token"}),
+        ))
+        .await?;
+    assert_eq!(input_value(&server).await?, json!("s3cret-token"));
+
+    let clipboard = server
+        .call_browser_tool(call("browser_read_clipboard", json!({})))
+        .await;
+    if let Ok(result) = clipboard {
+        assert!(
+            !text_content(&result).contains("s3cret-token"),
+            "the pasted text must not stay on the clipboard: {}",
+            text_content(&result)
+        );
+    }
+
+    let permission = server
+        .actor()
+        .evaluate(
+            "navigator.permissions.query({name: 'clipboard-read'}).then(status => status.state)",
+        )
+        .await?;
+    assert_eq!(
+        permission,
+        json!("prompt"),
+        "clipboard-read must not stay granted after the paste"
     );
 
     Ok(())
@@ -1419,6 +1509,113 @@ async fn press_key_reaches_the_focused_element() -> anyhow::Result<()> {
 
     let keys = server.actor().evaluate("window.keys.join(',')").await?;
     assert_eq!(keys, json!("Enter/Enter"));
+
+    Ok(())
+}
+
+#[cfg(feature = "live-chrome")]
+async fn click_coordinate_input(server: &BrowserUseMcpServer) -> anyhow::Result<()> {
+    server
+        .call_browser_tool(call(
+            "browser_click",
+            json!({"coordinate_x": 150, "coordinate_y": 30}),
+        ))
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn press_key_accelerators_run_their_editing_command() -> anyhow::Result<()> {
+    // A synthetic Control/Meta shortcut is a silent no-op unless the editing
+    // command rides along, and the tool used to report success either way. The
+    // field's resulting value is the only honest check.
+    let server = BrowserUseMcpServer::new();
+    open_coordinate_input_page(&server).await?;
+    click_coordinate_input(&server).await?;
+
+    server
+        .call_browser_tool(call("browser_press_key", json!({"key": "Control+a"})))
+        .await?;
+    server
+        .call_browser_tool(call("browser_press_key", json!({"key": "Backspace"})))
+        .await?;
+
+    assert_eq!(
+        input_value(&server).await?,
+        json!(""),
+        "Control+a then Backspace must empty the field"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn press_key_enter_submits_the_form() -> anyhow::Result<()> {
+    // Implicit submission is driven by the `keypress` that only a key event
+    // carrying text raises; a bare keydown/keyup pair never submits.
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call(
+            "browser_navigate",
+            json!({"url": data_url(
+                "<title>Form</title>\
+                 <form onsubmit=\"document.title='submitted';return false\">\
+                 <input id=i style='position:fixed;left:0;top:0;width:300px;height:60px;margin:0'></form>"
+            )}),
+        ))
+        .await?;
+    click_coordinate_input(&server).await?;
+
+    server
+        .call_browser_tool(call("browser_press_key", json!({"key": "Enter"})))
+        .await?;
+
+    let title = server.actor().evaluate("document.title").await?;
+    assert_eq!(title, json!("submitted"));
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn press_key_navigation_keys_move_and_delete() -> anyhow::Result<()> {
+    // Home and Delete have no entry in a small key table, which left them without
+    // a virtual key code and therefore inert.
+    let server = BrowserUseMcpServer::new();
+    open_coordinate_input_page(&server).await?;
+    click_coordinate_input(&server).await?;
+
+    for key in ["Home", "Delete"] {
+        server
+            .call_browser_tool(call("browser_press_key", json!({"key": key})))
+            .await?;
+    }
+
+    assert_eq!(
+        input_value(&server).await?,
+        json!("ld value"),
+        "Home then Delete must remove the first character of 'old value'"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn press_key_printable_character_is_inserted() -> anyhow::Result<()> {
+    let server = BrowserUseMcpServer::new();
+    open_coordinate_input_page(&server).await?;
+    click_coordinate_input(&server).await?;
+
+    for key in ["Control+a", "Shift+h", "i"] {
+        server
+            .call_browser_tool(call("browser_press_key", json!({"key": key})))
+            .await?;
+    }
+
+    assert_eq!(input_value(&server).await?, json!("Hi"));
 
     Ok(())
 }
@@ -1509,6 +1706,12 @@ const PREFILLED_FORM_PAGE: &str = r#"<title>Prefilled</title>
     <input id=secret type=password placeholder="Your password">
     <input id=otp autocomplete=one-time-code placeholder="One time code">
     <input id=card autocomplete=cc-number placeholder="Card number">
+    <input id=billcard autocomplete="billing cc-number" placeholder="Billing card">
+    <input id=sectotp autocomplete="section-pay shipping one-time-code" placeholder="Section code">
+    <input id=curpw autocomplete=current-password placeholder="Current password">
+    <input id=newpw autocomplete=new-password placeholder="New password">
+    <input id=revealed type=text name=login_password placeholder="Revealed password">
+    <textarea id=essay placeholder="Essay"></textarea>
     <input id=agree type=checkbox aria-label="Agree" checked>
     <input id=news type=checkbox aria-label="Newsletter">
     <script>
@@ -1517,6 +1720,12 @@ const PREFILLED_FORM_PAGE: &str = r#"<title>Prefilled</title>
         document.getElementById('secret').value = 'hunter2';
         document.getElementById('otp').value = '493021';
         document.getElementById('card').value = '4242424242424242';
+        document.getElementById('billcard').value = '5555444433331111';
+        document.getElementById('sectotp').value = '880011';
+        document.getElementById('curpw').value = 'swordfish';
+        document.getElementById('newpw').value = 'trombone';
+        document.getElementById('revealed').value = 'correct-horse';
+        document.getElementById('essay').value = 'a'.repeat(500);
         document.getElementById('agree').checked = false;
         document.getElementById('news').checked = true;
     </script>"#;
@@ -1558,6 +1767,15 @@ async fn get_state_reports_live_input_values_and_checked_state() -> anyhow::Resu
         element_by_text(elements, "Your notes")["value"],
         json!("call back tuesday"),
         "textarea live values come from the snapshot's textValue: {elements:?}"
+    );
+
+    let essay = element_by_text(elements, "Essay")["value"]
+        .as_str()
+        .expect("a long textarea value is still reported, capped");
+    assert!(
+        essay.chars().count() <= 201 && essay.ends_with('…'),
+        "a 500-char value must be capped and marked, got {} chars",
+        essay.chars().count()
     );
 
     assert_eq!(
@@ -1611,7 +1829,19 @@ async fn get_state_never_exposes_sensitive_live_values() -> anyhow::Result<()> {
         .as_array()
         .expect("elements should be an array");
 
-    for label in ["Your password", "One time code", "Card number"] {
+    for label in [
+        "Your password",
+        "One time code",
+        "Card number",
+        // `autocomplete` is a token list; these are the shapes a `starts_with`
+        // on the whole attribute misses.
+        "Billing card",
+        "Section code",
+        "Current password",
+        "New password",
+        // A reveal toggle flips `type` to text, leaving only the name.
+        "Revealed password",
+    ] {
         assert_eq!(
             element_by_text(elements, label)["value"],
             Value::Null,
@@ -1620,7 +1850,16 @@ async fn get_state_never_exposes_sensitive_live_values() -> anyhow::Result<()> {
     }
 
     let serialized = serde_json::to_string(&state)?;
-    for secret in ["hunter2", "493021", "4242424242424242"] {
+    for secret in [
+        "hunter2",
+        "493021",
+        "4242424242424242",
+        "5555444433331111",
+        "880011",
+        "swordfish",
+        "trombone",
+        "correct-horse",
+    ] {
         assert!(
             !serialized.contains(secret),
             "{secret} leaked into browser_get_state: {serialized}"

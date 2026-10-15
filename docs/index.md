@@ -6,7 +6,7 @@ organized on the `franky` branch following the `clean-repo-org` practice.
 
 > **Deployed MCP server:** the surface the coding agents drive on this host is the
 > Rust reimplementation **`browser-use-rs --mcp`** (workspace under
-> [`rust/`](../rust), branch `franky-rust`) — a partial port with 19 tools,
+> [`rust/`](../rust), branch `franky-rust`) — a partial port with 21 tools,
 > a URL-access policy, and an agent loop. Reference:
 > [architecture/12-rust-implementation.md](architecture/12-rust-implementation.md);
 > setup: [usage/tools/mcp-multi-agent-setup.md](usage/tools/mcp-multi-agent-setup.md).

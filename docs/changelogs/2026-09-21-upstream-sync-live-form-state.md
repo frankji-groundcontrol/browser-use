@@ -34,7 +34,7 @@ autofill, or a framework fills a field, the value lives on the element property,
 which `DOMSnapshot.captureSnapshot` reports in the sparse `inputValue` /
 `textValue` / `inputChecked` arrays. `browser_get_state` could not distinguish a
 filled field from an empty one; the same blind spot made QA on a Flutter H5 app
-fall back to `evaluate("…​.value")` to check its own work.
+fall back to `evaluate("….value")` to check its own work.
 
 `SelectorMapElement` gains `value` and `checked`, surfaced in
 `browser_get_state`. Sensitive fields — `type` password/file/hidden, and
@@ -109,13 +109,17 @@ cargo test --features live-chrome -- --test-threads=1
 The redaction lock was validated by reverting it: with the `is_sensitive_input`
 filter disabled, `get_state_never_exposes_sensitive_live_values` fails with the
 password, one-time code, and card number all present in the state payload.
+*(The original author's claim, not re-run as written. The 2026-10-15 fix pass
+re-proved the lock against the pre-fix code instead; see
+[the review findings](../issues/2026-10-15-mbp-local-wip-review-findings.md).)*
 
-All green: **169 tests, 0 failures** in 4m50s, with `fmt --check` and
-`clippy -D warnings` clean. Binary rebuilt and installed.
-
-The redaction lock was validated by reverting it: with the `is_sensitive_input`
-filter disabled, `get_state_never_exposes_sensitive_live_values` fails with the
-password, one-time code, and card number all present in the state payload.
+All green on MBP-local: **169 tests, 0 failures** in 4m50s, with `fmt --check`
+and `clippy -D warnings` clean. That figure is the original author's and was not
+reproduced; the same tree on the pulling host ran 174 tests (the difference was
+not investigated). The original
+note that the binary was "rebuilt and installed" does **not** hold: MBP-local's
+installed binary was dated before the last edits and its hash differed from its
+own build tree. Nothing from this tree has been deployed.
 
 ### A note on the environment, not the code
 

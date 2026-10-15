@@ -51,9 +51,20 @@ pub(crate) struct EnhancedNode {
 /// caller, a log, or an LLM prompt by any later serialization.
 const SENSITIVE_INPUT_TYPES: &[&str] = &["password", "file", "hidden"];
 
-/// `autocomplete` values marking payment and one-time-code fields. `cc-` covers
-/// the whole `cc-number`/`cc-csc`/`cc-exp` family.
-const SENSITIVE_AUTOCOMPLETE_PREFIXES: &[&str] = &["cc-", "one-time-code"];
+/// `autocomplete` tokens marking payment, one-time-code, and password fields.
+/// `cc-` covers the whole `cc-number`/`cc-csc`/`cc-exp` family.
+const SENSITIVE_AUTOCOMPLETE_PREFIXES: &[&str] =
+    &["cc-", "one-time-code", "current-password", "new-password"];
+
+/// Substrings of an element's `name`/`id` that mark a password field. This is the
+/// only signal left once a "show password" toggle has flipped `type` to `text`.
+/// It deliberately over-matches: hiding a harmless value costs a re-read, leaking
+/// a credential does not have an undo.
+const SENSITIVE_NAME_MARKERS: &[&str] = &["password", "passwd", "pwd"];
+
+/// Longest live `value` kept, in characters. A pasted document in a textarea
+/// should not be able to flood `browser_get_state`.
+const MAX_LIVE_VALUE_CHARS: usize = 200;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SelectorMapCandidate {
@@ -211,10 +222,10 @@ pub(crate) fn merge_snapshot(
             // covers the whole document, so without the type test every text input
             // would claim `checked: false`; and a checkbox's value is the constant
             // "on", which says nothing its checked state doesn't.
-            let is_toggle = matches!(
-                enhanced.attributes.get("type").map(String::as_str),
-                Some("checkbox") | Some("radio")
-            );
+            let is_toggle = enhanced
+                .attributes
+                .get("type")
+                .is_some_and(|value| is_toggle_type(value));
             if !is_toggle {
                 if let Some(value) = live_values.get(&node_index) {
                     enhanced.input_value = Some(value.clone());
@@ -299,7 +310,7 @@ fn live_input_values(
                 continue;
             }
             if let Some(value) = snapshot_string(snapshot, *string_index) {
-                values.insert(node_index, value.to_owned());
+                values.insert(node_index, cap_live_value(value));
             }
         }
     }
@@ -320,8 +331,8 @@ fn live_checked_indices(nodes: &NodeTreeSnapshot) -> Option<HashSet<usize>> {
     )
 }
 
-/// True for password, file, and hidden inputs and for payment or one-time-code
-/// autocomplete fields.
+/// True for password, file, and hidden inputs, for payment, one-time-code, and
+/// password autocomplete fields, and for any node whose attributes are missing.
 ///
 /// Reads the snapshot's own attribute array rather than the merged node, because
 /// this has to hold before anything is written to [`EnhancedNode`].
@@ -335,7 +346,8 @@ fn is_sensitive_input(
         .as_ref()
         .and_then(|attributes| attributes.get(node_index))
     else {
-        return false;
+        // No attribute record means the type cannot be checked, so fail closed.
+        return true;
     };
 
     attributes
@@ -347,20 +359,50 @@ fn is_sensitive_input(
                 snapshot_string(snapshot, chunk[1])?,
             ))
         })
-        .any(|(name, value)| {
-            if name.eq_ignore_ascii_case("type") {
-                return SENSITIVE_INPUT_TYPES
-                    .iter()
-                    .any(|sensitive| value.eq_ignore_ascii_case(sensitive));
-            }
-            if name.eq_ignore_ascii_case("autocomplete") {
-                let value = value.to_ascii_lowercase();
-                return SENSITIVE_AUTOCOMPLETE_PREFIXES
-                    .iter()
-                    .any(|prefix| value.starts_with(prefix));
-            }
-            false
-        })
+        .any(|(name, value)| attribute_is_sensitive(name, value))
+}
+
+/// True when a single attribute marks its element as holding a secret.
+///
+/// `autocomplete` is a space-separated token list in which section and
+/// `billing`/`shipping` tokens may precede the field name, so each token is tested
+/// on its own: `billing cc-number` is a card field even though the string does
+/// not start with `cc-`.
+fn attribute_is_sensitive(name: &str, value: &str) -> bool {
+    match name.to_ascii_lowercase().as_str() {
+        "type" => SENSITIVE_INPUT_TYPES
+            .iter()
+            .any(|sensitive| value.eq_ignore_ascii_case(sensitive)),
+        "autocomplete" => value.split_ascii_whitespace().any(|token| {
+            let token = token.to_ascii_lowercase();
+            SENSITIVE_AUTOCOMPLETE_PREFIXES
+                .iter()
+                .any(|prefix| token.starts_with(prefix))
+        }),
+        "name" | "id" => {
+            let value = value.to_ascii_lowercase();
+            SENSITIVE_NAME_MARKERS
+                .iter()
+                .any(|marker| value.contains(marker))
+        }
+        _ => false,
+    }
+}
+
+/// HTML `type` values are ASCII case-insensitive, so `CHECKBOX` is a checkbox.
+fn is_toggle_type(value: &str) -> bool {
+    value.eq_ignore_ascii_case("checkbox") || value.eq_ignore_ascii_case("radio")
+}
+
+/// Bounds a live value to [`MAX_LIVE_VALUE_CHARS`] on a character boundary,
+/// marking the cut so a truncated value is not mistaken for the whole one.
+fn cap_live_value(value: &str) -> String {
+    let mut chars = value.chars();
+    let mut capped: String = chars.by_ref().take(MAX_LIVE_VALUE_CHARS).collect();
+    if chars.next().is_some() {
+        capped.push('…');
+    }
+    capped
 }
 
 pub(crate) fn merge_ax_tree(ax_nodes: &[AxNode], nodes: &mut HashMap<i64, EnhancedNode>) {
@@ -887,4 +929,88 @@ fn attr_value<'a>(node: &'a Node, name: &str) -> Option<&'a str> {
             .eq_ignore_ascii_case(name)
             .then_some(chunk[1].as_str())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{attribute_is_sensitive, cap_live_value, is_toggle_type, MAX_LIVE_VALUE_CHARS};
+
+    #[test]
+    fn toggle_types_are_matched_case_insensitively() {
+        for value in ["checkbox", "CHECKBOX", "Radio"] {
+            assert!(is_toggle_type(value), "{value} is a toggle");
+        }
+        for value in ["text", "checkboxes", ""] {
+            assert!(!is_toggle_type(value), "{value} is not a toggle");
+        }
+    }
+
+    #[test]
+    fn autocomplete_token_lists_are_matched_token_by_token() {
+        // `autocomplete` is a token list; section and billing/shipping tokens may
+        // come first, so a whole-string prefix test misses all of these.
+        for value in [
+            "cc-number",
+            "billing cc-number",
+            "section-pay cc-csc",
+            "shipping one-time-code",
+            "SECTION-A Billing CC-EXP",
+            "current-password",
+            "new-password",
+            "  billing \t cc-name ",
+        ] {
+            assert!(
+                attribute_is_sensitive("autocomplete", value),
+                "autocomplete={value:?} must be redacted"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_autocomplete_and_types_are_not_redacted() {
+        for (name, value) in [
+            ("autocomplete", "name"),
+            ("autocomplete", "section-cc billing email"),
+            ("autocomplete", "off"),
+            ("type", "text"),
+            ("type", "email"),
+            ("name", "username"),
+            ("class", "password-strength"),
+        ] {
+            assert!(
+                !attribute_is_sensitive(name, value),
+                "{name}={value:?} must stay visible"
+            );
+        }
+    }
+
+    #[test]
+    fn password_like_types_and_names_are_redacted_case_insensitively() {
+        for (name, value) in [
+            ("type", "password"),
+            ("TYPE", "Password"),
+            ("type", "file"),
+            ("type", "hidden"),
+            // A reveal toggle flips type to text; the name is what is left.
+            ("name", "user_password"),
+            ("id", "LoginPwd"),
+            ("name", "passwd"),
+        ] {
+            assert!(
+                attribute_is_sensitive(name, value),
+                "{name}={value:?} must be redacted"
+            );
+        }
+    }
+
+    #[test]
+    fn live_values_are_capped_on_a_char_boundary() {
+        let short = "x".repeat(MAX_LIVE_VALUE_CHARS);
+        assert_eq!(cap_live_value(&short), short);
+
+        let long = "é".repeat(MAX_LIVE_VALUE_CHARS + 50);
+        let capped = cap_live_value(&long);
+        assert_eq!(capped.chars().count(), MAX_LIVE_VALUE_CHARS + 1);
+        assert!(capped.ends_with('…'));
+    }
 }

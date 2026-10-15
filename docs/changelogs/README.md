@@ -1,5 +1,9 @@
 # Change records
 
+- [2026-10-15 — Fixes from the MBP-local WIP review](2026-10-15-mbp-local-wip-review-fixes.md)
+  — redaction token lists, trusted-click routing, key accelerators, paste
+  safety, and policy coverage for the new input tools.
+
 - [2026-09-16 — Whole-repository hardening and proof](2026-09-16-hardening-review-findings.md)
   — retained findings fixed; Bedrock Converse tools/streaming fixture-proven; Docker daemon and live AWS remain blocked.
 

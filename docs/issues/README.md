@@ -12,7 +12,8 @@ a resolution.
 
 - [2026-10-15 — Review findings on the MBP-local WIP](2026-10-15-mbp-local-wip-review-findings.md)
   — one blocker (autocomplete redaction bypasses token lists) and 12 should-fix
-  items in the three-slice WIP landed in `3c6a553e7`; open, not pushed.
+  items in the three-slice WIP landed in `3c6a553e7`; resolved with
+  mutation-checked tests, 18 nits triaged, not deployed.
 - [2026-09-16 — Current Chrome DevTools endpoint is not exposed](2026-09-16-current-chrome-devtools-endpoint.md)
 
 - [2026-08-02 — DOMSnapshot bounds are frame-local: iframe clicks hit the wrong element](2026-08-02-iframe-frame-local-bounds-wrong-click.md)

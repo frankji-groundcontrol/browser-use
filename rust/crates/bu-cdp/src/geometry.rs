@@ -48,16 +48,23 @@ impl Rect {
         (self.x + self.width / 2.0, self.y + self.height / 2.0)
     }
 
-    /// Tiny or off-viewport boxes cannot be hit with a compositor mouse event.
+    /// Whether a compositor mouse event at this box's centre would miss it.
     ///
-    /// Flutter Web's `flt-semantics-placeholder` is 1×1 CSS px at `(-1, -1)`.
-    /// A mouse event at that centre misses the node; `HTMLElement.click()` does
-    /// not.
-    pub(crate) fn prefers_dom_click(self) -> bool {
+    /// The click lands on the centre, so that point must be inside the viewport
+    /// (`viewport` is `(width, height)` in CSS px); testing the box's own edges
+    /// instead would divert a tall, partly scrolled element to a synthetic
+    /// `click()` that pointer-driven widgets ignore. A box under 2×2 px is also
+    /// sent to the DOM. Flutter Web's `flt-semantics-placeholder` is 1×1 CSS px at
+    /// `(-1, -1)`: a mouse event at that centre misses the node, and
+    /// `HTMLElement.click()` does not.
+    pub(crate) fn prefers_dom_click(self, viewport: (f64, f64)) -> bool {
         const MIN_MOUSE_EDGE: f64 = 2.0;
+        let (cx, cy) = self.center();
         (self.width < MIN_MOUSE_EDGE && self.height < MIN_MOUSE_EDGE)
-            || self.x < 0.0
-            || self.y < 0.0
+            || cx < 0.0
+            || cy < 0.0
+            || cx >= viewport.0
+            || cy >= viewport.1
     }
 
     /// Bounding box of a CDP content quad `[x1,y1, x2,y2, x3,y3, x4,y4]`.
@@ -192,15 +199,21 @@ fn split_rect_difference(rect: Rect, cutter: Rect) -> Vec<Rect> {
 mod tests {
     use super::Rect;
 
+    const VIEWPORT: (f64, f64) = (1280.0, 800.0);
+
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
     #[test]
     fn flutter_a11y_placeholder_prefers_dom_click() {
-        let placeholder = Rect {
-            x: -1.0,
-            y: -1.0,
-            width: 1.0,
-            height: 1.0,
-        };
-        assert!(placeholder.prefers_dom_click());
+        let placeholder = rect(-1.0, -1.0, 1.0, 1.0);
+        assert!(placeholder.prefers_dom_click(VIEWPORT));
         let (cx, cy) = placeholder.center();
         assert!((cx + 0.5).abs() < f64::EPSILON);
         assert!((cy + 0.5).abs() < f64::EPSILON);
@@ -208,20 +221,35 @@ mod tests {
 
     #[test]
     fn in_viewport_form_controls_keep_mouse_click() {
-        let email_overlay = Rect {
-            x: 46.76,
-            y: 288.06,
-            width: 296.48,
-            height: 20.0,
-        };
-        assert!(!email_overlay.prefers_dom_click());
-        let cta = Rect {
-            x: 16.0,
-            y: 790.0,
-            width: 358.0,
-            height: 44.0,
-        };
-        assert!(!cta.prefers_dom_click());
+        assert!(!rect(46.76, 288.06, 296.48, 20.0).prefers_dom_click(VIEWPORT));
+        assert!(!rect(16.0, 790.0, 358.0, 6.0).prefers_dom_click(VIEWPORT));
+    }
+
+    #[test]
+    fn partly_clipped_element_with_an_on_screen_centre_keeps_mouse_click() {
+        // A tall menu item scrolled 30px past the top. Its top-left is negative but
+        // the point a mouse would hit is visible, and a trusted event is what
+        // pointer-driven widgets (Radix, react-select) listen for.
+        assert!(!rect(100.0, -30.0, 200.0, 400.0).prefers_dom_click(VIEWPORT));
+        assert!(!rect(-40.0, 100.0, 400.0, 50.0).prefers_dom_click(VIEWPORT));
+    }
+
+    #[test]
+    fn element_whose_centre_is_off_screen_prefers_dom_click() {
+        // Past the bottom and right edges, which the old left/top-only test missed.
+        assert!(rect(100.0, 790.0, 200.0, 200.0).prefers_dom_click(VIEWPORT));
+        assert!(rect(1270.0, 100.0, 200.0, 40.0).prefers_dom_click(VIEWPORT));
+        // Wholly above the viewport.
+        assert!(rect(100.0, -300.0, 200.0, 100.0).prefers_dom_click(VIEWPORT));
+        // The viewport is half-open: a centre exactly on the far edge is outside.
+        assert!(rect(0.0, 700.0, 1280.0, 200.0).prefers_dom_click(VIEWPORT));
+    }
+
+    #[test]
+    fn unknown_viewport_only_rejects_negative_centres() {
+        let unknown = (f64::INFINITY, f64::INFINITY);
+        assert!(!rect(100.0, 5000.0, 200.0, 40.0).prefers_dom_click(unknown));
+        assert!(rect(-300.0, 10.0, 100.0, 40.0).prefers_dom_click(unknown));
     }
 
     #[test]

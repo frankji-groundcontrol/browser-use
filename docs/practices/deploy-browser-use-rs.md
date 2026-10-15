@@ -51,8 +51,12 @@ See [issues/2026-08-26-installed-binary-drift-from-build-tree.md](../issues/2026
    must print an rmcp error and exit `1`. Exit `137` = broken signature.
 2. **Protocol probe** — pipe `initialize` + `tools/list` JSON-RPC lines over
    stdio; assert serverInfo `name=browser-use` and the expected tool count
-   (19 as of 2026-08-26: 16 Python-identical + `browser_set_viewport`,
-   `browser_read_clipboard`, `browser_select_option`). Bound it with
+   (**21** from `3c6a553e7`; it was 19 on 2026-08-26. 15 Python-identical,
+   `browser_type` with Python's schema plus coordinate mode, and 5 additions:
+   `browser_set_viewport`, `browser_read_clipboard`, `browser_select_option`,
+   `browser_paste_at_coordinates`, `browser_press_key`). The expected count is
+   asserted by `tools_list_returns_21_low_level_tools` in `bu-mcp`; change both
+   together. Bound it with
    `timeout`: the server keeps running after `tools/list`, so an unbounded
    pipe hangs rather than reporting a count.
 3. **Registration** — `claude mcp list` shows `✔ Connected`; for the other

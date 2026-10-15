@@ -21,4 +21,16 @@ Date: 2026-10-15
   blocker and four others; one claim (that a hand edit would fail CI) stayed
   only plausible until the generating script was read.
 
+- The fix pass showed what mutation checks buy. A finding the reviewers ranked
+  a nit (a hidden button still clicked after the snapshot) was a real regression:
+  its failing test clicked the "Delete account" button. Conversely, a test that
+  appeared to hang for ten minutes at 0% CPU under load ~21 passed in about 2 s
+  on every rerun. Bound a live run with `perl -e 'alarm N; exec @ARGV' cargo test
+  ...` instead of waiting, and rerun it before blaming the change.
+- `cmd | tail; echo $?` reports `tail`'s status. A sync check that exited 1 read
+  as 0 until it was rerun with its output redirected to a file. Read the exit code
+  of the command, not of the pipeline. That check also failed for a reason
+  unrelated to the hand edit it was suspected of (it compares against upstream's
+  live `main`), so "CI will go red because of this edit" was true but incomplete.
+
 Related: [review findings](../issues/2026-10-15-mbp-local-wip-review-findings.md).

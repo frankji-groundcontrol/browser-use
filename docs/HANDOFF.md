@@ -45,14 +45,17 @@ MCP fixture uses the explicit `BROWSER_USE_LLM_*` environment surface.
 Recent slice (2026-10-15): MBP-local is a **fourth host** outside the three above.
 It held 15 files of uncommitted, unpushed work (DOM-click offscreen, Flutter
 coordinate typing, live form state). It was pulled here byte-identically (per-file
-sha256) and committed locally as `3c6a553e7`; **not pushed**, and MBP-local's own
-tree is still dirty with an installed binary that predates the work. Gates on this
-host: fmt and clippy `-D warnings` (default and `live-chrome`) clean, 174 tests
-pass; live H5 verification of DOM-click is still open. A pre-commit review found
-**one blocker (autocomplete redaction bypass) and 12 should-fix items**, recorded
-in [the review findings](issues/2026-10-15-mbp-local-wip-review-findings.md). Do not
-push or deploy before the blocker is fixed. Tool count is now 21; the probe in
-[deploy-browser-use-rs.md](practices/deploy-browser-use-rs.md) still says 19.
+sha256) and landed as `3c6a553e7`. A pre-commit review found **one blocker
+(autocomplete redaction bypass) and 12 should-fix items**; all are fixed with
+mutation-checked tests, and the 18 nits are triaged, in
+[the review findings](issues/2026-10-15-mbp-local-wip-review-findings.md). The
+fixes are on `franky-rust`. **Nothing is deployed:** MBP-local's own tree is still
+dirty and its installed binary predates the work. The tool count is now **21**
+(15 Python-identical, `browser_type` extended with coordinates, 5 additions), and
+the probe in [deploy-browser-use-rs.md](practices/deploy-browser-use-rs.md) expects
+it. Still open: the live DOM-click check on a real Flutter page, and the
+"browser-use skill sync" CI job, which is red because upstream `browser-harness`
+moved, not because of this fork.
 
 **The LLM environment surface changed on 2026-08-27 and is a breaking change.**
 Configure the model with `BROWSER_USE_LLM_BASE_URL`, `_API_KEY`, `_API`
@@ -117,6 +120,13 @@ Two divergences a newcomer would otherwise trip over:
 needed. Start Chrome with remote debugging, set `BROWSER_USE_CDP_URL`, then run
 the sequential attach probe in the deployment plan. See
 `issues/2026-09-16-current-chrome-devtools-endpoint.md`.
+
+7. **Deploy the 21-tool build and run the live Flutter check.** Follow
+   [deploy-browser-use-rs.md](practices/deploy-browser-use-rs.md) on each host (the
+   probe expects 21 tools), reconnect the MCP client, and click index 0 on a real
+   Flutter login page.
+   Done when: `browser_get_state` lists the page's real controls, or the gap is
+   recorded in the [DOM-click plan](plans/2026-09-21-dom-click-offscreen.md).
 
 ## How to pick up the work
 
