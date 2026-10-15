@@ -6,7 +6,9 @@ use std::collections::{HashMap, HashSet};
 use chromiumoxide::cdp::browser_protocol::{
     accessibility::{AxNode, AxValue},
     dom::{BackendNodeId, Node},
-    dom_snapshot::{ArrayOfStrings, CaptureSnapshotReturns, Rectangle, StringIndex},
+    dom_snapshot::{
+        ArrayOfStrings, CaptureSnapshotReturns, NodeTreeSnapshot, Rectangle, StringIndex,
+    },
 };
 
 use crate::geometry::{Rect, RectUnion, CONTAINMENT_THRESHOLD};
@@ -37,7 +39,22 @@ pub(crate) struct EnhancedNode {
     /// `bounds` are frame-LOCAL, so only rects sharing this id share a coordinate
     /// space and may be compared geometrically.
     pub(crate) document_frame_id: Option<String>,
+    /// Live value of an `<input>`/`<textarea>`, which the `value` attribute misses
+    /// once JavaScript, autofill, or a framework has set it. Never populated for
+    /// sensitive fields — see [`is_sensitive_input`].
+    pub(crate) input_value: Option<String>,
+    /// Live checked state of a checkbox or radio, which the `checked` attribute
+    /// misses once JavaScript has changed it.
+    pub(crate) input_checked: Option<bool>,
 }
+/// Input types whose live value never enters the snapshot, so it cannot reach a
+/// caller, a log, or an LLM prompt by any later serialization.
+const SENSITIVE_INPUT_TYPES: &[&str] = &["password", "file", "hidden"];
+
+/// `autocomplete` values marking payment and one-time-code fields. `cc-` covers
+/// the whole `cc-number`/`cc-csc`/`cc-exp` family.
+const SENSITIVE_AUTOCOMPLETE_PREFIXES: &[&str] = &["cc-", "one-time-code"];
+
 #[derive(Debug, Clone)]
 pub(crate) struct SelectorMapCandidate {
     backend_node_id: BackendNodeId,
@@ -45,6 +62,8 @@ pub(crate) struct SelectorMapCandidate {
     text: String,
     href: Option<String>,
     bounds: Rect,
+    value: Option<String>,
+    checked: Option<bool>,
 }
 
 impl SelectorMapCandidate {
@@ -72,6 +91,8 @@ impl SelectorMapCandidate {
             href: self.href,
             x: self.bounds.x + self.bounds.width / 2.0,
             y: self.bounds.y + self.bounds.height / 2.0,
+            value: self.value,
+            checked: self.checked,
         }
     }
 }
@@ -136,6 +157,8 @@ pub(crate) fn merge_snapshot(
             continue;
         };
         let document_frame_id = snapshot_string(snapshot, document.frame_id).map(str::to_owned);
+        let live_values = live_input_values(snapshot, &document.nodes);
+        let live_checked = live_checked_indices(&document.nodes);
 
         for (node_index, backend_node_id) in backend_node_ids.iter().enumerate() {
             let backend_node_id_value = *backend_node_id.inner();
@@ -177,6 +200,27 @@ pub(crate) fn merge_snapshot(
                 {
                     enhanced.attributes = snapshot_attributes(snapshot, attributes);
                 }
+            }
+
+            // Live form state, which the DOM attributes do not carry: JavaScript,
+            // autofill, and framework bindings set the element property and leave
+            // the attribute stale, so a pre-filled field otherwise reads as empty
+            // and a JS-toggled checkbox reports the wrong state (upstream #5647).
+            //
+            // Each field is reported only where it means something. `inputChecked`
+            // covers the whole document, so without the type test every text input
+            // would claim `checked: false`; and a checkbox's value is the constant
+            // "on", which says nothing its checked state doesn't.
+            let is_toggle = matches!(
+                enhanced.attributes.get("type").map(String::as_str),
+                Some("checkbox") | Some("radio")
+            );
+            if !is_toggle {
+                if let Some(value) = live_values.get(&node_index) {
+                    enhanced.input_value = Some(value.clone());
+                }
+            } else if let Some(checked) = live_checked.as_ref() {
+                enhanced.input_checked = Some(checked.contains(&node_index));
             }
         }
 
@@ -233,6 +277,92 @@ pub(crate) fn merge_snapshot(
     }
 }
 
+/// Live `<input>`/`<textarea>` values keyed by snapshot node index.
+///
+/// DOMSnapshot reports these in the sparse `inputValue`/`textValue` arrays rather
+/// than in `attributes`. Sensitive fields are filtered out here, before the value
+/// is ever stored, so no later change to how nodes are serialized can leak one.
+fn live_input_values(
+    snapshot: &CaptureSnapshotReturns,
+    nodes: &NodeTreeSnapshot,
+) -> HashMap<usize, String> {
+    let mut values = HashMap::new();
+    for rare in [nodes.input_value.as_ref(), nodes.text_value.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        for (node_index, string_index) in rare.index.iter().zip(rare.value.iter()) {
+            let Ok(node_index) = usize::try_from(*node_index) else {
+                continue;
+            };
+            if is_sensitive_input(snapshot, nodes, node_index) {
+                continue;
+            }
+            if let Some(value) = snapshot_string(snapshot, *string_index) {
+                values.insert(node_index, value.to_owned());
+            }
+        }
+    }
+    values
+}
+
+/// Snapshot indices of checked checkboxes and radios.
+///
+/// `None` when the snapshot omits `inputChecked` entirely, which has to stay
+/// distinct from "present but empty": the latter means every box is unchecked.
+fn live_checked_indices(nodes: &NodeTreeSnapshot) -> Option<HashSet<usize>> {
+    let rare = nodes.input_checked.as_ref()?;
+    Some(
+        rare.index
+            .iter()
+            .filter_map(|index| usize::try_from(*index).ok())
+            .collect(),
+    )
+}
+
+/// True for password, file, and hidden inputs and for payment or one-time-code
+/// autocomplete fields.
+///
+/// Reads the snapshot's own attribute array rather than the merged node, because
+/// this has to hold before anything is written to [`EnhancedNode`].
+fn is_sensitive_input(
+    snapshot: &CaptureSnapshotReturns,
+    nodes: &NodeTreeSnapshot,
+    node_index: usize,
+) -> bool {
+    let Some(attributes) = nodes
+        .attributes
+        .as_ref()
+        .and_then(|attributes| attributes.get(node_index))
+    else {
+        return false;
+    };
+
+    attributes
+        .inner()
+        .chunks_exact(2)
+        .filter_map(|chunk| {
+            Some((
+                snapshot_string(snapshot, chunk[0])?,
+                snapshot_string(snapshot, chunk[1])?,
+            ))
+        })
+        .any(|(name, value)| {
+            if name.eq_ignore_ascii_case("type") {
+                return SENSITIVE_INPUT_TYPES
+                    .iter()
+                    .any(|sensitive| value.eq_ignore_ascii_case(sensitive));
+            }
+            if name.eq_ignore_ascii_case("autocomplete") {
+                let value = value.to_ascii_lowercase();
+                return SENSITIVE_AUTOCOMPLETE_PREFIXES
+                    .iter()
+                    .any(|prefix| value.starts_with(prefix));
+            }
+            false
+        })
+}
+
 pub(crate) fn merge_ax_tree(ax_nodes: &[AxNode], nodes: &mut HashMap<i64, EnhancedNode>) {
     for ax_node in ax_nodes {
         let Some(backend_node_id) = ax_node.backend_dom_node_id else {
@@ -287,12 +417,19 @@ pub(crate) fn collect_interactive_elements(
                 if let (Some(backend_node_id), Some(bounds)) =
                     (enhanced.backend_node_id, enhanced.bounds)
                 {
+                    let text = if enhanced.text.is_empty() {
+                        descendant_image_label(node)
+                    } else {
+                        enhanced.text.clone()
+                    };
                     elements.push(SelectorMapCandidate {
                         backend_node_id,
                         tag: enhanced.tag.clone(),
-                        text: enhanced.text.clone(),
+                        text,
                         href: enhanced.attributes.get("href").cloned(),
                         bounds,
+                        value: enhanced.input_value.clone(),
+                        checked: enhanced.input_checked,
                     });
                 }
             }
@@ -658,6 +795,58 @@ fn node_label(node: &Node) -> String {
         .find(|value| !value.trim().is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| descendant_text(node))
+}
+
+/// Borrows a label from a descendant `<img>` for a control that has none of its own.
+///
+/// An icon-only button is otherwise indistinguishable from every other icon-only
+/// button in the selector map. The accessible name usually covers the `alt` case;
+/// this also handles an image with no `alt`, where the file name is the only hint
+/// available. `data:` URIs are skipped — they carry the bytes, not a name.
+fn descendant_image_label(node: &Node) -> String {
+    let mut label = String::new();
+    collect_image_label(node, &mut label);
+    label
+}
+
+fn collect_image_label(node: &Node, label: &mut String) {
+    if !label.is_empty() {
+        return;
+    }
+
+    if node_tag(node) == "img" {
+        for name in ["alt", "aria-label", "title"] {
+            if let Some(value) = attr_value(node, name).map(str::trim) {
+                if !value.is_empty() {
+                    *label = short_text(value.to_owned());
+                    return;
+                }
+            }
+        }
+        if let Some(file_name) = attr_value(node, "src").and_then(image_file_name) {
+            *label = short_text(file_name);
+            return;
+        }
+    }
+
+    for child in node.children.iter().flatten() {
+        collect_image_label(child, label);
+    }
+}
+
+/// Last path segment of an image URL, without query or fragment.
+fn image_file_name(src: &str) -> Option<String> {
+    let src = src.trim();
+    if src.is_empty() || src.to_ascii_lowercase().starts_with("data:") {
+        return None;
+    }
+    let path = src
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(src)
+        .trim_end_matches('/');
+    let file_name = path.rsplit('/').next().unwrap_or(path);
+    (!file_name.is_empty()).then(|| file_name.to_owned())
 }
 
 fn descendant_text(node: &Node) -> String {

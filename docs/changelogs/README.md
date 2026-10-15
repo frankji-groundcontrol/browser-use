@@ -27,6 +27,15 @@ local runtime paths — unless publication was explicitly approved.
 
 ## Index
 
+- [2026-09-21 — DOM-click offscreen and tiny nodes](2026-09-21-dom-click-offscreen.md)
+  — `browser_click(index)` uses `HTMLElement.click()` for 1×1 / off-viewport
+  nodes so Flutter's Enable accessibility placeholder actually runs.
+- [2026-09-21 — Upstream sync: live form state and icon labels](2026-09-21-upstream-sync-live-form-state.md)
+  — ports `browser_get_state`'s live input `value`/`checked` (with sensitive
+  fields redacted) and an image-name label fallback; records what was refuted.
+- [2026-09-21 — Flutter coordinate typing](2026-09-21-flutter-coordinate-typing.md)
+  — `browser_type` coordinate mode, `browser_paste_at_coordinates`, and
+  `browser_press_key` for canvas/Flutter H5 apps.
 - [2026-08-27 — Key storage: one `.env`, Keychain fallback, no secrets in agent configs](2026-08-27-key-storage-dotenv-keychain.md)
   — settings resolve env → `.env` → Keychain, so the key lives in one place
   instead of ten plaintext copies across agent config files.

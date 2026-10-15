@@ -26,9 +26,9 @@ use chromiumoxide::{
             DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams,
             DispatchMouseEventType, InsertTextParams, MouseButton,
         },
-        page::{CaptureScreenshotFormat, StopLoadingParams},
+        page::{BringToFrontParams, CaptureScreenshotFormat, StopLoadingParams},
     },
-    cdp::js_protocol::runtime::ReleaseObjectParams,
+    cdp::js_protocol::runtime::{CallFunctionOnParams, ReleaseObjectParams},
     handler::Handler,
     page::Page,
     page::ScreenshotParams,
@@ -40,6 +40,8 @@ mod discovery;
 mod dom;
 mod geometry;
 mod security;
+
+use geometry::Rect;
 
 pub use security::UrlPolicy;
 
@@ -176,6 +178,13 @@ pub struct SelectorMapElement {
     pub x: f64,
     /// Center Y coordinate in CSS pixels relative to the viewport.
     pub y: f64,
+    /// Live text a form field currently holds, which the `value` attribute misses
+    /// once JavaScript, autofill, or a framework has filled it. `None` for
+    /// non-text controls, and always `None` for password, file, hidden, payment,
+    /// and one-time-code fields, whose values are never captured.
+    pub value: Option<String>,
+    /// Live checked state of a checkbox or radio. `None` for everything else.
+    pub checked: Option<bool>,
 }
 
 impl SelectorMapElement {
@@ -1063,7 +1072,7 @@ impl BrowserPage {
         Ok(())
     }
 
-    /// Resolves an element's centre in TOP-LEVEL viewport coordinates.
+    /// Bounding box in TOP-LEVEL viewport coordinates.
     ///
     /// DOMSnapshot bounds are frame-LOCAL: an element inside an iframe reports
     /// coordinates relative to that iframe's own document, with no offset for
@@ -1075,8 +1084,8 @@ impl BrowserPage {
     /// `DOM.getContentQuads` returns quads "relative to viewport" with every frame
     /// offset, scroll, and transform already applied by Chromium, so it is the
     /// authority for where to click. Returns None when the node has no rendered
-    /// box (display:none, detached), leaving the caller to fall back.
-    async fn viewport_click_point(&self, backend_node_id: i64) -> Option<(f64, f64)> {
+    /// box (display:none, detached).
+    async fn viewport_click_rect(&self, backend_node_id: i64) -> Option<Rect> {
         // Force a synchronous reflow first. Verified: straight after a DOM mutation
         // getContentQuads returns the element's PRE-mutation box (a reordered
         // button reported its old slot, so the click landed on whatever had moved
@@ -1097,27 +1106,64 @@ impl BrowserPage {
             .ok()?;
         // A quad is [x1,y1, x2,y2, x3,y3, x4,y4]; inline nodes yield several and
         // the first is the leading box, which is what a user would click.
-        let points = quads.result.quads.first()?.inner();
-        if points.len() < 8 {
-            return None;
-        }
-        let x = points.iter().step_by(2).take(4).sum::<f64>() / 4.0;
-        let y = points.iter().skip(1).step_by(2).take(4).sum::<f64>() / 4.0;
-        Some((x, y))
+        Rect::from_quad_points(quads.result.quads.first()?.inner())
     }
 
     /// Clicks an element by stable Chromium backend node id.
+    ///
+    /// In-viewport widgets get a compositor mouse event at the box centre (needed
+    /// for canvas/Flutter semantic overlays). Tiny or off-viewport nodes — Flutter
+    /// Web's 1×1 `flt-semantics-placeholder` at (-1, -1) — are activated with
+    /// `HTMLElement.click()`, because a mouse event at that centre misses the node.
     pub async fn click_backend_node_id(&self, backend_node_id: i64) -> Result<()> {
-        let (x, y) = match self.viewport_click_point(backend_node_id).await {
-            Some(point) => point,
-            None => {
-                let element = self
-                    .current_element_by_backend_node_id(backend_node_id)
-                    .await?;
-                (element.x, element.y)
+        if let Some(bounds) = self.viewport_click_rect(backend_node_id).await {
+            if !bounds.prefers_dom_click() {
+                let (x, y) = bounds.center();
+                self.click_coordinates(x, y).await?;
+                return Ok(());
             }
-        };
-        self.click_coordinates(x, y).await?;
+        }
+        self.dom_click_backend_node_id(backend_node_id).await
+    }
+
+    /// Activates a node via the DOM `click()` method (and `focus()` first).
+    async fn dom_click_backend_node_id(&self, backend_node_id: i64) -> Result<()> {
+        let resolved = self
+            .page
+            .execute(
+                ResolveNodeParams::builder()
+                    .backend_node_id(BackendNodeId::new(backend_node_id))
+                    .object_group("browser-use-dom-click")
+                    .build(),
+            )
+            .await
+            .with_context(|| {
+                format!("failed to resolve backend node {backend_node_id} for DOM click")
+            })?;
+        let object_id = resolved.object.object_id.clone().ok_or_else(|| {
+            anyhow!("backend node {backend_node_id} has no remote object for DOM click")
+        })?;
+
+        let call = CallFunctionOnParams::builder()
+            .function_declaration(
+                "function() { if (typeof this.focus === 'function') { this.focus(); } this.click(); }",
+            )
+            .object_id(object_id.clone())
+            .user_gesture(true)
+            .return_by_value(true)
+            .build()
+            .map_err(|error| anyhow!("failed to build DOM click: {error}"))?;
+        let outcome = self.page.execute(call).await;
+        let _ = self.page.execute(ReleaseObjectParams::new(object_id)).await;
+        let outcome = outcome
+            .with_context(|| format!("DOM click failed on backend node {backend_node_id}"))?;
+        if let Some(details) = &outcome.exception_details {
+            return Err(anyhow!(
+                "DOM click threw on backend node {backend_node_id}: {}",
+                details.text
+            ));
+        }
+        tokio::time::sleep(POST_CLICK_SETTLE_DELAY).await;
         Ok(())
     }
 
@@ -1162,6 +1208,170 @@ impl BrowserPage {
             .await
             .with_context(|| format!("failed to focus backend node id {backend_node_id}"))?;
 
+        self.insert_text_into_focused_element(text).await
+    }
+
+    /// Clicks viewport coordinates, optionally clears the focused field, then types text.
+    ///
+    /// For Flutter/canvas apps that expose no DOM inputs, coordinate click often
+    /// focuses a hidden text field; `InsertText` then reaches the active element.
+    pub async fn type_at_coordinates(&self, x: f64, y: f64, text: &str, clear: bool) -> Result<()> {
+        self.click_coordinates(x, y).await?;
+        if clear {
+            self.clear_focused_element_by_keyboard().await?;
+        }
+        if text.is_empty() {
+            return Ok(());
+        }
+        self.insert_text_into_focused_element(text).await
+    }
+
+    /// Writes text to the browser clipboard (Chromium in-process clipboard).
+    ///
+    /// `navigator.clipboard` only exists in a secure context, so this cannot work
+    /// on a plain `http://` or `data:` page. The check below reports that as such
+    /// rather than letting it surface as "Cannot read properties of undefined".
+    pub async fn write_clipboard(&self, text: &str) -> Result<()> {
+        self.grant_clipboard_permission().await?;
+        let encoded = serde_json::to_string(text).context("failed to encode clipboard text")?;
+        let value: serde_json::Value = self
+            .page
+            .evaluate(format!(
+                r#"
+                (async () => {{
+                    if (!navigator.clipboard) {{
+                        return {{ ok: false, insecure: true }};
+                    }}
+                    try {{
+                        await navigator.clipboard.writeText({encoded});
+                        return {{ ok: true }};
+                    }} catch (error) {{
+                        return {{ ok: false, error: String(error) }};
+                    }}
+                }})()
+                "#
+            ))
+            .await
+            .context("failed to write the clipboard")?
+            .into_value()
+            .context("failed to decode clipboard write result")?;
+
+        if value.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+            return Ok(());
+        }
+        if value.get("insecure").and_then(serde_json::Value::as_bool) == Some(true) {
+            return Err(anyhow!(
+                "the clipboard API is unavailable on this page: it needs a secure context \
+                 (https, or http on localhost). Use browser_type with coordinates instead."
+            ));
+        }
+        let message = value
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown clipboard write error");
+        Err(anyhow!("clipboard write failed: {message}"))
+    }
+
+    /// Clicks coordinates, optionally clears the field, then pastes text.
+    ///
+    /// Paste is often more reliable than `InsertText` for Flutter web inputs.
+    pub async fn paste_at_coordinates(
+        &self,
+        x: f64,
+        y: f64,
+        text: &str,
+        clear: bool,
+    ) -> Result<()> {
+        self.click_coordinates(x, y).await?;
+        if clear {
+            self.clear_focused_element_by_keyboard().await?;
+        }
+        self.write_clipboard(text).await?;
+        self.run_editing_command("paste", "v").await
+    }
+
+    /// Dispatches a key or key combo (e.g. `Enter`, `Tab`, `Meta+a`, `Control+v`).
+    pub async fn press_key(&self, key: &str) -> Result<()> {
+        let (modifiers, main_key) = split_key_combo(key)?;
+        let modifier_value = modifier_bitmask(&modifiers)?;
+
+        for modifier in &modifiers {
+            let (code, vk) = key_code(modifier);
+            self.dispatch_key_event(KeyPhase::Down, modifier, &code, modifier_value, vk, &[])
+                .await?;
+        }
+        let (code, vk) = key_code(main_key);
+        self.dispatch_key_event(KeyPhase::Down, main_key, &code, modifier_value, vk, &[])
+            .await?;
+        self.dispatch_key_event(KeyPhase::Up, main_key, &code, modifier_value, vk, &[])
+            .await?;
+        for modifier in modifiers.iter().rev() {
+            let (code, vk) = key_code(modifier);
+            self.dispatch_key_event(KeyPhase::Up, modifier, &code, 0, vk, &[])
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Runs a Chromium editing command (`selectAll`, `paste`, …) on the focused element.
+    ///
+    /// A synthetic accelerator dispatched over CDP does **not** run the shortcut
+    /// on its own: Chromium resolves editing shortcuts in the browser process
+    /// from a real OS key event, so `Input.dispatchKeyEvent` alone leaves the
+    /// selection untouched (a bare Meta+A is a silent no-op, which made a
+    /// "replace" corrupt the field instead). The `commands` field is CDP's
+    /// supported way to request the command explicitly, and it also removes any
+    /// dependence on which OS the browser is running.
+    async fn run_editing_command(&self, command: &str, key: &str) -> Result<()> {
+        let (code, vk) = key_code(key);
+        let accelerator = accelerator_modifier_bitmask();
+        self.dispatch_key_event(KeyPhase::Down, key, &code, accelerator, vk, &[command])
+            .await?;
+        self.dispatch_key_event(KeyPhase::Up, key, &code, accelerator, vk, &[])
+            .await
+    }
+
+    /// Clears the focused field through the keyboard.
+    ///
+    /// Canvas and Flutter fields have no DOM node to reset, so the native-setter
+    /// path used by `clear_backend_node_id` is unavailable here.
+    async fn clear_focused_element_by_keyboard(&self) -> Result<()> {
+        self.run_editing_command("selectAll", "a").await?;
+        self.press_key("Backspace").await
+    }
+
+    /// Grants clipboard access and focuses the tab.
+    ///
+    /// `writeText` is gated on `clipboardSanitizedWrite` (not the read permission)
+    /// and additionally refuses to run in an unfocused document, which a
+    /// background automation tab always is until brought to the front.
+    async fn grant_clipboard_permission(&self) -> Result<()> {
+        self.page
+            .execute(
+                GrantPermissionsParams::builder()
+                    .permission(PermissionType::ClipboardReadWrite)
+                    .permission(PermissionType::ClipboardSanitizedWrite)
+                    .build()
+                    .map_err(|error| anyhow!("invalid clipboard permission request: {error}"))?,
+            )
+            .await
+            .context("failed to grant clipboard permission")?;
+        self.page
+            .execute(BringToFrontParams::default())
+            .await
+            .context("failed to focus the tab for clipboard access")?;
+        Ok(())
+    }
+
+    /// Inserts text into whatever currently has focus, then nudges the framework.
+    ///
+    /// CDP's InsertText and key events fire native input events in most cases,
+    /// but modern frameworks (Vue 3 v-model, React controlled inputs) sometimes
+    /// miss the final value because the native event races with the framework's
+    /// reactivity tick. A JS-level re-dispatch of the native input event
+    /// (bubbles:true) is a no-op when the framework already saw the change, and
+    /// a fix when it didn't. This mirrors what `clear_backend_node_id` does.
+    async fn insert_text_into_focused_element(&self, text: &str) -> Result<()> {
         if let Err(insert_error) = self.page.execute(InsertTextParams::new(text)).await {
             self.dispatch_text_as_key_events(text)
                 .await
@@ -1170,14 +1380,6 @@ impl BrowserPage {
                 })?;
         }
 
-        // Dispatch framework-aware input/change events after typing. CDP's
-        // InsertText and key events fire native browser input events in most
-        // cases, but modern frameworks (Vue 3 v-model, React controlled inputs)
-        // sometimes miss the final value because the native event races with
-        // the framework's reactivity tick. A JS-level re-dispatch of the native
-        // input event (bubbles:true) is a no-op when the framework already saw
-        // the change, and a fix when it didn't. This mirrors what
-        // clear_backend_node_id already does after clearing.
         self.page
             .evaluate(
                 r#"
@@ -1192,7 +1394,41 @@ impl BrowserPage {
             )
             .await
             .context("failed to dispatch framework input events after typing")?;
+        Ok(())
+    }
 
+    async fn dispatch_key_event(
+        &self,
+        phase: KeyPhase,
+        key: &str,
+        code: &str,
+        modifiers: i64,
+        windows_virtual_key_code: Option<i64>,
+        commands: &[&str],
+    ) -> Result<()> {
+        let event_type = match phase {
+            KeyPhase::Down => DispatchKeyEventType::KeyDown,
+            KeyPhase::Up => DispatchKeyEventType::KeyUp,
+        };
+        let mut builder = DispatchKeyEventParams::builder()
+            .r#type(event_type)
+            .key(key.to_owned())
+            .code(code.to_owned())
+            .modifiers(modifiers);
+        if let Some(vk) = windows_virtual_key_code {
+            builder = builder.windows_virtual_key_code(vk);
+        }
+        if !commands.is_empty() {
+            builder = builder.commands(commands.iter().map(|command| command.to_string()));
+        }
+        self.page
+            .execute(
+                builder
+                    .build()
+                    .map_err(|error| anyhow!("failed to build key event: {error}"))?,
+            )
+            .await
+            .with_context(|| format!("failed to dispatch {key} key event"))?;
         Ok(())
     }
 
@@ -1482,8 +1718,8 @@ impl BrowserPage {
     }
 
     async fn dispatch_text_as_key_events(&self, text: &str) -> Result<()> {
-        for ch in text.chars() {
-            let text = ch.to_string();
+        for char in text.chars() {
+            let text = char.to_string();
             self.page
                 .execute(
                     DispatchKeyEventParams::builder()
@@ -1499,6 +1735,104 @@ impl BrowserPage {
 
         Ok(())
     }
+}
+
+#[derive(Copy, Clone)]
+enum KeyPhase {
+    Down,
+    Up,
+}
+
+/// Splits `Meta+Shift+a` into its modifiers and its main key.
+///
+/// A trailing `+` (as in `Shift++`) keeps the literal `+` as the main key rather
+/// than yielding an empty one.
+fn split_key_combo(key: &str) -> Result<(Vec<&str>, &str)> {
+    if key.is_empty() {
+        return Err(anyhow!("key must not be empty"));
+    }
+    let Some((head, main_key)) = key.rsplit_once('+') else {
+        return Ok((Vec::new(), key));
+    };
+    if main_key.is_empty() {
+        // "Shift++" -> modifiers from "Shift+", main key "+".
+        let modifiers = head.split('+').filter(|part| !part.is_empty()).collect();
+        return Ok((modifiers, "+"));
+    }
+    let modifiers: Vec<&str> = head.split('+').collect();
+    if modifiers.iter().any(|modifier| modifier.is_empty()) {
+        return Err(anyhow!("malformed key combo {key:?}"));
+    }
+    Ok((modifiers, main_key))
+}
+
+/// The platform accelerator used for editing shortcuts (Cmd on macOS, Ctrl elsewhere).
+fn accelerator_modifier_bitmask() -> i64 {
+    if cfg!(target_os = "macos") {
+        4
+    } else {
+        2
+    }
+}
+
+/// Maps modifier names to CDP's bitmask.
+///
+/// An unrecognised name is an error rather than a zero bit: silently dropping the
+/// modifier turns a shortcut into a plain keypress and reports success for what
+/// is actually a no-op. Common spellings are accepted as aliases.
+fn modifier_bitmask(modifiers: &[&str]) -> Result<i64> {
+    let mut value = 0_i64;
+    for modifier in modifiers {
+        value |= match *modifier {
+            "Alt" | "Option" => 1,
+            "Control" | "Ctrl" => 2,
+            "Meta" | "Command" | "Cmd" => 4,
+            "Shift" => 8,
+            other => {
+                return Err(anyhow!(
+                    "unknown key modifier {other:?}: expected Alt, Control, Meta, or Shift"
+                ))
+            }
+        };
+    }
+    Ok(value)
+}
+
+/// Resolves a key name to its `code` and `windowsVirtualKeyCode`.
+///
+/// `code` is physical and side-specific, so a modifier has to report `MetaLeft`
+/// rather than `Meta` — Chromium drops the bare name and the page then sees an
+/// empty `event.code`.
+fn key_code(key: &str) -> (String, Option<i64>) {
+    match key {
+        "Enter" => ("Enter".to_owned(), Some(13)),
+        "Backspace" => ("Backspace".to_owned(), Some(8)),
+        "Tab" => ("Tab".to_owned(), Some(9)),
+        "Escape" => ("Escape".to_owned(), Some(27)),
+        "ArrowUp" => ("ArrowUp".to_owned(), Some(38)),
+        "ArrowDown" => ("ArrowDown".to_owned(), Some(40)),
+        "ArrowLeft" => ("ArrowLeft".to_owned(), Some(37)),
+        "ArrowRight" => ("ArrowRight".to_owned(), Some(39)),
+        "Meta" | "Command" | "Cmd" => ("MetaLeft".to_owned(), Some(91)),
+        "Control" | "Ctrl" => ("ControlLeft".to_owned(), Some(17)),
+        "Shift" => ("ShiftLeft".to_owned(), Some(16)),
+        "Alt" | "Option" => ("AltLeft".to_owned(), Some(18)),
+        other => match single_ascii_char(other) {
+            Some(char) if char.is_ascii_alphabetic() => {
+                let upper = char.to_ascii_uppercase();
+                (format!("Key{upper}"), Some(upper as i64))
+            }
+            Some(char) if char.is_ascii_digit() => (format!("Digit{char}"), Some(char as i64)),
+            // Punctuation and named keys ("PageDown", "F5") already are their code.
+            _ => (other.to_owned(), None),
+        },
+    }
+}
+
+fn single_ascii_char(text: &str) -> Option<char> {
+    let mut chars = text.chars();
+    let first = chars.next()?;
+    (chars.next().is_none() && first.is_ascii()).then_some(first)
 }
 
 fn short_tab_id(target_id: &str) -> String {

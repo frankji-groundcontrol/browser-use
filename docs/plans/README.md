@@ -14,6 +14,7 @@ growing this table.
 
 | Task | Status | Owner | Depends on / blocker | Next action | Updated | Plan |
 | --- | --- | --- | --- | --- | --- | --- |
+| DOM-click offscreen / tiny nodes (Flutter a11y) | in progress | Cursor | MCP client still on old process | Reconnect browser-use MCP, then click index 0 on H5 login | 2026-09-21 | [plan](2026-09-21-dom-click-offscreen.md) |
 | Whole-repository adversarial review | complete | Codex | Docker daemon, real provider credentials, and beta child-process matrix unavailable locally | Remediate SEC-01/02/03/04/05 and REL-01/02 first | 2026-09-16 | [plan](2026-09-16-whole-repo-review/2026-09-16-whole-repo-review.md) |
 | Whole-repository hardening and proof | complete | Codex | Docker daemon and real provider credentials unavailable locally | Recorded fixtures plus honest environment blocks | 2026-09-16 | [plan](2026-09-16-hardening-review-findings/2026-09-16-hardening-review-findings.md) |
 | DevTools attachment and Rust MCP deployment | in progress | Codex | Live verification before release | Probe current Chrome, then install on three hosts | 2026-09-16 | [plan](2026-09-16-devtools-deploy/2026-09-16-devtools-deploy.md) |
@@ -26,6 +27,10 @@ growing this table.
 ## Plan registry
 
 One entry per detailed plan, so historical plans stay discoverable.
+
+- [2026-09-21 — DOM-click offscreen or tiny nodes](2026-09-21-dom-click-offscreen.md)
+  — index-click Flutter's 1×1 `Enable accessibility` placeholder via
+  `HTMLElement.click()` instead of a mouse event at `(-1, -1)`.
 
 - [2026-09-16 — DevTools attachment and deployment](2026-09-16-devtools-deploy/2026-09-16-devtools-deploy.md)
   — verify current Chrome attachment and deploy on local, MBP2 and franky-frank.

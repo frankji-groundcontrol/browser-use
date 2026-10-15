@@ -122,6 +122,7 @@ Cloud profile cookie sync reference: https://github.com/browser-use/browser-harn
 - Prefer to find elements with the accessibility tree, not screenshots: `cdp("Accessibility.getFullAXTree")["nodes"]` has every element's role, name, and `backendDOMNodeId` — filter in Python before printing (it is thousands of nodes). Coordinates: `q = cdp("DOM.getBoxModel", backendNodeId=n)["model"]["content"]; x, y = sum(q[0::2])/4, sum(q[1::2])/4` (viewport px, ready for `click_at_xy`; negative/oversized means scroll first).
 - Clicking: AX node -> box center -> `click_at_xy(x, y)` -> verify with a targeted `js(...)`/`page_info()` check.
 - Fall back to raw HTML via `js(...)` only when the AX tree lacks the element (canvas, exotic widgets); screenshot when layout or imagery matters.
+- **Rust MCP + Flutter/canvas:** click `Enable accessibility` (index 0, `flt-semantics-placeholder`) first. That node is 1×1 off-screen; index click now DOM-activates it so `browser_get_state` lists real controls. Then click/type by index. If the tree is still empty, fall back to `browser_screenshot` plus `browser_paste_at_coordinates` or `browser_type` with coordinates.
 - After navigation, call `wait_for_load()`.
 - If the current tab is stale or internal, call `ensure_real_tab()`.
 - Use `js(...)` for DOM inspection or extraction when coordinates are the wrong tool.

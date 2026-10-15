@@ -341,3 +341,57 @@ async fn stopped_owned_browser_is_killed_and_reaped_within_budget() -> anyhow::R
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn click_element_activates_an_offscreen_one_pixel_button() -> anyhow::Result<()> {
+    // Flutter Web's "Enable accessibility" control is a 1×1 node at (-1, -1).
+    // A compositor mouse event at that centre misses the node; a DOM click
+    // must still fire the handler. A full-viewport cover would steal a clamped
+    // (0, 0) mouse click — the title must become "clicked", never "cover".
+    let session = BrowserSession::launch_headless().await?;
+    let page = session.new_page().await?;
+    page.navigate(
+        "data:text/html,<title>Offscreen</title>\
+<div style='position:fixed;left:0;top:0;width:100%;height:100%' onclick='document.title=\"cover\"'></div>\
+<button aria-label='Enable accessibility' \
+style='position:absolute;left:-1px;top:-1px;width:1px;height:1px;padding:0;margin:0;border:0' \
+onclick='document.title=\"clicked\"'>Enable accessibility</button>",
+    )
+    .await?;
+
+    let elements = page.selector_map().await?;
+    let target = elements
+        .iter()
+        .find(|element| element.text.contains("Enable accessibility"))
+        .expect("the 1px offscreen button must stay in the selector map");
+    page.click_element(target.index).await?;
+
+    let title = page.state().await?.title;
+    assert_eq!(
+        title, "clicked",
+        "offscreen 1px node must be DOM-activated, not mouse-clicked at its box centre"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn click_element_still_clicks_an_in_viewport_button() -> anyhow::Result<()> {
+    let session = BrowserSession::launch_headless().await?;
+    let page = session.new_page().await?;
+    page.navigate(
+        "data:text/html,<title>Onscreen</title>\
+<button style='position:absolute;left:20px;top:20px;width:200px;height:40px' \
+onclick='document.title=\"clicked\"'>Log in</button>",
+    )
+    .await?;
+
+    let elements = page.selector_map().await?;
+    let target = elements
+        .iter()
+        .find(|element| element.text.contains("Log in"))
+        .expect("in-viewport button must be in the selector map");
+    page.click_element(target.index).await?;
+
+    assert_eq!(page.state().await?.title, "clicked");
+    Ok(())
+}

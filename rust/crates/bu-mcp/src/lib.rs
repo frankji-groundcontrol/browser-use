@@ -87,6 +87,8 @@ impl BrowserUseMcpServer {
             "browser_get_state" => self.get_state(request.arguments).await,
             "browser_click" => self.click(request.arguments).await,
             "browser_type" => self.type_text(request.arguments).await,
+            "browser_paste_at_coordinates" => self.paste_at_coordinates(request.arguments).await,
+            "browser_press_key" => self.press_key(request.arguments).await,
             "browser_select_option" => self.select_option(request.arguments).await,
             "browser_get_html" => self.get_html(request.arguments).await,
             "browser_extract_content" => self.extract_content(request.arguments).await,
@@ -164,7 +166,9 @@ impl BrowserUseMcpServer {
                     "index": element.index,
                     "tag": element.tag,
                     "text": element.text,
-                    "href": element.href
+                    "href": element.href,
+                    "value": element.value,
+                    "checked": element.checked
                 })
             })
             .collect::<Vec<_>>();
@@ -257,8 +261,37 @@ impl BrowserUseMcpServer {
         &self,
         arguments: Option<Map<String, Value>>,
     ) -> Result<CallToolResult, ErrorData> {
-        let index = required_usize(arguments.as_ref(), "index", "browser_type")?;
         let text = required_str(arguments.as_ref(), "text", "browser_type")?.to_owned();
+        let coordinate_x = optional_i64(arguments.as_ref(), "coordinate_x");
+        let coordinate_y = optional_i64(arguments.as_ref(), "coordinate_y");
+        if let (Some(x), Some(y)) = (coordinate_x, coordinate_y) {
+            let clear = optional_bool(arguments.as_ref(), "clear").unwrap_or(true);
+            if let Err(error) = self
+                .actor
+                .type_at_coordinates(x as f64, y as f64, text.clone(), clear)
+                .await
+            {
+                return Ok(browser_tool_error("browser_type failed", error));
+            }
+            return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                "Typed {} at coordinates ({x}, {y})",
+                masked_typed_text(&text)
+            ))]));
+        }
+
+        let has_index = arguments
+            .as_ref()
+            .and_then(|args| args.get("index"))
+            .is_some();
+        if (coordinate_x.is_some() || coordinate_y.is_some()) && !has_index {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "browser_type requires both coordinate_x and coordinate_y when using coordinate mode",
+                None,
+            ));
+        }
+
+        let index = required_usize(arguments.as_ref(), "index", "browser_type")?;
         if let Err(error) = self.actor.type_text(index, text.clone()).await {
             return Ok(browser_tool_error("browser_type failed", error));
         }
@@ -266,6 +299,58 @@ impl BrowserUseMcpServer {
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Typed {} into element {index}",
             masked_typed_text(&text)
+        ))]))
+    }
+
+    async fn paste_at_coordinates(
+        &self,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let x = optional_i64(arguments.as_ref(), "coordinate_x").ok_or_else(|| {
+            ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "browser_paste_at_coordinates requires coordinate_x",
+                None,
+            )
+        })?;
+        let y = optional_i64(arguments.as_ref(), "coordinate_y").ok_or_else(|| {
+            ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "browser_paste_at_coordinates requires coordinate_y",
+                None,
+            )
+        })?;
+        let text =
+            required_str(arguments.as_ref(), "text", "browser_paste_at_coordinates")?.to_owned();
+        let clear = optional_bool(arguments.as_ref(), "clear").unwrap_or(true);
+        if let Err(error) = self
+            .actor
+            .paste_at_coordinates(x as f64, y as f64, text.clone(), clear)
+            .await
+        {
+            return Ok(browser_tool_error(
+                "browser_paste_at_coordinates failed",
+                error,
+            ));
+        }
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Pasted {} at coordinates ({x}, {y})",
+            masked_typed_text(&text)
+        ))]))
+    }
+
+    async fn press_key(
+        &self,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let key = required_str(arguments.as_ref(), "key", "browser_press_key")?.to_owned();
+        if let Err(error) = self.actor.press_key(key.clone()).await {
+            return Ok(browser_tool_error("browser_press_key failed", error));
+        }
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Pressed {key}"
         ))]))
     }
 

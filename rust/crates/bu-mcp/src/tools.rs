@@ -47,20 +47,74 @@ pub fn low_level_tools() -> Vec<Tool> {
         ),
         tool(
             "browser_type",
-            "Type text into an input field. Clears existing text by default; pass text=\"\" to clear only.",
+            "Type text into an input field by DOM index or viewport coordinates. Use index for elements from browser_get_state; use coordinate_x+coordinate_y for Flutter/canvas apps that expose no inputs. Clears existing text by default in coordinate mode.",
             json!({
                 "type": "object",
                 "properties": {
                     "index": {
                         "type": "integer",
-                        "description": "The index of the input element (from browser_get_state)"
+                        "description": "The index of the input element (from browser_get_state). Provide this OR coordinate_x+coordinate_y."
+                    },
+                    "coordinate_x": {
+                        "type": "integer",
+                        "description": "X coordinate in CSS pixels. Must be used with coordinate_y for canvas/Flutter typing."
+                    },
+                    "coordinate_y": {
+                        "type": "integer",
+                        "description": "Y coordinate in CSS pixels. Must be used with coordinate_x for canvas/Flutter typing."
                     },
                     "text": {
                         "type": "string",
                         "description": "The text to type. Pass an empty string (\"\") to clear the field without typing."
+                    },
+                    "clear": {
+                        "type": "boolean",
+                        "description": "When using coordinates, select-all and clear before typing. Defaults to true.",
+                        "default": true
                     }
                 },
-                "required": ["index", "text"]
+                "required": ["text"]
+            }),
+        ),
+        tool(
+            "browser_paste_at_coordinates",
+            "Click viewport coordinates, write text to the browser clipboard, and paste. Prefer this over browser_type for Flutter/canvas text fields when InsertText is unreliable.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "coordinate_x": {
+                        "type": "integer",
+                        "description": "X coordinate in CSS pixels"
+                    },
+                    "coordinate_y": {
+                        "type": "integer",
+                        "description": "Y coordinate in CSS pixels"
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Text to paste into the focused field"
+                    },
+                    "clear": {
+                        "type": "boolean",
+                        "description": "Select-all and clear the field before pasting, so an already-filled field is replaced rather than appended to. Defaults to true.",
+                        "default": true
+                    }
+                },
+                "required": ["coordinate_x", "coordinate_y", "text"]
+            }),
+        ),
+        tool(
+            "browser_press_key",
+            "Press a keyboard key or combo on the focused element or page. Examples: Enter, Tab, Backspace, Meta+a, Control+v.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "Key or combo to press, e.g. Enter, Tab, Meta+a, Control+v"
+                    }
+                },
+                "required": ["key"]
             }),
         ),
         tool(

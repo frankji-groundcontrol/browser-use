@@ -5,6 +5,8 @@ use super::BrowserUseMcpServer;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 #[cfg(feature = "live-chrome")]
 use rmcp::model::CallToolRequestParams;
+#[cfg(feature = "live-chrome")]
+use rmcp::model::ErrorCode;
 use serde_json::json;
 #[cfg(feature = "live-chrome")]
 use serde_json::{Map, Value};
@@ -19,21 +21,22 @@ use tokio::task::JoinSet;
 use tokio::time::{timeout, Duration};
 
 #[test]
-fn tools_list_returns_19_low_level_tools() {
+fn tools_list_returns_21_low_level_tools() {
     let tools = low_level_tools();
     let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
 
     // 16 are byte-identical to Python's set; browser_set_viewport,
-    // browser_read_clipboard, and browser_select_option are this fork's
-    // deliberate additions (select_option covers native <select> dropdowns,
-    // which cannot be operated by mouse clicks under CDP).
-    assert_eq!(tools.len(), 19);
+    // browser_read_clipboard, browser_select_option, browser_paste_at_coordinates,
+    // and browser_press_key are this fork's deliberate additions.
+    assert_eq!(tools.len(), 21);
     assert_eq!(
         names,
         [
             "browser_navigate",
             "browser_click",
             "browser_type",
+            "browser_paste_at_coordinates",
+            "browser_press_key",
             "browser_select_option",
             "browser_get_state",
             "browser_extract_content",
@@ -151,6 +154,8 @@ fn read_only_tools_carry_read_only_hint_annotations() {
         "browser_navigate",
         "browser_click",
         "browser_type",
+        "browser_paste_at_coordinates",
+        "browser_press_key",
         "browser_select_option",
         "browser_scroll",
         "browser_go_back",
@@ -170,6 +175,16 @@ fn read_only_tools_carry_read_only_hint_annotations() {
         assert!(
             tool.annotations.is_none(),
             "{name} must stay unannotated, matching upstream"
+        );
+    }
+
+    // Every tool must appear in exactly one of the two lists above, so a new tool
+    // cannot be added without a deliberate decision about its annotation.
+    for tool in &tools {
+        let name = tool.name.as_ref();
+        assert!(
+            read_only.contains(&name) || mutating.contains(&name),
+            "{name} is classified as neither read-only nor mutating"
         );
     }
 }
@@ -1240,6 +1255,478 @@ async fn typing_empty_text_clears_prefilled_input() -> anyhow::Result<()> {
         .evaluate("document.getElementById('i').value")
         .await?;
     assert_eq!(value, json!(""));
+
+    Ok(())
+}
+
+/// A pre-filled input pinned to the top-left corner, so a fixed viewport
+/// coordinate reliably lands inside it without reading the DOM first — which is
+/// the whole point of coordinate mode.
+#[cfg(feature = "live-chrome")]
+const COORDINATE_INPUT_PAGE: &str = "<title>Coords</title><input id=i value='old value' \
+     style='position:fixed;left:0;top:0;width:300px;height:60px;font-size:20px;margin:0'>";
+
+#[cfg(feature = "live-chrome")]
+async fn open_coordinate_input_page(server: &BrowserUseMcpServer) -> anyhow::Result<()> {
+    server
+        .call_browser_tool(call(
+            "browser_navigate",
+            json!({"url": data_url(COORDINATE_INPUT_PAGE)}),
+        ))
+        .await?;
+    Ok(())
+}
+
+#[cfg(feature = "live-chrome")]
+async fn input_value(server: &BrowserUseMcpServer) -> anyhow::Result<Value> {
+    server
+        .actor()
+        .evaluate("document.getElementById('i').value")
+        .await
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn typing_at_coordinates_replaces_prefilled_value() -> anyhow::Result<()> {
+    let server = BrowserUseMcpServer::new();
+    open_coordinate_input_page(&server).await?;
+
+    let result = server
+        .call_browser_tool(call(
+            "browser_type",
+            json!({"coordinate_x": 150, "coordinate_y": 30, "text": "Alex"}),
+        ))
+        .await?;
+    assert_eq!(
+        text_content(&result),
+        "Typed 'Alex' at coordinates (150, 30)"
+    );
+
+    assert_eq!(
+        input_value(&server).await?,
+        json!("Alex"),
+        "coordinate typing must replace the existing value, not append to it"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn typing_empty_text_at_coordinates_clears_prefilled_input() -> anyhow::Result<()> {
+    // The tool contract says text="" clears the field. Coordinate mode has no DOM
+    // node to reset, so it has to get there with select-all + Backspace; a
+    // select-all that is never followed by a delete leaves the old text in place.
+    let server = BrowserUseMcpServer::new();
+    open_coordinate_input_page(&server).await?;
+
+    server
+        .call_browser_tool(call(
+            "browser_type",
+            json!({"coordinate_x": 150, "coordinate_y": 30, "text": ""}),
+        ))
+        .await?;
+
+    assert_eq!(
+        input_value(&server).await?,
+        json!(""),
+        "text=\"\" must clear the field, matching the index-mode contract"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn pasting_at_coordinates_replaces_prefilled_value() -> anyhow::Result<()> {
+    // Pasting into an already-filled field must not concatenate: a doubled value
+    // reads like an application bug but is entirely self-inflicted.
+    //
+    // Served over loopback rather than a data: URL because the clipboard API needs
+    // a secure context, and 127.0.0.1 counts as one.
+    let page = MockHttpServer::spawn_html(COORDINATE_INPUT_PAGE).await?;
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call("browser_navigate", json!({"url": page.base_url()})))
+        .await?;
+
+    let result = server
+        .call_browser_tool(call(
+            "browser_paste_at_coordinates",
+            json!({"coordinate_x": 150, "coordinate_y": 30, "text": "@mushqa_en"}),
+        ))
+        .await?;
+    assert_eq!(
+        text_content(&result),
+        "Pasted '@mushqa_en' at coordinates (150, 30)"
+    );
+
+    assert_eq!(input_value(&server).await?, json!("@mushqa_en"));
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn pasting_without_a_secure_context_explains_the_requirement() -> anyhow::Result<()> {
+    // navigator.clipboard is undefined outside a secure context. Without this
+    // check the failure surfaced as "Cannot read properties of undefined", which
+    // says nothing about what to do instead.
+    let server = BrowserUseMcpServer::new();
+    open_coordinate_input_page(&server).await?;
+
+    let result = server
+        .call_browser_tool(call(
+            "browser_paste_at_coordinates",
+            json!({"coordinate_x": 150, "coordinate_y": 30, "text": "@mushqa_en"}),
+        ))
+        .await?;
+
+    assert!(result.is_error.unwrap_or(false));
+    let message = text_content(&result);
+    assert!(
+        message.contains("secure context") && message.contains("browser_type"),
+        "the error should name the cause and the alternative: {message}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn press_key_reaches_the_focused_element() -> anyhow::Result<()> {
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call(
+            "browser_navigate",
+            json!({"url": data_url(
+                "<title>Keys</title><input id=i style='position:fixed;left:0;top:0;width:300px;height:60px;margin:0'>\
+                 <script>window.keys=[];document.addEventListener('keydown',e=>window.keys.push(e.key+'/'+e.code))</script>"
+            )}),
+        ))
+        .await?;
+    server
+        .call_browser_tool(call(
+            "browser_click",
+            json!({"coordinate_x": 150, "coordinate_y": 30}),
+        ))
+        .await?;
+
+    let result = server
+        .call_browser_tool(call("browser_press_key", json!({"key": "Enter"})))
+        .await?;
+    assert_eq!(text_content(&result), "Pressed Enter");
+
+    let keys = server.actor().evaluate("window.keys.join(',')").await?;
+    assert_eq!(keys, json!("Enter/Enter"));
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn press_key_sends_side_specific_modifier_codes() -> anyhow::Result<()> {
+    // `event.code` for a modifier is side-specific ("MetaLeft", never "Meta").
+    // Pages that key off event.code see nothing if the bare name is sent.
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call(
+            "browser_navigate",
+            json!({"url": data_url(
+                "<title>Modifiers</title>\
+                 <script>window.codes=[];document.addEventListener('keydown',e=>window.codes.push(e.code))</script>"
+            )}),
+        ))
+        .await?;
+
+    server
+        .call_browser_tool(call("browser_press_key", json!({"key": "Meta+a"})))
+        .await?;
+
+    let codes = server.actor().evaluate("window.codes.join(',')").await?;
+    assert_eq!(codes, json!("MetaLeft,KeyA"));
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn press_key_rejects_an_unrecognised_modifier() -> anyhow::Result<()> {
+    // An unknown modifier used to contribute a zero bit, so the combo degraded to
+    // a plain keypress and the tool reported success for a no-op.
+    let server = BrowserUseMcpServer::new();
+    open_coordinate_input_page(&server).await?;
+
+    let result = server
+        .call_browser_tool(call("browser_press_key", json!({"key": "Hyper+v"})))
+        .await?;
+
+    assert!(
+        result.is_error.unwrap_or(false),
+        "an unrecognised modifier must be reported, not silently ignored: {result:?}"
+    );
+    assert!(text_content(&result).contains("browser_press_key failed"));
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn press_key_accepts_common_modifier_spellings() -> anyhow::Result<()> {
+    // "Ctrl" and "Cmd" are the spellings a caller reaches for first; treating them
+    // as aliases beats rejecting them on a technicality.
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call(
+            "browser_navigate",
+            json!({"url": data_url(
+                "<title>Aliases</title>\
+                 <script>window.seen=[];document.addEventListener('keydown',e=>{if(e.key==='a')window.seen.push([e.ctrlKey,e.metaKey].join('/'))})</script>"
+            )}),
+        ))
+        .await?;
+
+    server
+        .call_browser_tool(call("browser_press_key", json!({"key": "Ctrl+a"})))
+        .await?;
+    server
+        .call_browser_tool(call("browser_press_key", json!({"key": "Cmd+a"})))
+        .await?;
+
+    let seen = server.actor().evaluate("window.seen.join(',')").await?;
+    assert_eq!(seen, json!("true/false,false/true"));
+
+    Ok(())
+}
+
+/// Every field here is filled or toggled by JavaScript *after* parsing, so the
+/// static `value`/`checked` attributes stay stale. That is the situation the
+/// agent used to misread as an empty form (upstream #5647).
+#[cfg(feature = "live-chrome")]
+const PREFILLED_FORM_PAGE: &str = r#"<title>Prefilled</title>
+    <input id=name placeholder="Your name">
+    <textarea id=notes placeholder="Your notes"></textarea>
+    <input id=secret type=password placeholder="Your password">
+    <input id=otp autocomplete=one-time-code placeholder="One time code">
+    <input id=card autocomplete=cc-number placeholder="Card number">
+    <input id=agree type=checkbox aria-label="Agree" checked>
+    <input id=news type=checkbox aria-label="Newsletter">
+    <script>
+        document.getElementById('name').value = 'Ada Lovelace';
+        document.getElementById('notes').value = 'call back tuesday';
+        document.getElementById('secret').value = 'hunter2';
+        document.getElementById('otp').value = '493021';
+        document.getElementById('card').value = '4242424242424242';
+        document.getElementById('agree').checked = false;
+        document.getElementById('news').checked = true;
+    </script>"#;
+
+#[cfg(feature = "live-chrome")]
+fn element_by_text<'a>(elements: &'a [Value], text: &str) -> &'a Value {
+    elements
+        .iter()
+        .find(|element| element["text"] == text)
+        .unwrap_or_else(|| panic!("no indexed element labelled {text:?} in {elements:?}"))
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn get_state_reports_live_input_values_and_checked_state() -> anyhow::Result<()> {
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call(
+            "browser_navigate",
+            json!({"url": data_url(PREFILLED_FORM_PAGE)}),
+        ))
+        .await?;
+
+    let state = server
+        .call_browser_tool(call("browser_get_state", json!({})))
+        .await?
+        .structured_content
+        .expect("browser_get_state should return structured JSON");
+    let elements = state["interactive_elements"]
+        .as_array()
+        .expect("elements should be an array");
+
+    assert_eq!(
+        element_by_text(elements, "Your name")["value"],
+        json!("Ada Lovelace"),
+        "a JS-filled input must report the value it actually holds: {elements:?}"
+    );
+    assert_eq!(
+        element_by_text(elements, "Your notes")["value"],
+        json!("call back tuesday"),
+        "textarea live values come from the snapshot's textValue: {elements:?}"
+    );
+
+    assert_eq!(
+        element_by_text(elements, "Newsletter")["checked"],
+        json!(true),
+        "a checkbox checked by JS must report checked: {elements:?}"
+    );
+    assert_eq!(
+        element_by_text(elements, "Agree")["checked"],
+        json!(false),
+        "live unchecked state must win over the stale checked attribute: {elements:?}"
+    );
+
+    // Only the two state fields that mean something for a given control are
+    // reported. A text field carrying `checked: false`, or a checkbox carrying the
+    // literal `value: "on"` every checkbox has, is noise the caller has to learn
+    // to ignore.
+    assert_eq!(
+        element_by_text(elements, "Your name")["checked"],
+        Value::Null,
+        "a text input has no checked state: {elements:?}"
+    );
+    assert_eq!(
+        element_by_text(elements, "Newsletter")["value"],
+        Value::Null,
+        "a checkbox reports state through checked, not its default value: {elements:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn get_state_never_exposes_sensitive_live_values() -> anyhow::Result<()> {
+    // Passwords, one-time codes, and card numbers must not reach the caller or a
+    // log through the snapshot, so they are dropped before being stored at all.
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call(
+            "browser_navigate",
+            json!({"url": data_url(PREFILLED_FORM_PAGE)}),
+        ))
+        .await?;
+
+    let state = server
+        .call_browser_tool(call("browser_get_state", json!({})))
+        .await?
+        .structured_content
+        .expect("browser_get_state should return structured JSON");
+    let elements = state["interactive_elements"]
+        .as_array()
+        .expect("elements should be an array");
+
+    for label in ["Your password", "One time code", "Card number"] {
+        assert_eq!(
+            element_by_text(elements, label)["value"],
+            Value::Null,
+            "{label} must not carry a live value: {elements:?}"
+        );
+    }
+
+    let serialized = serde_json::to_string(&state)?;
+    for secret in ["hunter2", "493021", "4242424242424242"] {
+        assert!(
+            !serialized.contains(secret),
+            "{secret} leaked into browser_get_state: {serialized}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn get_state_labels_an_icon_only_control_from_its_child_image() -> anyhow::Result<()> {
+    // An icon-only button has no text of its own. Without reaching into the child
+    // <img> the model sees a blank label and cannot tell two icons apart.
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call(
+            "browser_navigate",
+            json!({"url": data_url(
+                "<title>Icons</title>\
+                 <button id=del><img src='/icons/trash.png' alt='Delete item' width=32 height=32></button>\
+                 <button id=fav><img src='/icons/star-outline.png' width=32 height=32></button>"
+            )}),
+        ))
+        .await?;
+
+    let state = server
+        .call_browser_tool(call("browser_get_state", json!({})))
+        .await?
+        .structured_content
+        .expect("browser_get_state should return structured JSON");
+    let elements = state["interactive_elements"]
+        .as_array()
+        .expect("elements should be an array");
+
+    assert!(
+        has_element(elements, "button", "Delete item"),
+        "a button wrapping <img alt> must be labelled from that alt text: {elements:?}"
+    );
+
+    // With no alt to borrow, the image's file name is still better than nothing.
+    let starred = elements
+        .iter()
+        .find(|element| {
+            element["tag"] == "button"
+                && element["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("star-outline.png"))
+        })
+        .is_some();
+    assert!(
+        starred,
+        "an icon button without alt should fall back to the image file name: {elements:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn unknown_tool_is_reported_as_an_error() -> anyhow::Result<()> {
+    // Upstream's contract (afbc714a6): an unknown tool must never come back as a
+    // successful result. This fork reports it as a protocol error instead of an
+    // is_error result, which is likewise never mistaken for success.
+    let server = BrowserUseMcpServer::new();
+
+    let error = server
+        .call_browser_tool(call("does_not_exist", json!({})))
+        .await
+        .expect_err("an unknown tool must not return a successful result");
+
+    assert_eq!(error.code, ErrorCode::METHOD_NOT_FOUND);
+    assert!(
+        error.message.contains("Unknown tool: does_not_exist"),
+        "the error should name the tool: {}",
+        error.message
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn press_key_treats_a_lone_plus_as_a_key_not_a_combo() -> anyhow::Result<()> {
+    // Upstream 0a6e427c6/2b56dc8f5: "+" is the key itself, and "Shift++" is
+    // Shift plus the "+" key. Splitting naively on "+" yields an empty key name.
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call(
+            "browser_navigate",
+            json!({"url": data_url(
+                "<title>Plus</title>\
+                 <script>window.seen=[];document.addEventListener('keydown',e=>window.seen.push(e.key+(e.shiftKey?'/shift':'')))</script>"
+            )}),
+        ))
+        .await?;
+
+    server
+        .call_browser_tool(call("browser_press_key", json!({"key": "+"})))
+        .await?;
+    server
+        .call_browser_tool(call("browser_press_key", json!({"key": "Shift++"})))
+        .await?;
+
+    let seen = server.actor().evaluate("window.seen.join(',')").await?;
+    assert_eq!(seen, json!("+,Shift/shift,+/shift"));
 
     Ok(())
 }

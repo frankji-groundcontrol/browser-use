@@ -164,6 +164,47 @@ impl ActorHandle {
             .await
     }
 
+    /// Clicks viewport coordinates and types into the focused element.
+    pub async fn type_at_coordinates(
+        &self,
+        x: f64,
+        y: f64,
+        text: String,
+        clear: bool,
+    ) -> Result<()> {
+        self.request(|reply| Command::TypeAtCoordinates {
+            x,
+            y,
+            text,
+            clear,
+            reply,
+        })
+        .await
+    }
+
+    /// Clicks viewport coordinates and pastes text via the clipboard.
+    pub async fn paste_at_coordinates(
+        &self,
+        x: f64,
+        y: f64,
+        text: String,
+        clear: bool,
+    ) -> Result<()> {
+        self.request(|reply| Command::PasteAtCoordinates {
+            x,
+            y,
+            text,
+            clear,
+            reply,
+        })
+        .await
+    }
+
+    /// Dispatches a keyboard shortcut or single key press.
+    pub async fn press_key(&self, key: String) -> Result<()> {
+        self.request(|reply| Command::PressKey { key, reply }).await
+    }
+
     /// Selects an option in a native `<select>` element (index from the last
     /// selector snapshot). Exactly one of `value`, `label`, or `option_index`
     /// should be `Some`; if more than one is provided, value takes precedence,
@@ -341,6 +382,24 @@ enum Command {
     Type {
         index: usize,
         text: String,
+        reply: Reply<()>,
+    },
+    TypeAtCoordinates {
+        x: f64,
+        y: f64,
+        text: String,
+        clear: bool,
+        reply: Reply<()>,
+    },
+    PasteAtCoordinates {
+        x: f64,
+        y: f64,
+        text: String,
+        clear: bool,
+        reply: Reply<()>,
+    },
+    PressKey {
+        key: String,
         reply: Reply<()>,
     },
     SelectOption {
@@ -544,6 +603,51 @@ impl BrowserActor {
             }
             Command::Type { index, text, reply } => {
                 let _ = reply.send(self.type_text(index, &text).await);
+            }
+            Command::TypeAtCoordinates {
+                x,
+                y,
+                text,
+                clear,
+                reply,
+            } => {
+                let result = async {
+                    self.guard_active_url().await?;
+                    self.active_page()
+                        .await?
+                        .type_at_coordinates(x, y, &text, clear)
+                        .await
+                }
+                .await;
+                self.selector_cache.clear();
+                let _ = reply.send(result);
+            }
+            Command::PasteAtCoordinates {
+                x,
+                y,
+                text,
+                clear,
+                reply,
+            } => {
+                let result = async {
+                    self.guard_active_url().await?;
+                    self.active_page()
+                        .await?
+                        .paste_at_coordinates(x, y, &text, clear)
+                        .await
+                }
+                .await;
+                self.selector_cache.clear();
+                let _ = reply.send(result);
+            }
+            Command::PressKey { key, reply } => {
+                let result = async {
+                    self.guard_active_url().await?;
+                    self.active_page().await?.press_key(&key).await
+                }
+                .await;
+                self.selector_cache.clear();
+                let _ = reply.send(result);
             }
             Command::SelectOption {
                 index,
