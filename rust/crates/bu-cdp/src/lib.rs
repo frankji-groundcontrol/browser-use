@@ -10,14 +10,15 @@ use std::{
     },
 };
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chromiumoxide::{
     browser::{Browser, BrowserConfig},
     cdp::browser_protocol::{
         accessibility::GetFullAxTreeParams,
         browser::{GrantPermissionsParams, PermissionType, ResetPermissionsParams},
         dom::{
-            BackendNodeId, FocusParams, GetContentQuadsParams, GetDocumentParams, ResolveNodeParams,
+            BackendNodeId, DescribeNodeParams, FocusParams, GetContentQuadsParams,
+            GetDocumentParams, ResolveNodeParams,
         },
         dom_debugger::GetEventListenersParams,
         dom_snapshot::CaptureSnapshotParams,
@@ -1271,10 +1272,16 @@ impl BrowserPage {
     }
 
     /// Focuses an element by stable Chromium backend node id and types text into it.
+    /// A Flutter semantics node is tapped with a real mouse click instead of focused.
     pub async fn type_into_backend_node_id(&self, backend_node_id: i64, text: &str) -> Result<()> {
         let element = self
             .current_element_by_backend_node_id(backend_node_id)
             .await?;
+
+        if self.is_flutter_semantics_node(backend_node_id).await {
+            self.tap_flutter_node(backend_node_id).await?;
+            return self.insert_text_into_focused_element(text).await;
+        }
 
         self.page
             .execute(
@@ -1286,6 +1293,58 @@ impl BrowserPage {
             .with_context(|| format!("failed to focus backend node id {backend_node_id}"))?;
 
         self.insert_text_into_focused_element(text).await
+    }
+
+    /// Whether a node is part of Flutter Web's semantics tree: an `flt-*` element,
+    /// or the `<input>`/`<textarea>` proxy Flutter tags with `data-semantics-role`.
+    ///
+    /// Checked on Flutter 3.44.8; an engine that tags its proxies differently is
+    /// treated as an ordinary page.
+    async fn is_flutter_semantics_node(&self, backend_node_id: i64) -> bool {
+        let described = self
+            .page
+            .execute(
+                DescribeNodeParams::builder()
+                    .backend_node_id(BackendNodeId::new(backend_node_id))
+                    .build(),
+            )
+            .await;
+        let Ok(described) = described else {
+            return false;
+        };
+        let node = &described.result.node;
+        node.node_name.to_ascii_lowercase().starts_with("flt-")
+            || node
+                .attributes
+                .iter()
+                .flatten()
+                .step_by(2)
+                .any(|name| name == "data-semantics-role")
+    }
+
+    /// Taps the centre of a Flutter semantics node with a real mouse click.
+    ///
+    /// Flutter hands focus to a text field on a pointer tap. `DOM.focus` on its
+    /// proxy `<input>` followed by `insertText` reports success while the app
+    /// discards the text, so a Flutter field must be tapped before it is edited.
+    ///
+    /// A tap that misses still returns Ok, and the keyboard would then act on
+    /// whatever was focused before, so a node whose centre is off screen (or
+    /// under 2×2 px, like the accessibility placeholder) is an error instead.
+    // ponytail: the node is not scrolled into view; do that here if agents need it.
+    async fn tap_flutter_node(&self, backend_node_id: i64) -> Result<()> {
+        let bounds = self
+            .viewport_click_rect(backend_node_id)
+            .await
+            .with_context(|| format!("Flutter node {backend_node_id} has no box to tap"))?;
+        if bounds.prefers_dom_click(self.viewport_size().await) {
+            bail!(
+                "Flutter node {backend_node_id} is outside the viewport or too small to tap; \
+                 scroll it into view first"
+            );
+        }
+        let (x, y) = bounds.center();
+        self.click_coordinates(x, y).await
     }
 
     /// Clicks viewport coordinates, optionally clears the focused field, then types text.
@@ -1527,10 +1586,18 @@ impl BrowserPage {
     }
 
     /// Clears an element by stable Chromium backend node id, dispatching input/change events.
+    /// A Flutter semantics node is tapped and cleared from the keyboard instead.
     pub async fn clear_backend_node_id(&self, backend_node_id: i64) -> Result<()> {
         let element = self
             .current_element_by_backend_node_id(backend_node_id)
             .await?;
+
+        // Same sequence as `type_at_coordinates`, which is what was proven live on
+        // Flutter; the value-reset path below was never shown to reach its state.
+        if self.is_flutter_semantics_node(backend_node_id).await {
+            self.tap_flutter_node(backend_node_id).await?;
+            return self.clear_focused_element_by_keyboard().await;
+        }
 
         self.page
             .execute(

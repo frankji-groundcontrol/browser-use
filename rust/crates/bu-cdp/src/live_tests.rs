@@ -629,3 +629,151 @@ async fn a_password_field_stays_redacted_after_a_reveal_toggle_flips_its_type() 
     assert!(page.sensitive_nodes_guard().get(&target).is_none());
     Ok(())
 }
+
+// A stand-in for Flutter Web's text-field proxy. The real `<input>` lives in the
+// semantics tree under an `flt-semantics` host. The real page threw away text
+// sent by a programmatic `focus()` plus `insertText` (the cause is not
+// established: it may need a pointer tap, or just time to activate), so this
+// stand-in encodes the tap assumption. The `state` variable plays the app's own
+// copy of the text: an edit not preceded by a fresh pointerdown is reverted.
+const FLUTTER_PROXY_PAGE: &str = "data:text/html,<title>Flutter</title>\
+<flt-semantics-host><flt-semantics style='position:absolute;left:100px;top:100px;\
+width:240px;height:40px'>\
+<input id='f' data-semantics-role='text-field' aria-label='Email' type='text' \
+style='width:240px;height:40px'></flt-semantics></flt-semantics-host>\
+<script>var state='old',tapped=false,f=document.getElementById('f');f.value=state;\
+f.addEventListener('pointerdown',function(){tapped=true;});\
+f.addEventListener('input',function(){if(tapped){state=f.value;tapped=false;}\
+else{f.value=state;}\
+document.title='state='+state;});</script>";
+
+async fn flutter_proxy_input() -> anyhow::Result<(BrowserSession, crate::BrowserPage, i64)> {
+    let session = BrowserSession::launch_headless().await?;
+    let page = session.new_page().await?;
+    page.navigate(FLUTTER_PROXY_PAGE).await?;
+    let backend_node_id = page
+        .selector_map()
+        .await?
+        .iter()
+        .find(|element| element.tag == "input")
+        .expect("the proxy input is interactive")
+        .backend_node_id_value();
+    Ok((session, page, backend_node_id))
+}
+
+#[tokio::test]
+async fn typing_by_index_into_a_flutter_proxy_input_needs_a_pointer_tap() -> anyhow::Result<()> {
+    let (_session, page, id) = flutter_proxy_input().await?;
+    // Start empty and skip the clear, so only the type path can supply the tap.
+    page.evaluate_json("state='';f.value='';true").await?;
+
+    page.type_into_backend_node_id(id, "probe@example.test")
+        .await?;
+
+    assert_eq!(page.state().await?.title, "state=probe@example.test");
+    Ok(())
+}
+
+#[tokio::test]
+async fn clearing_by_index_empties_a_flutter_proxy_inputs_app_state() -> anyhow::Result<()> {
+    let (_session, page, id) = flutter_proxy_input().await?;
+
+    page.clear_backend_node_id(id).await?;
+
+    assert_eq!(page.state().await?.title, "state=");
+    Ok(())
+}
+
+#[tokio::test]
+async fn flutter_semantics_nodes_are_recognised_by_tag_or_role_only() -> anyhow::Result<()> {
+    let session = BrowserSession::launch_headless().await?;
+    let page = session.new_page().await?;
+    page.navigate(
+        "data:text/html,<title>Detect</title>\
+<flt-semantics tabindex='0' style='display:block;width:60px;height:30px'>tag</flt-semantics>\
+<div tabindex='0' data-semantics-role='text-field' style='width:60px;height:30px'>role</div>\
+<div tabindex='0' style='width:60px;height:30px'>plain</div>",
+    )
+    .await?;
+    let elements = page.selector_map().await?;
+    let id_of = |tag: &str, text: &str| {
+        elements
+            .iter()
+            .find(|e| e.tag == tag && e.text.contains(text))
+            .unwrap_or_else(|| panic!("no interactive {tag} with text {text}"))
+            .backend_node_id_value()
+    };
+
+    assert!(
+        page.is_flutter_semantics_node(id_of("flt-semantics", "tag"))
+            .await
+    );
+    assert!(page.is_flutter_semantics_node(id_of("div", "role")).await);
+    assert!(!page.is_flutter_semantics_node(id_of("div", "plain")).await);
+    Ok(())
+}
+
+#[tokio::test]
+async fn typing_by_index_into_an_off_screen_flutter_node_is_an_error() -> anyhow::Result<()> {
+    // A tap that misses still returns Ok, and the keyboard would then edit
+    // whatever was focused before; an unreachable node must fail loudly instead.
+    let session = BrowserSession::launch_headless().await?;
+    let page = session.new_page().await?;
+    page.navigate(
+        "data:text/html,<title>Far</title>\
+<flt-semantics tabindex='0' style='position:absolute;left:100px;top:5000px;\
+width:60px;height:30px'>far</flt-semantics>",
+    )
+    .await?;
+    let id = page
+        .selector_map()
+        .await?
+        .iter()
+        .find(|e| e.tag == "flt-semantics")
+        .expect("the node is interactive")
+        .backend_node_id_value();
+
+    let error = page
+        .type_into_backend_node_id(id, "text")
+        .await
+        .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("outside the viewport"),
+        "{error:#}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn typing_by_index_into_a_plain_input_sends_no_pointer_event() -> anyhow::Result<()> {
+    // The Flutter path taps the field first; an ordinary page must not get that
+    // extra click, which could hit a handler or an overlapping element.
+    let session = BrowserSession::launch_headless().await?;
+    let page = session.new_page().await?;
+    page.navigate(
+        "data:text/html,<title>Plain</title>\
+<input id='f' type='text' style='width:240px;height:40px'>\
+<script>document.getElementById('f').addEventListener('pointerdown',\
+function(){document.title='tapped';});</script>",
+    )
+    .await?;
+    let id = page
+        .selector_map()
+        .await?
+        .iter()
+        .find(|element| element.tag == "input")
+        .expect("the input is interactive")
+        .backend_node_id_value();
+
+    page.clear_backend_node_id(id).await?;
+    page.type_into_backend_node_id(id, "plain text").await?;
+
+    assert_eq!(
+        page.evaluate_json("document.getElementById('f').value")
+            .await?,
+        serde_json::json!("plain text")
+    );
+    assert_eq!(page.state().await?.title, "Plain");
+    Ok(())
+}
