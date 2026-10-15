@@ -83,10 +83,15 @@ All 18 were triaged.
 
 ## Accepted and deferred
 
-- **Reveal-toggled password with no tell.** A password field whose `type` was
-  flipped to `text` and that carries no password-like `name`/`id` and no
-  password `autocomplete` cannot be recognised from the snapshot, so its live
-  value is reported. Closing it would mean redacting every text field, which
+- **Reveal-toggled password with no tell (narrowed 2026-10-15).** A password
+  field whose `type` was flipped to `text` and that carries no password-like
+  `name`, `id`, `placeholder` or `aria-label` and no password `autocomplete`
+  cannot be recognised from the snapshot, so its live value is reported. Two
+  changes narrow it: those four attributes now count as tells, and a per-tab
+  memory of backend node ids that ever looked sensitive keeps a field redacted
+  after a reveal toggle flips its type (cleared on `navigate()`; a stale id can
+  only over-redact). What remains is a field never seen as a password that has
+  none of those tells. Closing that would mean redacting every text field, which
   defeats the feature.
 - **`BringToFront` in the clipboard grant.** It raises the tab. Chromium requires
   a focused document for the clipboard APIs, so this stays.
@@ -98,25 +103,41 @@ All 18 were triaged.
 
 ## What this does not prove
 
-- **Live Flutter.** The DOM-click path is proven against a 1×1 off-screen button
-  and an SVG node in headless Chromium, not against a real Flutter Web login
-  page. That check is still open.
-- **The skill sync CI job will still fail.** `scripts/sync_browser_harness_skill.py
-  --check` fetches upstream `browser-harness` `main` live and compares; it exits 1
-  here with a 298-line diff, none of it from this fork. Our hand edit is gone, so
-  the divergence is upstream's. Re-running the sync would import that content and
-  is a separate decision.
-- **The 10-minute hang during this pass was not root-caused.**
+Items below were open when this record was written; the first four were
+revisited on 2026-10-15, see
+[the gap-closing changelog](../changelogs/2026-10-15-close-review-gaps.md).
+
+- **Live Flutter (closed 2026-10-15).** The DOM-click path was proven against a
+  1×1 off-screen button and an SVG node, then against a locally built Flutter Web
+  3.44.8 login page: the placeholder click exposed `Email`, `Password` and
+  `Log in`, and `Log in` changed the app's state. One Flutter version, headless
+  only, a debug build from this tree rather than an installed binary. The page
+  also showed that `browser_type` by index silently drops text, now
+  [its own issue](2026-10-15-flutter-index-typing-drops-text.md).
+- **The skill sync CI job (resolved 2026-10-15).** `scripts/sync_browser_harness_skill.py
+  --check` fetches upstream `browser-harness` `main` live; it exited 1 with a
+  298-line diff, none of it from this fork. The script was re-run and both
+  generated copies were regenerated: `--check` exits 0 and the CI docs test
+  passes. This is not durable: the job drifts red again whenever upstream moves.
+  It runs only on pushes to `main`, pull requests touching the listed paths, and
+  manual dispatch.
+- **The 10-minute stall (not a proven hang; a real bug was found).**
   `forbidden_first_page_and_mutations_fail_closed` produced no output for over ten
-  minutes at 0% CPU under machine load ~21, then passed in about 2 s on every
-  later run, including three mutation runs. That matches the load-induced stall
-  already recorded in the
-  [upstream-sync changelog](../changelogs/2026-09-21-upstream-sync-live-form-state.md)
-  and [the flaky live-chrome issue](2026-08-27-flaky-live-chrome-tests.md). It is
-  attributed to load, not proven.
+  minutes at 0% CPU under machine load ~21. It was never reproduced as a true
+  hang: one 75 s stall under ten CPU hogs with the test thread idle, and none in
+  18 further hogged runs. Reproducing under load did expose a separate,
+  deterministic failure: `state()` read the title through a cached execution
+  context that navigation had already destroyed (`Cannot find context with
+  specified id`), failing the test in 4 of 8 hogged runs. `state()` now issues a
+  raw `Runtime.evaluate` without a context id and the test passes 10 of 10 under
+  the same load. The test also has a 120 s wall-clock bound so a stall fails and
+  names itself. About fifteen other `page.evaluate` call sites share the latent
+  race and were left unchanged; see
+  [the learning record](../learning/2026-10-15-pinned-execution-context-races-navigation.md).
 - **Final gates are green on this host only.** `cargo fmt --check`, clippy
   `-D warnings` (default and `live-chrome`) and `cargo test --features live-chrome
-  -- --test-threads=1` all exit 0: **200 passed, 0 failed** (174 before the fix
-  pass). No other host ran them.
+  -- --test-threads=1` all exit 0: **202 passed, 0 failed** (174 before the first
+  fix pass, 200 after it, 202 with the two tests added for the gaps). No other
+  host ran them.
 
 [Issues index](README.md) · [Landing commit context](../HANDOFF.md)

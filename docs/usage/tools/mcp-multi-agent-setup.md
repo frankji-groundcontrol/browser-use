@@ -47,8 +47,13 @@ at (-1, -1), index 0). An index click on a tiny or off-screen node is activated
 with a DOM `click()` instead of a mouse event, which would miss it; afterwards
 `browser_get_state` should list the real controls. If the tree stays empty, take
 a `browser_screenshot` and use `browser_type` or `browser_paste_at_coordinates`
-with coordinates. **Not yet verified against a real Flutter app:** the test
-stand-in is a plain 1×1 button, and the live check is still open.
+with coordinates. Checked on a real Flutter Web 3.44.8 login page (2026-10-15,
+headless, locally built; the binary was a debug build from this tree): the index
+click removes the placeholder and `Email`, `Password` and `Log in` appear.
+**Type with coordinates, not an index.** `browser_type` by index into a Flutter
+field reports success but the app never receives the text
+([issue](../../issues/2026-10-15-flutter-index-typing-drops-text.md)); a button
+such as `Log in` can be clicked by index.
 
 ## 1. Build & install the Rust binary
 

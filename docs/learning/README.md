@@ -1,5 +1,8 @@
 # Learning records
 
+- [2026-10-15 — A pinned execution context races navigation, and load makes it lose](2026-10-15-pinned-execution-context-races-navigation.md)
+  — a cached `contextId` is destroyed mid-navigation; a silent test under load is
+  starvation until a stack sample says otherwise, so bound it with a timeout.
 - [2026-10-15 — A matching HEAD hides a dirty tree on another host](2026-10-15-matching-head-hides-a-dirty-tree.md)
   — check `git status` on the remote before calling a sync a no-op; move
   uncommitted work with `git diff --binary` plus a tar, proven by per-file hashes.

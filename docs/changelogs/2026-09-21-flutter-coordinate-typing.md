@@ -61,6 +61,17 @@ and `Option` are accepted as aliases.
 a secure context (https, or http on localhost). On a plain `http://` page it
 fails with a message pointing at `browser_type` coordinate mode instead.
 
+## Live check (2026-10-15)
+
+On a locally built Flutter Web 3.44.8 login page (headless Chromium, debug binary
+from this tree, not installed), `browser_type` with `coordinate_x`/`coordinate_y`
+into the Email field followed by `Log in` made the app's status label read
+`welcome <typed email>`. The password field was typed the same way and its text
+never appears in `browser_get_state`. `browser_paste_at_coordinates` and
+`browser_press_key` were not exercised on that page. Index-mode typing on the
+same page silently drops the text:
+[issue](../issues/2026-10-15-flutter-index-typing-drops-text.md).
+
 ## Verification
 
 ```bash

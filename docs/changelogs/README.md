@@ -1,5 +1,9 @@
 # Change records
 
+- [2026-10-15 — Closing the review gaps](2026-10-15-close-review-gaps.md)
+  — live Flutter check passed, skill copies re-synced, reveal-toggled password
+  redaction narrowed, and a stale-execution-context race in `state()` fixed.
+
 - [2026-10-15 — Fixes from the MBP-local WIP review](2026-10-15-mbp-local-wip-review-fixes.md)
   — redaction token lists, trusted-click routing, key accelerators, paste
   safety, and policy coverage for the new input tools.

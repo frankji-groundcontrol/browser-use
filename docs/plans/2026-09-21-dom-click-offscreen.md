@@ -42,7 +42,10 @@ slice.
 - [ ] Release build installed (the claim was not reproduced: MBP-local's
       installed binary predates the last edits; nothing from this tree is
       deployed yet)
-- [ ] Live H5 after reconnect: click index 0, `get_state` lists Log in / Email / terms
+- [x] Live H5: click index 0, `get_state` lists Log in / Email / Password. Passed
+      2026-10-15 on a locally built Flutter Web 3.44.8 page with a debug build from
+      this tree (not the installed binary); see
+      [the changelog](../changelogs/2026-09-21-dom-click-offscreen.md)
 
 ## Verification
 

@@ -53,9 +53,14 @@ fixes are on `franky-rust`. **Nothing is deployed:** MBP-local's own tree is sti
 dirty and its installed binary predates the work. The tool count is now **21**
 (15 Python-identical, `browser_type` extended with coordinates, 5 additions), and
 the probe in [deploy-browser-use-rs.md](practices/deploy-browser-use-rs.md) expects
-it. Still open: the live DOM-click check on a real Flutter page, and the
-"browser-use skill sync" CI job, which is red because upstream `browser-harness`
-moved, not because of this fork.
+it. The four gaps that review left open were closed the same day, see
+[the changelog](changelogs/2026-10-15-close-review-gaps.md): the live DOM-click
+check passed on a real Flutter Web page, the generated skill files were re-synced
+(they drift again whenever upstream `browser-harness` moves), the reveal-toggled
+password redaction gap was narrowed, and the policy-test stall turned out to be a
+real stale-execution-context race in `state()`, now fixed. That live check also
+found that `browser_type` by index silently drops text on Flutter fields; it is
+[an open issue](issues/2026-10-15-flutter-index-typing-drops-text.md).
 
 **The LLM environment surface changed on 2026-08-27 and is a breaking change.**
 Configure the model with `BROWSER_USE_LLM_BASE_URL`, `_API_KEY`, `_API`
@@ -121,12 +126,13 @@ needed. Start Chrome with remote debugging, set `BROWSER_USE_CDP_URL`, then run
 the sequential attach probe in the deployment plan. See
 `issues/2026-09-16-current-chrome-devtools-endpoint.md`.
 
-7. **Deploy the 21-tool build and run the live Flutter check.** Follow
+7. **Deploy the 21-tool build.** Follow
    [deploy-browser-use-rs.md](practices/deploy-browser-use-rs.md) on each host (the
-   probe expects 21 tools), reconnect the MCP client, and click index 0 on a real
-   Flutter login page.
-   Done when: `browser_get_state` lists the page's real controls, or the gap is
-   recorded in the [DOM-click plan](plans/2026-09-21-dom-click-offscreen.md).
+   probe expects 21 tools) and reconnect the MCP client. The live Flutter check
+   already passed on a local debug build (2026-10-15); decide on the
+   [index-typing issue](issues/2026-10-15-flutter-index-typing-drops-text.md)
+   first if you want it fixed in the same rollout.
+   Done when: the deploy probe passes on each host.
 
 ## How to pick up the work
 

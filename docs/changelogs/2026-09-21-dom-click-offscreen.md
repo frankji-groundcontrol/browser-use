@@ -45,9 +45,17 @@ The offscreen 1×1 button fixture fails under mouse-centre clicks (title stays
 `clicked`). In-viewport buttons are asserted to receive a trusted
 `pointerdown` and `click`.
 
-The live check is still **open**: install `browser-use-rs`, reconnect the MCP
-client, and click the `Enable accessibility` placeholder on a real Flutter login
-page. A cargo test against such a page is not used: `navigate`'s 8s `stopLoading` plus
-headless CanvasKit often never injects the placeholder.
+Live check (2026-10-15, **closed**): a locally built Flutter Web 3.44.8 login
+page (CanvasKit, headless Chromium) driven over `browser-use-rs --mcp` by a debug
+build from this tree, not installed anywhere. After a 3 s wait `browser_get_state`
+listed two elements, `Enable accessibility` at index 0 and `flutter-view`.
+`browser_click(0)` removed the placeholder and added 10 `flt-semantics` nodes; the
+next state listed `Email`, `Password` and `Log in` (four elements). Clicking
+`Log in` by index changed the app's status label from `signed out` to `welcome `.
+Headless CanvasKit did inject the placeholder for this build, so the earlier worry
+that it never would did not hold here; another Flutter version or a hosted app
+may differ. No cargo test drives this page, because it needs the Flutter SDK; the
+check is a manual probe. The same page showed that `browser_type` by index
+silently drops text: [issue](../issues/2026-10-15-flutter-index-typing-drops-text.md).
 
 [Plan](../plans/2026-09-21-dom-click-offscreen.md) · [Changelog index](README.md)
