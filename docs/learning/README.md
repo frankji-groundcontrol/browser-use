@@ -1,5 +1,8 @@
 # Learning records
 
+- [2026-10-15 — A matching HEAD hides a dirty tree on another host](2026-10-15-matching-head-hides-a-dirty-tree.md)
+  — check `git status` on the remote before calling a sync a no-op; move
+  uncommitted work with `git diff --binary` plus a tar, proven by per-file hashes.
 - [2026-09-16 — Hardening lessons from the whole-repository review](2026-09-16-hardening-review-findings.md)
   — parsed URL boundaries, keep-alive event-bus rebind, blocking HTTP fixtures, and non-interactive cargo PATH.
 - [2026-09-16 — Lessons from the whole-repository review](2026-09-16-whole-repo-review.md)

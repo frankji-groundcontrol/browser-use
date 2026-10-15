@@ -42,6 +42,18 @@ proof, DevTools error redaction, and existing-tab attach. Pushed `e35b0a882`
 and installed on local, MBP2, and franky-frank; trees are at `7763dece4`. The
 MCP fixture uses the explicit `BROWSER_USE_LLM_*` environment surface.
 
+Recent slice (2026-10-15): MBP-local is a **fourth host** outside the three above.
+It held 15 files of uncommitted, unpushed work (DOM-click offscreen, Flutter
+coordinate typing, live form state). It was pulled here byte-identically (per-file
+sha256) and committed locally as `3c6a553e7`; **not pushed**, and MBP-local's own
+tree is still dirty with an installed binary that predates the work. Gates on this
+host: fmt and clippy `-D warnings` (default and `live-chrome`) clean, 174 tests
+pass; live H5 verification of DOM-click is still open. A pre-commit review found
+**one blocker (autocomplete redaction bypass) and 12 should-fix items**, recorded
+in [the review findings](issues/2026-10-15-mbp-local-wip-review-findings.md). Do not
+push or deploy before the blocker is fixed. Tool count is now 21; the probe in
+[deploy-browser-use-rs.md](practices/deploy-browser-use-rs.md) still says 19.
+
 **The LLM environment surface changed on 2026-08-27 and is a breaking change.**
 Configure the model with `BROWSER_USE_LLM_BASE_URL`, `_API_KEY`, `_API`
 (`openai-responses` | `openai-chat` | `anthropic-messages` | `bedrock`), and
