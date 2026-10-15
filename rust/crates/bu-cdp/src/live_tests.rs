@@ -509,3 +509,123 @@ onclick='document.title=\"svg-clicked\"'><rect width='1' height='1'/></svg>",
     assert_eq!(page.state().await?.title, "svg-clicked");
     Ok(())
 }
+
+/// Polling `state()` while a script-triggered navigation commits. chromiumoxide's
+/// `evaluate` pins the execution context id it cached from the previous document;
+/// its event loop lags Chrome (more so under CPU load), so the pinned id can
+/// already be destroyed and Chrome answers "Cannot find context with specified
+/// id". The busy threads widen that window.
+#[tokio::test]
+async fn state_survives_script_navigation_under_cpu_load() -> anyhow::Result<()> {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let hogs: Vec<_> = (0..std::thread::available_parallelism()?.get() * 2)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    std::hint::spin_loop();
+                }
+            })
+        })
+        .collect();
+
+    let result = async {
+        // Chrome refuses script-initiated top-level navigation to data: URLs, so
+        // serve the pages over loopback; the title echoes the request path.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let origin = format!("http://{}", listener.local_addr()?);
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for mut socket in listener.incoming().flatten() {
+                let mut request = [0; 2048];
+                let n = socket.read(&mut request).unwrap_or(0);
+                let path = String::from_utf8_lossy(&request[..n])
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("/")
+                    .to_string();
+                let body = format!("<title>{}</title>", path.trim_start_matches('/'));
+                let _ = write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let session = BrowserSession::launch_headless().await?;
+        let page = session.new_page().await?;
+        page.navigate(&format!("{origin}/start")).await?;
+        for round in 0..10 {
+            let target = format!("{origin}/round-{round}");
+            page.evaluate_json(&format!(
+                "setTimeout(() => location.href = {}, 0); true",
+                serde_json::to_string(&target)?
+            ))
+            .await?;
+            tokio::time::timeout(std::time::Duration::from_secs(20), async {
+                while page.state().await?.url != target {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                anyhow::Ok(())
+            })
+            .await??;
+            assert_eq!(page.state().await?.title, format!("round-{round}"));
+        }
+        anyhow::Ok(())
+    }
+    .await;
+
+    stop.store(true, Ordering::Relaxed);
+    for hog in hogs {
+        let _ = hog.join();
+    }
+    result
+}
+
+#[tokio::test]
+async fn a_password_field_stays_redacted_after_a_reveal_toggle_flips_its_type() -> anyhow::Result<()>
+{
+    // The field has no password-like name, id, label or autocomplete, so once the
+    // toggle sets type=text nothing in a snapshot marks it. Only the earlier
+    // snapshot, where it was type=password, can.
+    let session = BrowserSession::launch_headless().await?;
+    let page = session.new_page().await?;
+    page.navigate(
+        "data:text/html,<title>Reveal</title>\
+<input id='pw' type='password' placeholder='Secret entry'>\
+<input id='plain' placeholder='Plain entry'>",
+    )
+    .await?;
+    page.selector_map().await?;
+
+    page.evaluate_json(
+        "document.getElementById('pw').value = 'hunter2'; \
+         document.getElementById('plain').value = 'visible'; \
+         document.getElementById('pw').type = 'text'; true",
+    )
+    .await?;
+
+    let elements = page.selector_map().await?;
+    let value_of = |label: &str| {
+        elements
+            .iter()
+            .find(|element| element.text.contains(label))
+            .unwrap_or_else(|| panic!("{label} must be in the selector map: {elements:?}"))
+            .value
+            .clone()
+    };
+    assert_eq!(value_of("Secret entry"), None, "a revealed password leaked");
+    assert_eq!(value_of("Plain entry").as_deref(), Some("visible"));
+
+    // The memory belongs to a document: a new one starts with none, so ids that
+    // another renderer reuses cannot hide an unrelated field.
+    let target = page.target_id();
+    assert!(!page.sensitive_nodes_guard()[&target].is_empty());
+    page.navigate("about:blank").await?;
+    assert!(page.sensitive_nodes_guard().get(&target).is_none());
+    Ok(())
+}

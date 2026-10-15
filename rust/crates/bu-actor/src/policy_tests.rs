@@ -2,8 +2,19 @@ use super::*;
 use bu_cdp::BrowserLaunchOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+// A stall here once sat silent for 10 minutes; a wall-clock bound turns it into a
+// failure that names the test (the cause was never reproduced as a true hang).
 #[tokio::test]
 async fn forbidden_first_page_and_mutations_fail_closed() -> Result<()> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        forbidden_first_page_and_mutations(),
+    )
+    .await
+    .context("forbidden_first_page_and_mutations stalled for 120s")?
+}
+
+async fn forbidden_first_page_and_mutations() -> Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}/", listener.local_addr()?);
     let server = tokio::spawn(async move {

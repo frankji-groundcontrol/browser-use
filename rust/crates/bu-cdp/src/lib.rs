@@ -28,7 +28,7 @@ use chromiumoxide::{
         },
         page::{BringToFrontParams, CaptureScreenshotFormat, StopLoadingParams},
     },
-    cdp::js_protocol::runtime::{CallFunctionOnParams, ReleaseObjectParams},
+    cdp::js_protocol::runtime::{CallFunctionOnParams, EvaluateParams, ReleaseObjectParams},
     handler::Handler,
     page::Page,
     page::ScreenshotParams,
@@ -183,7 +183,10 @@ pub struct SelectorMapElement {
     /// Live text a form field currently holds, which the `value` attribute misses
     /// once JavaScript, autofill, or a framework has filled it. `None` for
     /// non-text controls, and always `None` for password, file, hidden, payment,
-    /// and one-time-code fields, whose values are never captured.
+    /// and one-time-code fields, whose values are never captured. That includes a
+    /// field whose `name`, `id`, `placeholder` or `aria-label` reads like a
+    /// password, and one that looked sensitive earlier on the same page, such as
+    /// a password input a reveal toggle has since turned into `type="text"`.
     pub value: Option<String>,
     /// Live checked state of a checkbox or radio. `None` for everything else.
     pub checked: Option<bool>,
@@ -229,7 +232,14 @@ pub struct BrowserSession {
     /// True when attached to a browser someone else launched: it is not ours to
     /// close, and killing it would take their windows down with it.
     attached: bool,
+    /// Backend node ids that have looked sensitive in an earlier snapshot, per
+    /// target; see [`dom::merge_snapshot`].
+    sensitive_nodes: SensitiveNodes,
 }
+
+/// Shared by a session and every page handle it hands out, so the memory
+/// survives a tab switch that builds a fresh handle.
+type SensitiveNodes = Arc<std::sync::Mutex<HashMap<String, HashSet<i64>>>>;
 
 impl BrowserSession {
     /// Launches Chromium with default headless options.
@@ -332,6 +342,14 @@ impl BrowserSession {
             healthy,
             scratch_user_data_dir,
             attached,
+            sensitive_nodes: SensitiveNodes::default(),
+        }
+    }
+
+    fn wrap(&self, page: Page) -> BrowserPage {
+        BrowserPage {
+            page,
+            sensitive_nodes: self.sensitive_nodes.clone(),
         }
     }
 
@@ -376,7 +394,7 @@ impl BrowserSession {
             .await
             .context("failed to create Chromium page")?;
 
-        Ok(BrowserPage { page })
+        Ok(self.wrap(page))
     }
 
     /// Returns metadata for all open pages.
@@ -391,7 +409,7 @@ impl BrowserSession {
             .await
             .context("failed to list Chromium pages")?;
         pages.sort_by_key(|page| page.target_id().inner().clone());
-        Ok(pages.into_iter().next().map(|page| BrowserPage { page }))
+        Ok(pages.into_iter().next().map(|page| self.wrap(page)))
     }
 
     /// Returns the browser's primary page, waiting briefly for Chromium's initial
@@ -420,7 +438,7 @@ impl BrowserSession {
 
         let mut tabs = Vec::with_capacity(pages.len());
         for page in pages {
-            let browser_page = BrowserPage { page };
+            let browser_page = self.wrap(page);
             // A page that is mid-close/detached (or chrome:// mid-nav) can fail its
             // state read with "receiver is gone"; skip it rather than failing the
             // whole listing. (Review item 2.5 — brittle tab listing.)
@@ -502,7 +520,7 @@ impl BrowserSession {
         let page =
             page_by_ref(pages, tab_ref).with_context(|| format!("tab {tab_ref} not found"))?;
 
-        Ok(BrowserPage { page })
+        Ok(self.wrap(page))
     }
 }
 
@@ -524,6 +542,7 @@ impl Drop for BrowserSession {
 #[derive(Debug, Clone)]
 pub struct BrowserPage {
     page: Page,
+    sensitive_nodes: SensitiveNodes,
 }
 
 impl BrowserPage {
@@ -541,6 +560,10 @@ impl BrowserPage {
     pub async fn navigate(&self, url: &str) -> Result<Option<String>> {
         // Upstream waits 3s same-domain / 8s cross-domain; one flat budget is enough.
         const READINESS_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+
+        // A new document has new nodes; ids from another renderer can collide.
+        self.sensitive_nodes_guard()
+            .remove(self.page.target_id().inner());
 
         match tokio::time::timeout(READINESS_BUDGET, self.page.goto(url)).await {
             Ok(result) => {
@@ -562,6 +585,13 @@ impl BrowserPage {
         }
     }
 
+    fn sensitive_nodes_guard(&self) -> std::sync::MutexGuard<'_, HashMap<String, HashSet<i64>>> {
+        // A poisoned set is still a valid set; never skip redaction over it.
+        self.sensitive_nodes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Returns current URL and title.
     pub async fn state(&self) -> Result<PageState> {
         let url = self
@@ -570,12 +600,25 @@ impl BrowserPage {
             .await
             .context("failed to read page URL")?
             .unwrap_or_default();
+        // Raw Runtime.evaluate with no contextId: `Page::evaluate` pins the context
+        // id chromiumoxide cached, which is already destroyed while a navigation
+        // commits ("Cannot find context with specified id"). Without it Chrome
+        // uses the main frame's current context.
         let title = self
             .page
-            .evaluate("document.title")
+            .execute(
+                EvaluateParams::builder()
+                    .expression("document.title")
+                    .return_by_value(true)
+                    .build()
+                    .map_err(|e| anyhow!("invalid title probe: {e}"))?,
+            )
             .await
             .context("failed to read page title")?
-            .into_value()
+            .result
+            .result
+            .value
+            .and_then(|v| v.as_str().map(str::to_owned))
             .context("failed to decode page title")?;
 
         Ok(PageState { url, title })
@@ -837,7 +880,15 @@ impl BrowserPage {
         let scroll_y = self.scroll_y().await.unwrap_or(0.0);
         let mut enhanced_nodes = HashMap::new();
         collect_enhanced_dom_nodes(&dom_tree, &mut enhanced_nodes);
-        merge_snapshot(&snapshot, scroll_x, scroll_y, &mut enhanced_nodes);
+        merge_snapshot(
+            &snapshot,
+            scroll_x,
+            scroll_y,
+            &mut enhanced_nodes,
+            self.sensitive_nodes_guard()
+                .entry(self.page.target_id().inner().clone())
+                .or_default(),
+        );
         merge_ax_tree(&ax_nodes, &mut enhanced_nodes);
         // The JS click-listener probe does per-node CDP round-trips, so on very
         // large pages it would stall get_state for tens of seconds. Skip it past

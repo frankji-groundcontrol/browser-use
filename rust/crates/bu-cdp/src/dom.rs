@@ -56,11 +56,12 @@ const SENSITIVE_INPUT_TYPES: &[&str] = &["password", "file", "hidden"];
 const SENSITIVE_AUTOCOMPLETE_PREFIXES: &[&str] =
     &["cc-", "one-time-code", "current-password", "new-password"];
 
-/// Substrings of an element's `name`/`id` that mark a password field. This is the
-/// only signal left once a "show password" toggle has flipped `type` to `text`.
+/// Substrings of an element's `name`/`id`/`placeholder`/`aria-label` that mark a
+/// password or card-security field. This is what is left once a "show password"
+/// toggle has flipped `type` to `text` and nothing earlier recorded the field.
 /// It deliberately over-matches: hiding a harmless value costs a re-read, leaking
 /// a credential does not have an undo.
-const SENSITIVE_NAME_MARKERS: &[&str] = &["password", "passwd", "pwd"];
+const SENSITIVE_NAME_MARKERS: &[&str] = &["password", "passwd", "pwd", "passcode", "cvv", "cvc"];
 
 /// Longest live `value` kept, in characters. A pasted document in a textarea
 /// should not be able to flood `browser_get_state`.
@@ -145,11 +146,16 @@ pub(crate) fn collect_enhanced_dom_nodes(node: &Node, nodes: &mut HashMap<i64, E
     }
 }
 
+/// `sensitive_seen` is the backend node ids of this target that looked sensitive
+/// in any earlier snapshot. A reveal toggle can later flip a password field to
+/// `type=text`, leaving nothing in the attributes to recognise it by, so a node
+/// stays redacted once seen. A stale id only ever hides a value, never shows one.
 pub(crate) fn merge_snapshot(
     snapshot: &CaptureSnapshotReturns,
     fallback_scroll_x: f64,
     fallback_scroll_y: f64,
     nodes: &mut HashMap<i64, EnhancedNode>,
+    sensitive_seen: &mut HashSet<i64>,
 ) {
     for document in &snapshot.documents {
         // DOMSnapshot often omits (or zeroes) the per-document scroll offset; fall
@@ -168,7 +174,7 @@ pub(crate) fn merge_snapshot(
             continue;
         };
         let document_frame_id = snapshot_string(snapshot, document.frame_id).map(str::to_owned);
-        let live_values = live_input_values(snapshot, &document.nodes);
+        let live_values = live_input_values(snapshot, &document.nodes, sensitive_seen);
         let live_checked = live_checked_indices(&document.nodes);
 
         for (node_index, backend_node_id) in backend_node_ids.iter().enumerate() {
@@ -296,7 +302,19 @@ pub(crate) fn merge_snapshot(
 fn live_input_values(
     snapshot: &CaptureSnapshotReturns,
     nodes: &NodeTreeSnapshot,
+    sensitive_seen: &mut HashSet<i64>,
 ) -> HashMap<usize, String> {
+    let backend_ids = nodes.backend_node_id.as_deref().unwrap_or_default();
+    // Record every sensitive-looking node, empty ones included: the value is
+    // typed after this snapshot, and the type may flip after that.
+    for (node_index, attributes) in nodes.attributes.iter().flatten().enumerate() {
+        if attributes_are_sensitive(snapshot, attributes) {
+            if let Some(id) = backend_ids.get(node_index) {
+                sensitive_seen.insert(*id.inner());
+            }
+        }
+    }
+
     let mut values = HashMap::new();
     for rare in [nodes.input_value.as_ref(), nodes.text_value.as_ref()]
         .into_iter()
@@ -306,7 +324,10 @@ fn live_input_values(
             let Ok(node_index) = usize::try_from(*node_index) else {
                 continue;
             };
-            if is_sensitive_input(snapshot, nodes, node_index) {
+            let seen_sensitive = backend_ids
+                .get(node_index)
+                .is_some_and(|id| sensitive_seen.contains(id.inner()));
+            if seen_sensitive || is_sensitive_input(snapshot, nodes, node_index) {
                 continue;
             }
             if let Some(value) = snapshot_string(snapshot, *string_index) {
@@ -350,6 +371,14 @@ fn is_sensitive_input(
         return true;
     };
 
+    attributes_are_sensitive(snapshot, attributes)
+}
+
+/// [`attribute_is_sensitive`] over one node's flat name/value string indices.
+fn attributes_are_sensitive(
+    snapshot: &CaptureSnapshotReturns,
+    attributes: &ArrayOfStrings,
+) -> bool {
     attributes
         .inner()
         .chunks_exact(2)
@@ -379,7 +408,7 @@ fn attribute_is_sensitive(name: &str, value: &str) -> bool {
                 .iter()
                 .any(|prefix| token.starts_with(prefix))
         }),
-        "name" | "id" => {
+        "name" | "id" | "placeholder" | "aria-label" => {
             let value = value.to_ascii_lowercase();
             SENSITIVE_NAME_MARKERS
                 .iter()
@@ -976,6 +1005,8 @@ mod tests {
             ("type", "email"),
             ("name", "username"),
             ("class", "password-strength"),
+            ("placeholder", "Search"),
+            ("aria-label", "Passenger name"),
         ] {
             assert!(
                 !attribute_is_sensitive(name, value),
@@ -995,6 +1026,11 @@ mod tests {
             ("name", "user_password"),
             ("id", "LoginPwd"),
             ("name", "passwd"),
+            // The visible label is the next-best tell after the name and id.
+            ("placeholder", "Password"),
+            ("aria-label", "Confirm your passcode"),
+            ("name", "card_cvv"),
+            ("id", "cvc"),
         ] {
             assert!(
                 attribute_is_sensitive(name, value),
