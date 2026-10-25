@@ -1340,6 +1340,27 @@ async fn typing_empty_text_at_coordinates_clears_prefilled_input() -> anyhow::Re
 
 #[tokio::test]
 #[cfg(feature = "live-chrome")]
+async fn typing_at_coordinates_masks_an_email_in_the_result() -> anyhow::Result<()> {
+    let server = BrowserUseMcpServer::new();
+    open_coordinate_input_page(&server).await?;
+
+    let result = server
+        .call_browser_tool(call(
+            "browser_type",
+            json!({"coordinate_x": 150, "coordinate_y": 30, "text": "person@example.com"}),
+        ))
+        .await?;
+    assert_eq!(
+        text_content(&result),
+        "Typed <email> at coordinates (150, 30)"
+    );
+    assert_eq!(input_value(&server).await?, json!("person@example.com"));
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
 async fn pasting_at_coordinates_replaces_prefilled_value() -> anyhow::Result<()> {
     // Pasting into an already-filled field must not concatenate: a doubled value
     // reads like an application bug but is entirely self-inflicted.
@@ -1896,8 +1917,11 @@ async fn get_state_labels_an_icon_only_control_from_its_child_image() -> anyhow:
         .expect("elements should be an array");
 
     assert!(
-        has_element(elements, "button", "Delete item"),
-        "a button wrapping <img alt> must be labelled from that alt text: {elements:?}"
+        elements.iter().any(|element| element["tag"] == "button"
+            && element["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Delete item") && text.contains("trash.png"))),
+        "a button wrapping <img alt> must keep both the alt label and image context: {elements:?}"
     );
 
     // With no alt to borrow, the image's file name is still better than nothing.
@@ -1967,6 +1991,112 @@ async fn press_key_treats_a_lone_plus_as_a_key_not_a_combo() -> anyhow::Result<(
     let seen = server.actor().evaluate("window.seen.join(',')").await?;
     assert_eq!(seen, json!("+,Shift/shift,+/shift"));
 
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn typing_fills_native_date_and_time_inputs() -> anyhow::Result<()> {
+    let server = BrowserUseMcpServer::new();
+    server
+        .call_browser_tool(call(
+            "browser_navigate",
+            json!({"url": data_url(
+                "<title>Native values</title>\
+                 <input id=date type=date aria-label=date>\
+                 <input id=time type=time aria-label=time>\
+                 <input id=datetime type=datetime-local aria-label=datetime>\
+                 <input id=month type=month aria-label=month>\
+                 <input id=week type=week aria-label=week>"
+            )}),
+        ))
+        .await?;
+    for (label, expected) in [
+        ("date", "2026-10-25"),
+        ("time", "14:35"),
+        ("datetime", "2026-10-25T14:35"),
+        ("month", "2026-10"),
+        ("week", "2026-W43"),
+    ] {
+        let state = server
+            .call_browser_tool(call("browser_get_state", json!({})))
+            .await?
+            .structured_content
+            .expect("state");
+        let element = state["interactive_elements"]
+            .as_array()
+            .expect("elements")
+            .iter()
+            .find(|element| element["text"] == label)
+            .unwrap_or_else(|| panic!("missing {label}: {state}"));
+        let result = server
+            .call_browser_tool(call(
+                "browser_type",
+                json!({"index": element["index"], "text": expected}),
+            ))
+            .await?;
+        assert!(
+            !result.is_error.unwrap_or(false),
+            "{label}: {}",
+            text_content(&result)
+        );
+        assert_eq!(
+            server
+                .actor()
+                .evaluate(&format!("document.getElementById('{label}').value"))
+                .await?,
+            json!(expected),
+            "{label}"
+        );
+    }
+    server
+        .call_browser_tool(call("browser_close_all", json!({})))
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "live-chrome")]
+async fn selecting_a_disabled_option_keeps_the_existing_value() -> anyhow::Result<()> {
+    let server = BrowserUseMcpServer::new();
+    server.call_browser_tool(call("browser_navigate", json!({"url": data_url(
+        "<title>Disabled options</title><select id=choice aria-label=Choice>\
+         <option value=a>A</option><optgroup label=Blocked disabled><option value=b>B</option></optgroup>\
+         <option value=c disabled>C</option></select>"
+    )}))).await?;
+    for value in ["b", "c"] {
+        let state = server
+            .call_browser_tool(call("browser_get_state", json!({})))
+            .await?
+            .structured_content
+            .expect("state");
+        let element = state["interactive_elements"]
+            .as_array()
+            .expect("elements")
+            .iter()
+            .find(|element| element["tag"] == "select")
+            .expect("select");
+        let result = server
+            .call_browser_tool(call(
+                "browser_select_option",
+                json!({"index": element["index"], "value": value}),
+            ))
+            .await?;
+        assert!(
+            result.is_error.unwrap_or(false),
+            "a disabled option must fail before changing the form"
+        );
+        assert_eq!(
+            server
+                .actor()
+                .evaluate("document.getElementById('choice').value")
+                .await?,
+            json!("a")
+        );
+    }
+    server
+        .call_browser_tool(call("browser_close_all", json!({})))
+        .await?;
     Ok(())
 }
 
@@ -2913,4 +3043,51 @@ async fn delayed_coordinate_copy_is_visible_to_clipboard_reader() -> anyhow::Res
     );
 
     Ok(())
+}
+
+/// Runs without the `live-chrome` feature: these paths reject or format before the
+/// actor is touched, so no browser is launched.
+mod without_chrome {
+    use super::super::{masked_typed_text, BrowserUseMcpServer};
+    use rmcp::model::{CallToolRequestParams, ErrorCode};
+    use serde_json::{json, Map, Value};
+
+    // A stray single coordinate used to fall through to "requires an index".
+    #[tokio::test]
+    async fn typing_rejects_a_single_coordinate_and_names_the_pair() {
+        let server = BrowserUseMcpServer::new();
+        for stray in [json!({"coordinate_x": 150}), json!({"coordinate_y": 30})] {
+            let Value::Object(mut arguments) = stray else {
+                unreachable!("object literal")
+            };
+            arguments.insert("text".into(), json!("x"));
+            let error = server
+                .call_browser_tool(
+                    CallToolRequestParams::new("browser_type")
+                        .with_arguments(Map::from_iter(arguments)),
+                )
+                .await
+                .expect_err("one coordinate alone is not a target");
+            assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+            assert!(
+                error.message.contains("both coordinate_x and coordinate_y"),
+                "the error must name the missing half: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn typed_text_is_masked_in_the_tool_echo_by_shape() {
+        for (text, want) in [
+            ("person@example.com", "<email>"),
+            ("a1b2c3d4e5f6-g7h8", "<credential>"),
+            ("Alex", "'Alex'"),
+            ("a@b", "'a@b'"),
+            ("hello world, 2026!", "'hello world, 2026!'"),
+            ("", "''"),
+        ] {
+            assert_eq!(masked_typed_text(text), want, "text {text:?}");
+        }
+    }
 }

@@ -13,7 +13,7 @@ pub(crate) fn headless_from_env() -> bool {
     match env::var("BROWSER_USE_HEADLESS") {
         Ok(value) => !matches!(
             value.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
+            "" | "0" | "false" | "no" | "off"
         ),
         Err(_) => true,
     }
@@ -279,6 +279,25 @@ fn kill_orphaned_chromium_for_profile(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_options_honor_empty_and_false_headless_values() {
+        let original = env::var_os("BROWSER_USE_HEADLESS");
+        for (value, expected) in [
+            ("", false),
+            ("false", false),
+            ("off", false),
+            ("true", true),
+        ] {
+            env::set_var("BROWSER_USE_HEADLESS", value);
+            let actual = crate::BrowserLaunchOptions::from_env().headless;
+            match &original {
+                Some(value) => env::set_var("BROWSER_USE_HEADLESS", value),
+                None => env::remove_var("BROWSER_USE_HEADLESS"),
+            }
+            assert_eq!(actual, expected, "BROWSER_USE_HEADLESS={value:?}");
+        }
+    }
 
     #[test]
     fn blank_and_unset_env_values_mean_no_override() {

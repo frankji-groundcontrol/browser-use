@@ -271,7 +271,10 @@ fn handle_tag(
         return;
     }
 
-    if matches!(name.as_str(), "script" | "style" | "nav") {
+    let hidden_code = name == "code"
+        && attribute_value(tag_body, "style")
+            .is_some_and(|style| style_hides_code(&decode_html_entities(&style)));
+    if matches!(name.as_str(), "script" | "style" | "nav") || hidden_code {
         skip_stack.push(name);
         return;
     }
@@ -303,6 +306,63 @@ fn handle_tag(
         }
         _ => {}
     }
+}
+
+fn style_hides_code(style: &str) -> bool {
+    let hides = |declaration: &str| {
+        let Some((property, value)) = declaration.split_once(':') else {
+            return false;
+        };
+        if !property.trim().eq_ignore_ascii_case("display") {
+            return false;
+        }
+        if let Some((value, priority)) = value.split_once('!') {
+            value.trim().eq_ignore_ascii_case("none")
+                && priority.trim().eq_ignore_ascii_case("important")
+        } else {
+            value.trim().eq_ignore_ascii_case("none")
+        }
+    };
+    let mut declaration = String::new();
+    let mut characters = style.chars().peekable();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    while let Some(ch) = characters.next() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == delimiter {
+                quote = None;
+            }
+        } else if ch == '/' && characters.next_if_eq(&'*').is_some() {
+            while let Some(comment) = characters.next() {
+                if comment == '*' && characters.next_if_eq(&'/').is_some() {
+                    break;
+                }
+            }
+            declaration.push(' ');
+            continue;
+        } else {
+            match ch {
+                '\'' | '"' => quote = Some(ch),
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth = depth.saturating_sub(1),
+                ';' if depth == 0 => {
+                    if hides(&declaration) {
+                        return true;
+                    }
+                    declaration.clear();
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        declaration.push(ch);
+    }
+    hides(&declaration)
 }
 
 fn start_heading(markdown: &mut String, level: usize) {
@@ -367,23 +427,35 @@ fn decode_html_entities(text: &str) -> String {
 }
 
 fn attribute_value(tag_body: &str, attribute: &str) -> Option<String> {
-    let lower = tag_body.to_ascii_lowercase();
-    let attribute = attribute.to_ascii_lowercase();
-    let start = lower.find(&attribute)?;
-    let after_name = &tag_body[start + attribute.len()..];
-    let after_equals = after_name.trim_start().strip_prefix('=')?.trim_start();
-    let quote = after_equals.chars().next()?;
-    if quote == '"' || quote == '\'' {
-        let value = &after_equals[quote.len_utf8()..];
-        return value.find(quote).map(|end| value[..end].to_owned());
+    let (_, mut attributes) = tag_body.split_once(char::is_whitespace)?;
+    while !attributes.trim_start().is_empty() {
+        attributes = attributes.trim_start();
+        let name_end = attributes
+            .find(|ch: char| ch.is_whitespace() || ch == '=')
+            .unwrap_or(attributes.len());
+        let name = &attributes[..name_end];
+        attributes = attributes[name_end..].trim_start();
+        let Some(after_equals) = attributes.strip_prefix('=') else {
+            continue;
+        };
+        attributes = after_equals.trim_start();
+        let quote = attributes.chars().next()?;
+        let (value, rest) = if quote == '"' || quote == '\'' {
+            let quoted = &attributes[1..];
+            let end = quoted.find(quote)?;
+            (&quoted[..end], &quoted[end + 1..])
+        } else {
+            let end = attributes
+                .find(char::is_whitespace)
+                .unwrap_or(attributes.len());
+            (&attributes[..end], &attributes[end..])
+        };
+        if name.eq_ignore_ascii_case(attribute) {
+            return Some(value.to_owned());
+        }
+        attributes = rest;
     }
-    Some(
-        after_equals
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_owned(),
-    )
+    None
 }
 
 #[cfg(test)]
@@ -433,6 +505,65 @@ mod tests {
         assert!(!markdown.contains("bad()"));
         assert!(stats.original_html_chars > stats.final_filtered_chars);
         assert!(stats.filtered_chars_removed > 0);
+    }
+
+    #[test]
+    fn clean_markdown_omits_hidden_code_for_case_and_whitespace_variants() {
+        for style in [
+            "display: none",
+            "Display: None",
+            "DISPLAY:\tNONE",
+            "color: red; display : none !important",
+            r#"content:"prefix;display:block"; Display : NONE ! IMPORTANT"#,
+            "/* display:block; */ display/**/: none /* comment */ !important",
+        ] {
+            let html = format!(
+                "<main>visible control</main><code style=\"{}\">hidden state payload</code><code>visible code</code>",
+                style.replace('"', "&quot;")
+            );
+            let (markdown, _) = extract_clean_markdown(&html, false);
+            assert!(markdown.contains("visible control"));
+            assert!(markdown.contains("visible code"));
+            assert!(
+                !markdown.contains("hidden state payload"),
+                "{style:?}: {markdown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn clean_markdown_keeps_code_when_style_text_is_in_other_attributes() {
+        for attributes in [
+            r#"data-style="display:none""#,
+            r#"title='style="display:none"'"#,
+            r#"data-style="display:none" style="display:block""#,
+        ] {
+            let html = format!("<code {attributes}>visible code</code>");
+            let (markdown, _) = extract_clean_markdown(&html, false);
+            assert_eq!(markdown, "visible code", "{attributes}");
+        }
+    }
+
+    #[test]
+    fn clean_markdown_keeps_code_without_a_display_none_declaration() {
+        for style in [
+            "--display:none",
+            "other-display:none",
+            r#"content:"display:none""#,
+            r#"content:"prefix;display:none; suffix";color:red"#,
+            r#"content:"escaped\";display:none; suffix";color:red"#,
+            "background-image:url(icon;display:none;image.png);color:red",
+            "--example:{x;display:none;};color:red",
+            "/* note;display:none; */ color:red",
+            "display:none-block",
+        ] {
+            let html = format!(
+                "<code style=\"{}\">visible example</code>",
+                style.replace('"', "&quot;")
+            );
+            let (markdown, _) = extract_clean_markdown(&html, false);
+            assert_eq!(markdown, "visible example", "{style:?}");
+        }
     }
 
     #[test]

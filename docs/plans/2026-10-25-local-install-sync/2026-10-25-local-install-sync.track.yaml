@@ -1,0 +1,38 @@
+version: 2
+task: Synchronize and install the local browser-use checkout
+coordinator: Codex
+history_file: 2026-10-25-local-install-sync.track.history.jsonl
+main:
+  outcome: Applicable upstream features ported into Rust, fork published, local MCP
+    installed, original edits preserved
+  owner: Codex
+  status: active
+  next_evidence: Commit and publish the verified merge, install a fresh signed binary,
+    assert 21-tool MCP and native form behavior
+side_tracks: []
+updated_at: '2026-10-25T10:21:35Z'
+plan:
+- step: Map upstream changes and review confirmed Rust gaps
+  owner: Codex
+  status: completed
+- step: Port shared Anthropic image serialization and agent observations
+  owner: Codex
+  status: completed
+- step: Resolve upstream conflicts
+  owner: Codex
+  status: completed
+- step: Review the combined diff once
+  owner: llm_map
+  status: completed
+- step: Repair image URL privacy and inline display declaration matching
+  owner: dom_map
+  status: completed
+- step: Preserve validated page identity across recovery
+  owner: lifecycle_map
+  status: completed
+- step: Run fresh release gates, publish fork, install Rust MCP
+  owner: Codex
+  status: in_progress
+- step: Verify preservation and close durable task records
+  owner: Codex
+  status: pending

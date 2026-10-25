@@ -76,6 +76,13 @@ Takes precedence over `BROWSER_USE_USER_DATA_DIR`. The browser is not the
 server's: it is never closed and its profile is never deleted, so
 `browser_close_session` / `browser_close_all` become no-ops for it.
 
+The server also leaves your tabs' focus state alone. In a browser it launched, or
+a headless one it attached to, it makes the tabs it drives report page focus (a
+fresh headless tab otherwise does not, and Flutter Web drops the first text typed
+into it). For your own headed Chrome it does not, since the state would outlive
+the agent's visit. If a Flutter field drops text there, bring that tab to the
+front with `browser_switch_tab`.
+
 > **Weigh this one.** The agent gets your real cookies and can act as you on
 > every site you are signed into. Prefer a dedicated persistent profile unless
 > you specifically need existing logins.
@@ -188,3 +195,22 @@ expose the OpenAI routes at the root (`/responses`) and others under `/v1`.
 | `BROWSER_USE_OPENAI_API` | `responses` (default) or `chat_completions`. |
 | `BROWSER_USE_ALLOWED_DOMAINS` | Restrict navigation. |
 | `BROWSER_USE_COMMAND_TIMEOUT_MS` | Per-command backstop (default 90s). |
+
+## Connection recovery and launch settings (2026-10-25)
+
+The Rust actor checks a cached session with a bounded browser-level CDP probe
+before reusing its page. Abrupt transport errors mark cached health unhealthy;
+a clean close is detected by the next command. Recovery discards stale page and
+selector state. It does not replay a potentially completed click or typing call,
+and it preserves the distinction between owned and attached browsers. An idle
+server sends no background heartbeat. Reusing a session adds a CDP round trip.
+
+`BROWSER_USE_DISABLE_SECURITY=true` is an explicit local-launch opt-in for the
+Chromium CORS/site-isolation settings as well as the existing Rust URL-policy
+behavior. It does not mutate the launch flags of an attached browser. The
+normal default keeps Chromium security enabled. An explicit empty
+`BROWSER_USE_HEADLESS` value means false; an unset value keeps Rust's normal
+headless default.
+
+See the [change record](../../changelogs/2026-10-25-upstream-rust-sync/index.md)
+and [sync matrix](../../plans/2026-10-25-local-install-sync/2026-10-25-local-install-sync.upstream-matrix.md).

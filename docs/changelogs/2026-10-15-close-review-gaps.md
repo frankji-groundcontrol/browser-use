@@ -56,14 +56,18 @@ Results are in the two changelogs linked above.
 ## Found on the way
 
 - `browser_type` by index into a Flutter field reported success and the app never
-  received the text; coordinates worked. Fixed in the next change:
-  [Flutter index typing](2026-10-15-flutter-index-typing.md).
+  received the text; coordinates worked. Fixed in the next change
+  ([Flutter index typing](2026-10-15-flutter-index-typing.md)) and that fix was
+  replaced on 2026-10-16 once the cause was measured
+  ([page focus](2026-10-16-page-focus-and-flutter-gaps.md)).
 - `masked_typed_text` masks by content shape (an email address), not by field
   type, so a password typed into a password field is echoed in the tool result.
   Unchanged; the agent already holds that string.
-- About fifteen other `page.evaluate` call sites in `bu-cdp` share the stale
-  execution-context race. Only `state()` is fixed;
-  [learning record](../learning/2026-10-15-pinned-execution-context-races-navigation.md).
+- About fifteen other `page.evaluate` call sites in `bu-cdp` shared the stale
+  execution-context race. Only `state()` was fixed here; the rest were moved to a
+  context-free helper on 2026-10-16
+  ([change](2026-10-16-page-focus-and-flutter-gaps.md),
+  [learning record](../learning/2026-10-15-pinned-execution-context-races-navigation.md)).
 - The MCP server flag is `--mcp`. A bare `mcp` is not rejected: the binary takes
   it as an agent task and runs the LLM-backed agent against the configured
   provider. Unchanged; worth knowing before scripting the binary.

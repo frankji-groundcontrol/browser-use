@@ -97,7 +97,9 @@ pub async fn run_task(
                             json!({
                                 "index": element.index,
                                 "tag": element.tag,
-                                "text": element.text
+                                "text": element.text,
+                                "value": element.value,
+                                "checked": element.checked
                             })
                         }).collect::<Vec<_>>()
                     }),
@@ -438,6 +440,71 @@ mod tests {
             "{requests:#?}"
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_task_observes_live_form_values_and_checked_state_without_secrets(
+    ) -> anyhow::Result<()> {
+        let llm_server = ScriptedLlmServer::spawn(vec![
+            json!({"action": "done", "success": true, "result": "read"}).to_string(),
+        ]);
+        let provider = LlmProvider::Http(LlmClient::new(LlmConfig {
+            api_key: "test-key".to_owned(),
+            base_url: llm_server.base_url(),
+            model: "mock-model".to_owned(),
+            temperature: None,
+            api: LlmApi::OpenAiResponses,
+            max_tokens: 4096,
+        })?);
+        let actor = ActorHandle::spawn();
+        actor.navigate(
+            "data:text/html,<title>Live form</title><input id=city aria-label=City value=stale>\
+             <textarea id=notes aria-label=Notes></textarea>\
+             <input id=ready type=checkbox aria-label=Ready>\
+             <input id=secret type=password aria-label=Secret>".to_owned(),
+            false,
+        ).await?;
+        actor
+            .evaluate(
+                "document.querySelector('#city').value='Shanghai'; \
+             document.querySelector('#notes').value='live notes'; \
+             document.querySelector('#ready').checked=true; \
+             document.querySelector('#secret').value='PRIVATE_FORM_VALUE'; true",
+            )
+            .await?;
+
+        let report =
+            crate::run_task("Read the current form", 1, actor.clone(), &provider, false).await;
+        actor.shutdown().await?;
+        assert!(report.success, "{:?}", report.errors);
+        let requests = llm_server.join();
+        let prompt = requests[0]["input"][1]["content"][0]["text"]
+            .as_str()
+            .expect("user prompt");
+        assert!(
+            !prompt.contains("PRIVATE_FORM_VALUE"),
+            "sensitive live values must stay out of the model request"
+        );
+        let state_text = prompt
+            .split_once("<current_state>\n")
+            .expect("state open")
+            .1
+            .split_once("\n</current_state>")
+            .expect("state close")
+            .0;
+        let state: Value = serde_json::from_str(state_text)?;
+        let elements = state["interactive_elements"].as_array().expect("elements");
+        let field = |label: &str| {
+            elements
+                .iter()
+                .find(|element| element["text"] == label)
+                .unwrap_or_else(|| panic!("missing {label}: {elements:?}"))
+        };
+        assert_eq!(field("City")["value"], "Shanghai");
+        assert_eq!(field("Notes")["value"], "live notes");
+        assert_eq!(field("Ready")["checked"], true);
+        assert!(field("Secret")["value"].is_null());
         Ok(())
     }
 

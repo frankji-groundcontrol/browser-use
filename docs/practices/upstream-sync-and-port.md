@@ -5,9 +5,11 @@ repeat this shape for future syncs.
 
 ## 1. Merge
 
-The fork's Python-tree footprint is deliberately tiny (`AGENTS.md`,
-`CLAUDE.md`, `contrib/mcp/mcp-launch.py`), so `git merge upstream/main` is
-routinely conflict-free. Verify with the
+Measure the current fork footprint before merging; it is no longer limited to
+routers and a launcher. The 2026-10-25 merge also touched committed Actor,
+session, release-workflow and test hardening, producing six content conflicts.
+Preserve dirty-file contents separately, compare incoming paths, and inspect
+both committed sides when conflicts occur. Verify with the
 [CI recipe](running-python-ci.md); one apparent failure was environmental
 (SOCKS proxy), so check env before blaming the merge.
 
@@ -46,3 +48,21 @@ Full Rust suite serial (`cargo test --features live-chrome -- --test-threads=1`)
 + `clippy -D warnings` on every feature set touched, update
 `plans/2026-07-05-rust-rewrite/progress.md`, then
 [deploy](deploy-browser-use-rs.md).
+
+## 5. Verify each consumer and configuration effect
+
+Use the [2026-10-25 lessons](../learning/2026-10-25-verify-rust-port-contracts.md)
+and [matrix](../plans/2026-10-25-local-install-sync/2026-10-25-local-install-sync.upstream-matrix.md):
+
+1. Follow captured data through MCP and autonomous agent projections separately.
+2. Apply one independent wire contract to simple, typed and streamed requests.
+3. Prove browser launch settings by their browser behavior, not an env-name grep.
+4. Keep SDK-only/absent subsystems explicit; preserve the Rust API's scope.
+5. Resolve inherited hardening semantically and run retained regressions.
+6. Install a fresh signed binary inode, probe it sequentially, then compare the
+   installed hash with its own build artifact. A Git update alone is not deploy.
+
+The review boundary also includes the resource returned by a check: use the
+validated page throughout an operation rather than looking it up again after a
+possible reconnect. For image metadata, extract a parsed URL path rather than
+its authority; for inline styles, match declarations rather than substrings.

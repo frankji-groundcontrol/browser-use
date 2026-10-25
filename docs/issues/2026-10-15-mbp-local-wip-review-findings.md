@@ -72,10 +72,10 @@ All 18 were triaged.
 | 6 | Toggle detection case-sensitive | **Fixed** via `is_toggle_type`. `type="CHECKBOX"` was read as a text input; a unit test and a live test fail with the case-sensitive version |
 | 7 | `value` echoes email/credential-like text that `masked_typed_text` masks | **Accepted.** The two are different surfaces: `masked_typed_text` masks what the agent typed in a tool echo, while `value` reports the page's own field content like `text` and `href`. Redaction is by field class (password, file, hidden, card, one-time code), not by content shape, so an email in a plain field is visible |
 | 8, 16 | Duplicated paragraph; zero-width space | Fixed |
-| 10 | Chrome-free tests gated behind `live-chrome` | **Deferred.** Structural; the pure logic added in this pass (`keys.rs`, `dom.rs`, `geometry.rs`) has Chrome-free unit tests |
-| 11 | Icon-label test partly passes before the diff | **Deferred.** The assertion that matters (the label fallback) is unchanged; tightening it needs a fixture redesign |
+| 10 | Chrome-free tests gated behind `live-chrome` | **Answered 2026-10-16.** Gating in `bu-mcp/src/tests.rs` is per item, not per module: the imports, the `call` helper and every browser-driving test carry `#[cfg(feature = "live-chrome")]` (two list-the-tools tests are ungated), so a Chrome-free test needs its own imports. The gating stays. Pure logic is unit-tested without Chrome (`keys.rs`, `dom.rs`, `geometry.rs`), and a nested `without_chrome` module in `bu-mcp/src/tests.rs` now holds tests for paths that reject or format before the actor is touched. Each fails under a targeted mutation |
+| 11 | Icon-label test partly passes before the diff | **Closed 2026-10-16.** The alt-text half passed before the diff because the accessible name already covers it; the file-name half is the one the diff added. A Chrome-free table test, `icon_file_names_come_from_the_url_path_only`, now pins that fallback (query and fragment stripped, each with its own row, trailing slash, `data:` skipped case-insensitively) and fails when any rule is mutated. The live test is unchanged |
 | 12 | Checked-state tests lacked an all-unchecked page and mixed-case type | **Fixed.** `selector_map_reports_checked_false_when_nothing_on_the_page_is_checked` passes, and fails against a case-sensitive toggle check. An all-unchecked page already reported `checked: false`, so the `None`-vs-empty distinction is not a gap |
-| 13 | Coordinate-mode error branches and echo masking untested | **Partly fixed.** XOR rejection is tested; the stray-single-coordinate branch and echo masking in coordinate mode are **deferred** |
+| 13 | Coordinate-mode error branches and echo masking untested | **Fixed 2026-10-16.** XOR rejection was already tested. Added a Chrome-free test for the stray single coordinate (asserts the error names the missing pair, not just `INVALID_PARAMS`, because the fall-through also returned `INVALID_PARAMS`), a Chrome-free table test for `masked_typed_text`, and a live test that coordinate-mode typing echoes `<email>`. All three fail under mutation |
 | 14 | `prefers_dom_click` tests pinned two points | Fixed with S3 (a table of cases against a fixed viewport) |
 | 15 | Stale "16 byte-identical" comment | Fixed |
 | 17 | Plan's verification commands did not run the checked-off test | Fixed; the plan and changelog now run `--features live-chrome click_` |
@@ -92,12 +92,11 @@ All 18 were triaged.
   after a reveal toggle flips its type (cleared on `navigate()`; a stale id can
   only over-redact). What remains is a field never seen as a password that has
   none of those tells. Closing that would mean redacting every text field, which
-  defeats the feature.
+  defeats the feature. Accepted as irreducible, restated 2026-10-16.
 - **`BringToFront` in the clipboard grant.** It raises the tab. Chromium requires
   a focused document for the clipboard APIs, so this stays.
 - **`browser_click` keeps Python's fall-through** (index with both coordinates
   uses the coordinates). Only `browser_type` was made strict.
-- **Nits 10, 11 and the coordinate-mode remainder of 13** (above).
 - **MBP-local itself.** Its tree is still dirty and its installed binary predates
   this work. Nothing was deployed or changed on any host.
 
@@ -113,7 +112,8 @@ revisited on 2026-10-15, see
   `Log in`, and `Log in` changed the app's state. One Flutter version, headless
   only, a debug build from this tree rather than an installed binary. The page
   also showed that `browser_type` by index silently dropped text, now
-  [its own issue](2026-10-15-flutter-index-typing-drops-text.md), fixed locally.
+  [its own issue](2026-10-15-flutter-index-typing-drops-text.md), fixed locally
+  (cause measured and fix replaced 2026-10-16).
 - **The skill sync CI job (resolved 2026-10-15).** `scripts/sync_browser_harness_skill.py
   --check` fetches upstream `browser-harness` `main` live; it exited 1 with a
   298-line diff, none of it from this fork. The script was re-run and both
@@ -131,8 +131,8 @@ revisited on 2026-10-15, see
   specified id`), failing the test in 4 of 8 hogged runs. `state()` now issues a
   raw `Runtime.evaluate` without a context id and the test passes 10 of 10 under
   the same load. The test also has a 120 s wall-clock bound so a stall fails and
-  names itself. About fifteen other `page.evaluate` call sites share the latent
-  race and were left unchanged; see
+  names itself. About fifteen other `page.evaluate` call sites shared the latent
+  race; they were moved to a context-free helper on 2026-10-16, see
   [the learning record](../learning/2026-10-15-pinned-execution-context-races-navigation.md).
 - **Final gates are green on this host only.** `cargo fmt --check`, clippy
   `-D warnings` (default and `live-chrome`) and `cargo test --features live-chrome

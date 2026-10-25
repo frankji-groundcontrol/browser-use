@@ -27,6 +27,7 @@ dist/
 *.csv
 *.json
 !/server.json
+!/context7.json
 *.jsonl
 # Plan trackers are durable records, not generated data — keep their history.
 !docs/plans/**/*.track.history.jsonl

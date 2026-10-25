@@ -14,8 +14,9 @@ growing this table.
 
 | Task | Status | Owner | Depends on / blocker | Next action | Updated | Plan |
 | --- | --- | --- | --- | --- | --- | --- |
+| Local installation and remote sync | in progress | Codex | Existing dirty fixes must be preserved | Compare upstream, port applicable Rust features, publish and install | 2026-10-25 | [plan](2026-10-25-local-install-sync/2026-10-25-local-install-sync.md) |
 | Close the review gaps (skill-sync drift, sticky redaction, stale execution context, live Flutter check) | complete locally | Claude | Not deployed | Deploy per the practice | 2026-10-15 | [changelog](../changelogs/2026-10-15-close-review-gaps.md) |
-| Flutter `browser_type` by index drops text | complete locally | Claude | Not deployed; verified on one Flutter version, headless | Deploy per the practice | 2026-10-15 | [issue record](../issues/2026-10-15-flutter-index-typing-drops-text.md) |
+| Flutter `browser_type` by index drops text; Flutter scrolling; context-free script evaluation | complete locally | Claude | Not deployed; verified on one Flutter version (CanvasKit and WasmGC), headless only | Deploy per the practice | 2026-10-16 | [changelog](../changelogs/2026-10-16-page-focus-and-flutter-gaps.md) |
 | Review fixes for the MBP-local WIP (1 blocker, 12 should-fix, 18 nits) | complete locally | Claude | Not deployed to any host | Deploy per the practice (probe now expects 21 tools) | 2026-10-15 | [issue record](../issues/2026-10-15-mbp-local-wip-review-findings.md) |
 | DOM-click offscreen / tiny nodes (Flutter a11y) | complete locally | Cursor | Live check passed on a local build; installed binary not updated | Deploy per the practice | 2026-10-15 | [plan](2026-09-21-dom-click-offscreen.md) |
 | Flutter coordinate typing — `browser_type` coordinates, `browser_paste_at_coordinates`, `browser_press_key` | complete locally | Claude | No plan was opened (recorded retroactively); coordinate typing passed live on a local build, paste and key press not exercised there | Deploy per the practice | 2026-10-15 | [changelog](../changelogs/2026-09-21-flutter-coordinate-typing.md) |

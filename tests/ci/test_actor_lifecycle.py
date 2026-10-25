@@ -52,16 +52,24 @@ async def test_detached_element_reports_actionable_error():
 async def test_click_uses_geometry_after_scroll():
 	from browser_use.actor.element import Element
 
+	scrolled = False
+
+	async def scroll_into_view(*args, **kwargs):
+		nonlocal scrolled
+		scrolled = True
+
+	async def content_quads(*args, **kwargs):
+		quad = [10, 20, 30, 20, 30, 40, 10, 40] if scrolled else [200, 200, 220, 200, 220, 220, 200, 220]
+		return {'quads': [quad]}
+
 	client = SimpleNamespace()
 	client.send = SimpleNamespace(
 		Page=SimpleNamespace(
 			getLayoutMetrics=AsyncMock(return_value={'layoutViewport': {'clientWidth': 100, 'clientHeight': 100}})
 		),
 		DOM=SimpleNamespace(
-			getContentQuads=AsyncMock(
-				side_effect=[{'quads': [[200, 200, 220, 200, 220, 220, 200, 220]]}, {'quads': [[10, 20, 30, 20, 30, 40, 10, 40]]}]
-			),
-			scrollIntoViewIfNeeded=AsyncMock(),
+			getContentQuads=AsyncMock(side_effect=content_quads),
+			scrollIntoViewIfNeeded=AsyncMock(side_effect=scroll_into_view),
 		),
 		Input=SimpleNamespace(dispatchMouseEvent=AsyncMock()),
 	)
@@ -81,7 +89,8 @@ async def test_drag_moves_with_held_button_state():
 	moves = [
 		call.args[0]
 		for call in client.send.Input.dispatchMouseEvent.await_args_list
-		if call.args and call.args[0]['type'] == 'mouseMoved'
+		if call.args and call.args[0]['type'] == 'mouseMoved' and call.args[0].get('buttons') == 1
 	]
 	assert len(moves) == 10
-	assert all(move['buttons'] == 1 for move in moves)
+	assert (moves[-1]['x'], moves[-1]['y']) == (100, 100)
+	assert client.send.Input.dispatchMouseEvent.await_args_list[-1].args[0]['buttons'] == 0

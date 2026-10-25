@@ -128,6 +128,7 @@ async fn a_persistent_profile_keeps_cookies_across_sessions() -> anyhow::Result<
     let _ = std::fs::remove_dir_all(&profile);
     let options = |dir: &std::path::Path| crate::BrowserLaunchOptions {
         headless: true,
+        disable_security: false,
         executable_path: None,
         user_data_dir: Some(dir.to_path_buf()),
         cdp_url: None,
@@ -274,6 +275,7 @@ async fn attaching_uses_an_existing_browser_and_never_closes_it() -> anyhow::Res
 
     let session = crate::BrowserSession::launch_with_options(crate::BrowserLaunchOptions {
         headless: true,
+        disable_security: false,
         executable_path: None,
         user_data_dir: None,
         cdp_url: Some(format!("http://127.0.0.1:{port}")),
@@ -568,6 +570,9 @@ async fn state_survives_script_navigation_under_cpu_load() -> anyhow::Result<()>
             .await?;
             tokio::time::timeout(std::time::Duration::from_secs(20), async {
                 while page.state().await?.url != target {
+                    // Every context-free read has to survive the swap, not just state().
+                    page.scroll_y().await?;
+                    page.content().await?;
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
                 anyhow::Ok(())
@@ -630,134 +635,20 @@ async fn a_password_field_stays_redacted_after_a_reveal_toggle_flips_its_type() 
     Ok(())
 }
 
-// A stand-in for Flutter Web's text-field proxy. The real `<input>` lives in the
-// semantics tree under an `flt-semantics` host. The real page threw away text
-// sent by a programmatic `focus()` plus `insertText` (the cause is not
-// established: it may need a pointer tap, or just time to activate), so this
-// stand-in encodes the tap assumption. The `state` variable plays the app's own
-// copy of the text: an edit not preceded by a fresh pointerdown is reverted.
-const FLUTTER_PROXY_PAGE: &str = "data:text/html,<title>Flutter</title>\
-<flt-semantics-host><flt-semantics style='position:absolute;left:100px;top:100px;\
-width:240px;height:40px'>\
-<input id='f' data-semantics-role='text-field' aria-label='Email' type='text' \
-style='width:240px;height:40px'></flt-semantics></flt-semantics-host>\
-<script>var state='old',tapped=false,f=document.getElementById('f');f.value=state;\
-f.addEventListener('pointerdown',function(){tapped=true;});\
-f.addEventListener('input',function(){if(tapped){state=f.value;tapped=false;}\
-else{f.value=state;}\
-document.title='state='+state;});</script>";
-
-async fn flutter_proxy_input() -> anyhow::Result<(BrowserSession, crate::BrowserPage, i64)> {
-    let session = BrowserSession::launch_headless().await?;
-    let page = session.new_page().await?;
-    page.navigate(FLUTTER_PROXY_PAGE).await?;
-    let backend_node_id = page
-        .selector_map()
-        .await?
-        .iter()
-        .find(|element| element.tag == "input")
-        .expect("the proxy input is interactive")
-        .backend_node_id_value();
-    Ok((session, page, backend_node_id))
-}
-
-#[tokio::test]
-async fn typing_by_index_into_a_flutter_proxy_input_needs_a_pointer_tap() -> anyhow::Result<()> {
-    let (_session, page, id) = flutter_proxy_input().await?;
-    // Start empty and skip the clear, so only the type path can supply the tap.
-    page.evaluate_json("state='';f.value='';true").await?;
-
-    page.type_into_backend_node_id(id, "probe@example.test")
+// Chromium's initial tab starts with `document.hasFocus() === false`, and the first
+// `Input.insertText` into it flips page focus mid-sequence. Flutter Web dropped the
+// text that arrived with that transition, so the first fill of a page was lost. The
+// fix emulates focus on every page we drive, so the page is focused before any typing.
+async fn assert_page_is_focused_and_typing_by_index_lands(
+    page: &crate::BrowserPage,
+) -> anyhow::Result<()> {
+    page.navigate("data:text/html,<title>Focus</title><input id='f'>")
         .await?;
-
-    assert_eq!(page.state().await?.title, "state=probe@example.test");
-    Ok(())
-}
-
-#[tokio::test]
-async fn clearing_by_index_empties_a_flutter_proxy_inputs_app_state() -> anyhow::Result<()> {
-    let (_session, page, id) = flutter_proxy_input().await?;
-
-    page.clear_backend_node_id(id).await?;
-
-    assert_eq!(page.state().await?.title, "state=");
-    Ok(())
-}
-
-#[tokio::test]
-async fn flutter_semantics_nodes_are_recognised_by_tag_or_role_only() -> anyhow::Result<()> {
-    let session = BrowserSession::launch_headless().await?;
-    let page = session.new_page().await?;
-    page.navigate(
-        "data:text/html,<title>Detect</title>\
-<flt-semantics tabindex='0' style='display:block;width:60px;height:30px'>tag</flt-semantics>\
-<div tabindex='0' data-semantics-role='text-field' style='width:60px;height:30px'>role</div>\
-<div tabindex='0' style='width:60px;height:30px'>plain</div>",
-    )
-    .await?;
-    let elements = page.selector_map().await?;
-    let id_of = |tag: &str, text: &str| {
-        elements
-            .iter()
-            .find(|e| e.tag == tag && e.text.contains(text))
-            .unwrap_or_else(|| panic!("no interactive {tag} with text {text}"))
-            .backend_node_id_value()
-    };
-
-    assert!(
-        page.is_flutter_semantics_node(id_of("flt-semantics", "tag"))
-            .await
+    assert_eq!(
+        page.evaluate_json("document.hasFocus()").await?,
+        serde_json::json!(true),
+        "the page must be focused before any typing, not become so during it"
     );
-    assert!(page.is_flutter_semantics_node(id_of("div", "role")).await);
-    assert!(!page.is_flutter_semantics_node(id_of("div", "plain")).await);
-    Ok(())
-}
-
-#[tokio::test]
-async fn typing_by_index_into_an_off_screen_flutter_node_is_an_error() -> anyhow::Result<()> {
-    // A tap that misses still returns Ok, and the keyboard would then edit
-    // whatever was focused before; an unreachable node must fail loudly instead.
-    let session = BrowserSession::launch_headless().await?;
-    let page = session.new_page().await?;
-    page.navigate(
-        "data:text/html,<title>Far</title>\
-<flt-semantics tabindex='0' style='position:absolute;left:100px;top:5000px;\
-width:60px;height:30px'>far</flt-semantics>",
-    )
-    .await?;
-    let id = page
-        .selector_map()
-        .await?
-        .iter()
-        .find(|e| e.tag == "flt-semantics")
-        .expect("the node is interactive")
-        .backend_node_id_value();
-
-    let error = page
-        .type_into_backend_node_id(id, "text")
-        .await
-        .unwrap_err();
-
-    assert!(
-        format!("{error:#}").contains("outside the viewport"),
-        "{error:#}"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn typing_by_index_into_a_plain_input_sends_no_pointer_event() -> anyhow::Result<()> {
-    // The Flutter path taps the field first; an ordinary page must not get that
-    // extra click, which could hit a handler or an overlapping element.
-    let session = BrowserSession::launch_headless().await?;
-    let page = session.new_page().await?;
-    page.navigate(
-        "data:text/html,<title>Plain</title>\
-<input id='f' type='text' style='width:240px;height:40px'>\
-<script>document.getElementById('f').addEventListener('pointerdown',\
-function(){document.title='tapped';});</script>",
-    )
-    .await?;
     let id = page
         .selector_map()
         .await?
@@ -765,15 +656,125 @@ function(){document.title='tapped';});</script>",
         .find(|element| element.tag == "input")
         .expect("the input is interactive")
         .backend_node_id_value();
-
-    page.clear_backend_node_id(id).await?;
-    page.type_into_backend_node_id(id, "plain text").await?;
-
+    page.type_into_backend_node_id(id, "x").await?;
     assert_eq!(
         page.evaluate_json("document.getElementById('f').value")
             .await?,
-        serde_json::json!("plain text")
+        serde_json::json!("x")
     );
-    assert_eq!(page.state().await?.title, "Plain");
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_initial_tab_is_focused_before_typing_by_index() -> anyhow::Result<()> {
+    let session = BrowserSession::launch_headless().await?;
+    assert_page_is_focused_and_typing_by_index_lands(&session.primary_page().await?).await
+}
+
+// Focus emulation lives in a DevTools session, so a handle from another session on the
+// same Chromium starts without it. Session A only launches the browser; session B
+// attaches and reaches the initial tab through `switch_tab`, the path that has to
+// turn emulation on. (`new_page` tabs report focus natively, so it has no such test.)
+#[tokio::test]
+async fn switch_tab_focuses_a_tab_this_session_never_drove() -> anyhow::Result<()> {
+    let launcher = BrowserSession::launch_headless().await?;
+    let ws = launcher.browser.lock().await.websocket_address().clone();
+    let session = BrowserSession::attach(&ws).await?;
+    let initial = session
+        .tabs(None)
+        .await?
+        .into_iter()
+        .next()
+        .expect("the launched browser has an initial tab")
+        .id;
+    let tab = session.switch_tab(&initial).await?;
+    assert_page_is_focused_and_typing_by_index_lands(&tab).await
+}
+
+/// Polls the inner container's `scrollTop` until `done` accepts it: a wheel scroll
+/// may animate, so it lands a little after the call returns.
+async fn inner_scroll_top_until(
+    page: &crate::BrowserPage,
+    done: impl Fn(f64) -> bool,
+) -> anyhow::Result<f64> {
+    for _ in 0..40 {
+        let top = page
+            .evaluate_json("document.getElementById('s').scrollTop")
+            .await?
+            .as_f64()
+            .unwrap_or(0.0);
+        if done(top) {
+            return Ok(top);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    anyhow::bail!("the container never scrolled")
+}
+
+#[tokio::test]
+async fn scroll_moves_an_inner_container_when_the_window_cannot_scroll() -> anyhow::Result<()> {
+    // Flutter Web draws its own scrollables inside a window that never scrolls.
+    let session = BrowserSession::launch_headless().await?;
+    let page = session.new_page().await?;
+    page.navigate(
+        "data:text/html,<title>Inner</title><body style='margin:0;overflow:hidden'>\
+<div id='s' style='height:100vh;overflow:auto'><div style='height:3000px'></div></div></body>",
+    )
+    .await?;
+
+    page.scroll("down").await?;
+    let down = inner_scroll_top_until(&page, |top| top > 0.0).await?;
+    page.scroll("up").await?;
+    inner_scroll_top_until(&page, |top| top < down).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn scroll_goes_to_a_dialog_when_a_modal_locks_the_page() -> anyhow::Result<()> {
+    // `overflow: hidden` blocks a user's scroll but not `scrollBy`, so a geometry-only
+    // check would scroll the page behind the dialog and report success.
+    let session = BrowserSession::launch_headless().await?;
+    let page = session.new_page().await?;
+    page.navigate(
+        "data:text/html,<title>Modal</title><body style='margin:0;overflow:hidden'>\
+<div style='height:3000px'></div>\
+<div id='s' style='position:fixed;inset:0;overflow:auto'><div style='height:2000px'></div></div></body>",
+    )
+    .await?;
+
+    page.scroll("down").await?;
+    inner_scroll_top_until(&page, |top| top > 0.0).await?;
+    assert_eq!(
+        page.scroll_y().await?,
+        0.0,
+        "the locked page moved behind the dialog"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn scroll_at_the_end_of_a_scrollable_page_sends_no_wheel() -> anyhow::Result<()> {
+    // A wheel at the viewport centre also zooms maps and flips carousels, so it must
+    // not fire merely because the window has reached its end. The page also shadows
+    // `scrollBy` with a global `let`, which a bare call in the injected script would hit.
+    let session = BrowserSession::launch_headless().await?;
+    let page = session.new_page().await?;
+    page.navigate(
+        "data:text/html,<title>End</title><script>window.wheels=0;let scrollBy=()=>{};\
+addEventListener('wheel',()=>{window.wheels++},{passive:true})</script>\
+<body style='margin:0'><div style='height:3000px'></div></body>",
+    )
+    .await?;
+
+    for _ in 0..12 {
+        page.scroll("down").await?;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(page.scroll_y().await? > 0.0, "the window never scrolled");
+    assert_eq!(
+        page.evaluate_json("window.wheels").await?,
+        serde_json::json!(0),
+        "a wheel fired at the end of a scrollable page"
+    );
     Ok(())
 }

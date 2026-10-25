@@ -47,11 +47,19 @@ enum RequestBlock {
 }
 
 #[derive(Debug, Serialize, PartialEq)]
-struct ImageSource {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    media_type: String,
-    data: String,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ImageSource {
+    Base64 { media_type: String, data: String },
+    Url { url: String },
+}
+
+pub(crate) fn image_source(url: &str) -> ImageSource {
+    match split_data_url(url) {
+        Some((media_type, data)) => ImageSource::Base64 { media_type, data },
+        None => ImageSource::Url {
+            url: url.to_owned(),
+        },
+    }
 }
 
 /// Builds a Messages request, hoisting system messages into the top-level
@@ -95,20 +103,8 @@ fn blocks_for(content: MessageContent) -> Vec<RequestBlock> {
             .into_iter()
             .map(|part| match part {
                 ContentPart::Text { text } => RequestBlock::Text { text },
-                ContentPart::ImageUrl { image_url } => match split_data_url(&image_url.url) {
-                    Some((media_type, data)) => RequestBlock::Image {
-                        source: ImageSource {
-                            kind: "base64",
-                            media_type,
-                            data,
-                        },
-                    },
-                    // A remote URL cannot be forwarded: Anthropic takes inline
-                    // base64 only. Degrade to text naming the URL rather than
-                    // dropping content silently.
-                    None => RequestBlock::Text {
-                        text: format!("[image at {}]", image_url.url),
-                    },
+                ContentPart::ImageUrl { image_url } => RequestBlock::Image {
+                    source: image_source(&image_url.url),
                 },
             })
             .collect(),
@@ -117,10 +113,13 @@ fn blocks_for(content: MessageContent) -> Vec<RequestBlock> {
 
 /// Splits `data:image/png;base64,AAAA` into its media type and payload.
 fn split_data_url(url: &str) -> Option<(String, String)> {
-    let rest = url.strip_prefix("data:")?;
+    let (scheme, rest) = url.split_once(':')?;
+    if !scheme.eq_ignore_ascii_case("data") {
+        return None;
+    }
     let (meta, data) = rest.split_once(',')?;
     let media_type = meta.strip_suffix(";base64")?;
-    Some((media_type.to_owned(), data.to_owned()))
+    Some((media_type.to_ascii_lowercase(), data.to_owned()))
 }
 
 #[derive(Debug, Deserialize)]

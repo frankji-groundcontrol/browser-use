@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::anthropic::image_source;
 use crate::config::{LlmApi, LlmConfig};
 use crate::message::{ChatMessage, ContentPart, MessageContent};
 use crate::responses;
@@ -202,24 +203,13 @@ fn anthropic_content(c: MessageContent) -> Value {
             p.into_iter()
                 .map(|x| match x {
                     ContentPart::Text { text } => json!({"type":"text","text":text}),
-                    ContentPart::ImageUrl { image_url } => image_block(&image_url.url),
+                    ContentPart::ImageUrl { image_url } => {
+                        json!({"type":"image","source":image_source(&image_url.url)})
+                    }
                 })
                 .collect(),
         ),
     }
-}
-
-fn image_block(url: &str) -> Value {
-    if let Some(rest) = url.strip_prefix("data:") {
-        if let Some((meta, data)) = rest.split_once(',') {
-            if let Some(media_type) = meta.strip_suffix(";base64") {
-                return json!({"type":"image","source":{"type":"base64","media_type":media_type,"data":data}});
-            }
-        }
-    }
-    // Anthropic accepts remote images as URL sources; preserve the modality
-    // instead of degrading the request to a textual placeholder.
-    json!({"type":"image","source":{"type":"url","url":url}})
 }
 
 pub(crate) fn parse_completion(api: LlmApi, body: &str) -> Result<Completion> {

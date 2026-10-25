@@ -1,5 +1,12 @@
 # Flutter index typing (2026-10-15)
 
+> **Superseded 2026-10-16.** The tap-first workaround described below was removed
+> once the cause was measured: the initial tab is not focused, and the fix is
+> focus emulation on every page we drive. See
+> [page focus and Flutter gaps](2026-10-16-page-focus-and-flutter-gaps.md). The
+> record is kept as it was written; the double-tap on buttons and checkboxes and
+> the off-screen error it mentions no longer exist.
+
 ## Table of Contents
 
 - [What changed](#what-changed)
@@ -70,9 +77,10 @@ in plaintext, as before.
 
 One Flutter version, one browser, headless only; an engine that tags its proxies
 differently is treated as an ordinary page. A Flutter field outside the viewport
-is not scrolled to. The cause is open between a needed tap and a focus-then-insert
-timing race ([issue](../issues/2026-10-15-flutter-index-typing-drops-text.md#cause));
-the fix taps and waits, which covers both. Nothing is installed or deployed.
+is not scrolled to. The cause was left open between a needed tap and a
+focus-then-insert timing race; it was resolved on 2026-10-16 as page focus
+([issue](../issues/2026-10-15-flutter-index-typing-drops-text.md#cause)). Nothing is
+installed or deployed.
 
 [Issue](../issues/2026-10-15-flutter-index-typing-drops-text.md) ·
 [Closing the review gaps](2026-10-15-close-review-gaps.md) ·

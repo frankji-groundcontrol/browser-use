@@ -2,7 +2,7 @@
 
 The MCP server deployed on this host is a from-scratch **Rust reimplementation**
 of `browser-use --mcp`, living in the Cargo workspace under
-[`rust/`](../../rust) on branch `franky-rust`. It exposes 19 MCP tools: the
+[`rust/`](../../rust) on branch `franky-rust`. It exposes 21 MCP tools: the
 shared browser surface plus Rust-specific additions. This is a partial port,
 not byte-identical Python API or implementation parity. Docs `00`–`11` describe
 the Python design; the table below names the Rust runtime boundaries.
@@ -18,7 +18,7 @@ the staged plan is [parity-plan.md](../plans/2026-07-05-rust-rewrite/parity-plan
 | `bu-core` | The `browser-use-rs` binary (`--mcp` entry). | [07](07-mcp-integration.md) |
 | `bu-mcp` | rmcp server: `lib.rs` (21 tool handlers + dispatch), `tools.rs` (tool defs), `tests.rs`. | [04](04-tools-and-action-registry.md), [07](07-mcp-integration.md) |
 | `bu-actor` | Single-owner actor serializing all browser work; URL-policy enforcement; per-command timeout. | [00](00-system-overview.md), [02](02-event-bus-and-watchdogs.md), [08](08-actor-scripting-api.md) |
-| `bu-cdp` | Chromium via `chromiumoxide`: `lib.rs` (`BrowserSession`/`BrowserPage`), `dom.rs` (three-tree fusion + filtering), `geometry.rs` (`Rect`/`RectUnion`), `security.rs` (`UrlPolicy`), `discovery.rs` (Chromium/env). | [01](01-cdp-transport-and-session-manager.md), [03](03-dom-perception-pipeline.md) |
+| `bu-cdp` | Chromium via `chromiumoxide`: `lib.rs` (`BrowserSession`/`BrowserPage`), `dom.rs` (three-tree fusion + filtering), `geometry.rs` (`Rect`/`RectUnion`), `security.rs` (`UrlPolicy`), `discovery.rs` (Chromium/env), `input.rs` (validated native date/time filling). | [01](01-cdp-transport-and-session-manager.md), [03](03-dom-perception-pipeline.md) |
 | `bu-agent` | Perceive→decide→act loop: `action.rs` (multi-action + reasoning schema), `lib.rs` (loop + vision), `report.rs`. | [05](05-agent-control-loop.md) |
 | `bu-llm` | Provider-agnostic LLM: `message.rs` (multimodal), `openai.rs` (client + retry), `bedrock.rs` (feature-gated), `LlmProvider` enum. | [06](06-llm-provider-abstraction.md) |
 | `bu-dom` | `extract_clean_markdown` for `browser_extract_content`. | [03](03-dom-perception-pipeline.md) |
@@ -78,13 +78,17 @@ matches Python's `retry_with_browser_use_agent` wording.
 
 ## LLM providers ([06](06-llm-provider-abstraction.md))
 
-`bu-llm::LlmProvider` dispatches to an OpenAI-compatible client (`openai.rs`) or,
-behind the `bedrock` feature, an AWS Bedrock Converse client (`bedrock.rs`) —
-selected by `MODEL_PROVIDER=bedrock`, mirroring Python's `get_default_llm`. The
-OpenAI client tolerates `null`/empty `content` (reasoning/refusal responses),
-retries 429/5xx + connect/timeout with backoff honoring `Retry-After`, and
-defaults model `gpt-4o` + temperature `0.7`. `reqwest`'s default User-Agent avoids
-gateway WAF blocks, so no SDK-fingerprint wrapper is needed.
+`bu-llm::LlmProvider` uses explicit `BROWSER_USE_LLM_*` configuration for
+OpenAI chat, OpenAI Responses or Anthropic Messages, with Bedrock Converse
+behind the `bedrock` feature. Endpoint, API key, API kind and model are explicit;
+legacy provider variables do not select a backend. The HTTP client preserves
+protocol-specific tools/streaming/usage and retries transient failures.
+
+Simple and typed Anthropic requests share image-source conversion: data schemes
+and MIME types are case-insensitive, payload bytes are preserved, and remote
+HTTPS image URLs remain image sources. Bedrock remote-image downloading remains
+unsupported. See the [current applicability matrix](../plans/2026-10-25-local-install-sync/2026-10-25-local-install-sync.upstream-matrix.md)
+for proven contracts and broader gaps.
 
 ## Security: URL access policy
 

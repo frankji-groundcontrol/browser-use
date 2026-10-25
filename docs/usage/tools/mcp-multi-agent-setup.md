@@ -50,12 +50,15 @@ a `browser_screenshot` and use `browser_type` or `browser_paste_at_coordinates`
 with coordinates. Checked on a real Flutter Web 3.44.8 login page (2026-10-15,
 headless, locally built; the binary was a debug build from this tree): the index
 click removes the placeholder and `Email`, `Password` and `Log in` appear.
-`browser_type` by index into a Flutter field taps the field with a real click
-first; a plain focus plus insert was silently discarded
-([issue](../../issues/2026-10-15-flutter-index-typing-drops-text.md)). That was
-checked on Flutter 3.44.8 only. A field outside the viewport returns an error
-rather than being scrolled to, so scroll it into view first. If the typed text
-does not show up, fall back to coordinates.
+`browser_type` by index into a Flutter field works because the server makes every
+page it drives report itself focused; Chromium's initial tab starts unfocused and
+Flutter dropped the first text typed into it
+([issue](../../issues/2026-10-15-flutter-index-typing-drops-text.md)). Flutter builds
+nodes lazily, so a field below the fold is not in `browser_get_state` yet: call
+`browser_scroll` (a wheel event at the viewport centre when the window cannot
+scroll; it may take two calls) until it appears. Checked on Flutter 3.44.8 only,
+headless, as CanvasKit and as a WasmGC build. If the typed text does not show up,
+fall back to coordinates.
 
 ## 1. Build & install the Rust binary
 

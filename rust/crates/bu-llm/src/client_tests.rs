@@ -242,6 +242,91 @@ mod http_tests {
     }
 
     #[tokio::test]
+    async fn anthropic_chat_and_complete_keep_data_images_case_insensitive() {
+        use crate::{ChatMessage, ContentPart, ImageUrl, MessageContent};
+        use serde_json::{json, Value};
+
+        let cases = [
+            ("data:image/png;base64,AaZz09+/", "image/png"),
+            ("data:image/PNG;base64,AaZz09+/", "image/png"),
+            ("DATA:image/png;base64,AaZz09+/", "image/png"),
+            ("Data:Image/Png;base64,AaZz09+/", "image/png"),
+            ("data:IMAGE/JPEG;base64,AaZz09+/", "image/jpeg"),
+            ("data:IMAGE/GIF;base64,AaZz09+/", "image/gif"),
+            ("data:IMAGE/WEBP;base64,AaZz09+/", "image/webp"),
+        ];
+        let expected = json!(cases.map(|(_, media_type)| json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": "AaZz09+/"}
+        })));
+        let mut sent_images = Vec::new();
+        for typed in [false, true] {
+            let (base, requests) = serve(vec![json_ok(
+                r#"{"content":[{"type":"text","text":"seen"}],"stop_reason":"end_turn"}"#,
+            )]);
+            let client = client(base, LlmApi::AnthropicMessages);
+            let messages = vec![ChatMessage {
+                role: "user".into(),
+                content: MessageContent::Parts(
+                    cases
+                        .map(|(url, _)| ContentPart::ImageUrl {
+                            image_url: ImageUrl { url: url.into() },
+                        })
+                        .into(),
+                ),
+            }];
+            if typed {
+                client.complete(messages.into()).await.unwrap();
+            } else {
+                client.chat(messages).await.unwrap();
+            }
+            let raw = requests.recv().unwrap();
+            let body: Value = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+            sent_images.push(body["messages"][0]["content"].clone());
+        }
+        assert_eq!(sent_images, vec![expected.clone(), expected]);
+    }
+
+    #[tokio::test]
+    async fn anthropic_chat_and_complete_keep_remote_image_sources() {
+        use crate::{ChatMessage, ContentPart, ImageUrl, MessageContent};
+        use serde_json::{json, Value};
+
+        let url = "https://cdn.example/image.png?size=small#preview";
+        let mut sent_images = Vec::new();
+        for typed in [false, true] {
+            let (base, requests) = serve(vec![json_ok(
+                r#"{"content":[{"type":"text","text":"seen"}],"stop_reason":"end_turn"}"#,
+            )]);
+            let client = client(base, LlmApi::AnthropicMessages);
+            let messages = vec![ChatMessage {
+                role: "user".into(),
+                content: MessageContent::Parts(vec![
+                    ContentPart::Text {
+                        text: "look".into(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl { url: url.into() },
+                    },
+                ]),
+            }];
+            if typed {
+                client.complete(messages.into()).await.unwrap();
+            } else {
+                client.chat(messages).await.unwrap();
+            }
+            let raw = requests.recv().unwrap();
+            let body: Value = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+            sent_images.push(body["messages"][0]["content"].clone());
+        }
+        let expected = json!([
+            {"type": "text", "text": "look"},
+            {"type": "image", "source": {"type": "url", "url": url}}
+        ]);
+        assert_eq!(sent_images, vec![expected.clone(), expected]);
+    }
+
+    #[tokio::test]
     async fn openai_sends_bearer_auth() {
         let (base_url, requests) = serve(vec![json_ok(
             r#"{"choices":[{"message":{"content":"ok"}}]}"#,

@@ -1,5 +1,7 @@
 # Issue records
 
+- [2026-10-25 — Rust module size follow-up](2026-10-25-rust-module-size-debt.md) — bounded responsibility splits after the upstream behavior ports.
+
 - [2026-09-16 — Whole-repository review findings](2026-09-16-whole-repo-review-findings.md)
   — security, Rust parity, release reliability, and test-quality findings with
   reproducible evidence and rejected/blocked claims.
@@ -11,8 +13,9 @@ a resolution.
 ## Index
 
 - [2026-10-15 — `browser_type` by index reports success but Flutter Web never receives the text](2026-10-15-flutter-index-typing-drops-text.md)
-  — found by the live Flutter check; index typing now taps the field first.
-  Fixed locally and verified on a real Flutter 3.44.8 page, not deployed.
+  — found by the live Flutter check; cause measured on 2026-10-16 (the initial tab
+  is unfocused) and fixed with page-focus emulation. Verified on a real Flutter
+  3.44.8 page, not deployed.
 - [2026-10-15 — Review findings on the MBP-local WIP](2026-10-15-mbp-local-wip-review-findings.md)
   — one blocker (autocomplete redaction bypasses token lists) and 12 should-fix
   items in the three-slice WIP landed in `3c6a553e7`; resolved with

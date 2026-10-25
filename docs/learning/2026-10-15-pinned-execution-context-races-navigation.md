@@ -19,10 +19,17 @@ Date: 2026-10-15
 - Chrome refuses script-initiated top-level navigation to a `data:` URL, so
   such a test times out for an unrelated reason. Serve the pages from a loopback
   HTTP server.
-- Roughly fifteen other `self.page.evaluate(...)` calls in `bu-cdp` share the
-  latent race. They were left alone on purpose: `Page::evaluate(&str)` also
+- Roughly fifteen other `self.page.evaluate(...)` calls in `bu-cdp` shared the
+  latent race. They were first left alone on purpose: `Page::evaluate(&str)` also
   decides whether a string is a function or an expression, so replacing every
-  call mechanically changes behaviour. Fix a site when a test shows it failing.
+  call mechanically changes behaviour. On 2026-10-16 they were all moved to one
+  `BrowserPage::eval` helper (raw `Runtime.evaluate`, no `contextId`,
+  `awaitPromise`, `returnByValue`; a thrown script becomes an error with its
+  description). Every script involved was already an expression, and the suite
+  passed unchanged. The CPU-load navigation test now polls `state()`, `scroll_y()`
+  and `content()`; putting `scroll_y` back on `Page::evaluate` makes it fail with
+  `Cannot find context with specified id`. The other sites are covered only
+  through the shared helper.
 - The ten-minute "hang" was never reproduced as a true hang. One 75 s stall
   under ten CPU hogs had the test thread idle in `kevent` and Chrome's helpers
   runnable at about 0% CPU; 18 further hogged runs did not stall. Treat a silent

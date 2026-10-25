@@ -1,5 +1,15 @@
 # Handoff
 
+## Current local sync (2026-10-25)
+
+Rust-only upstream sync and local installation are in progress. See the
+[live plan](plans/2026-10-25-local-install-sync/2026-10-25-local-install-sync.md)
+and [change record](changelogs/2026-10-25-upstream-rust-sync/index.md).
+The frozen upstream target is `3df5806a0`; original local fixes are preserved.
+Do not infer that the installed binary has been refreshed until the delivery
+checks in that plan are complete.
+
+
 ## What the team is trying to finish
 
 This fork (`franky-rust`) maintains a Rust reimplementation of browser-use's MCP
@@ -59,9 +69,14 @@ check passed on a real Flutter Web page, the generated skill files were re-synce
 (they drift again whenever upstream `browser-harness` moves), the reveal-toggled
 password redaction gap was narrowed, and the policy-test stall turned out to be a
 real stale-execution-context race in `state()`, now fixed. That live check also
-found that `browser_type` by index silently dropped text on Flutter fields; that
-is [fixed locally](issues/2026-10-15-flutter-index-typing-drops-text.md) (real
-Flutter 3.44.8 verified, not deployed).
+found that `browser_type` by index silently dropped text on Flutter fields. On
+2026-10-16 the cause was measured (Chromium's initial tab is unfocused; the server
+now emulates page focus in browsers it launched or that are headless) and the tap-first workaround was replaced, see
+[the change record](changelogs/2026-10-16-page-focus-and-flutter-gaps.md) and
+[the issue](issues/2026-10-15-flutter-index-typing-drops-text.md). The same change
+made `browser_scroll` reach Flutter's internal lists and moved every script
+evaluation off the pinned execution context. Real Flutter 3.44.8 verified
+(CanvasKit and WasmGC, headless), not deployed.
 
 **The LLM environment surface changed on 2026-08-27 and is a breaking change.**
 Configure the model with `BROWSER_USE_LLM_BASE_URL`, `_API_KEY`, `_API`
@@ -130,8 +145,8 @@ the sequential attach probe in the deployment plan. See
 7. **Deploy the 21-tool build.** Follow
    [deploy-browser-use-rs.md](practices/deploy-browser-use-rs.md) on each host (the
    probe expects 21 tools) and reconnect the MCP client. The live Flutter check and
-   the [index-typing fix](issues/2026-10-15-flutter-index-typing-drops-text.md)
-   both passed on a local debug build (2026-10-15).
+   the [page-focus fix](changelogs/2026-10-16-page-focus-and-flutter-gaps.md)
+   both passed on a local debug build (2026-10-16).
    Done when: the deploy probe passes on each host.
 
 ## How to pick up the work

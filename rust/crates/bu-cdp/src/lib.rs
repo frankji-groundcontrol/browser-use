@@ -17,12 +17,14 @@ use chromiumoxide::{
         accessibility::GetFullAxTreeParams,
         browser::{GrantPermissionsParams, PermissionType, ResetPermissionsParams},
         dom::{
-            BackendNodeId, DescribeNodeParams, FocusParams, GetContentQuadsParams,
-            GetDocumentParams, ResolveNodeParams,
+            BackendNodeId, FocusParams, GetContentQuadsParams, GetDocumentParams, ResolveNodeParams,
         },
         dom_debugger::GetEventListenersParams,
         dom_snapshot::CaptureSnapshotParams,
-        emulation::{ClearDeviceMetricsOverrideParams, SetDeviceMetricsOverrideParams},
+        emulation::{
+            ClearDeviceMetricsOverrideParams, SetDeviceMetricsOverrideParams,
+            SetFocusEmulationEnabledParams,
+        },
         input::{
             DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams,
             DispatchMouseEventType, InsertTextParams, MouseButton,
@@ -31,6 +33,7 @@ use chromiumoxide::{
     },
     cdp::js_protocol::runtime::{CallFunctionOnParams, EvaluateParams, ReleaseObjectParams},
     handler::Handler,
+    js::EvaluationResult,
     page::Page,
     page::ScreenshotParams,
 };
@@ -40,6 +43,7 @@ use tokio::{sync::Mutex, task::JoinHandle};
 mod discovery;
 mod dom;
 mod geometry;
+mod input;
 mod keys;
 mod security;
 
@@ -74,6 +78,8 @@ use dom::{
 pub struct BrowserLaunchOptions {
     /// Whether Chromium should run headless.
     pub headless: bool,
+    /// Explicit opt-in to disabling Chromium's web security for local launches.
+    pub disable_security: bool,
     /// Optional Chromium executable path. If omitted, Browser Use discovery is used.
     pub executable_path: Option<PathBuf>,
     /// Profile directory to reuse across runs. `None` means a throwaway profile
@@ -89,6 +95,7 @@ impl BrowserLaunchOptions {
     pub fn from_env() -> Self {
         Self {
             headless: headless_from_env(),
+            disable_security: UrlPolicy::from_env().disable_security,
             executable_path: chromium_path_from_env(),
             user_data_dir: user_data_dir_from_env(),
             cdp_url: cdp_url_from_env(),
@@ -100,6 +107,7 @@ impl Default for BrowserLaunchOptions {
     fn default() -> Self {
         Self {
             headless: true,
+            disable_security: false,
             executable_path: None,
             user_data_dir: None,
             cdp_url: None,
@@ -233,6 +241,8 @@ pub struct BrowserSession {
     /// True when attached to a browser someone else launched: it is not ours to
     /// close, and killing it would take their windows down with it.
     attached: bool,
+    /// Whether pages we drive get focus emulation; see [`wants_focus_emulation`].
+    focus_emulation: bool,
     /// Backend node ids that have looked sensitive in an earlier snapshot, per
     /// target; see [`dom::merge_snapshot`].
     sensitive_nodes: SensitiveNodes,
@@ -281,6 +291,19 @@ impl BrowserSession {
             .user_data_dir(&user_data_dir)
             .no_sandbox()
             .arg("--disable-dev-shm-usage");
+
+        if options.disable_security {
+            config = config.args([
+                "--disable-site-isolation-trials",
+                "--disable-web-security",
+                // Preserve Chromiumoxide 0.7's default when replacing this switch.
+                "--disable-features=TranslateUI,IsolateOrigins,site-per-process",
+                "--allow-running-insecure-content",
+                "--ignore-certificate-errors",
+                "--ignore-ssl-errors",
+                "--ignore-certificate-errors-spki-list",
+            ]);
+        }
 
         // Privacy default: with no caller-supplied profile, run the whole browser
         // off-the-record so a login lives in memory only and never reaches disk.
@@ -331,6 +354,13 @@ impl BrowserSession {
                         continue;
                     }
                     tracing::warn!(%err, "chromiumoxide handler error");
+                    if matches!(
+                        err,
+                        chromiumoxide::error::CdpError::Ws(_)
+                            | chromiumoxide::error::CdpError::Io(_)
+                    ) {
+                        break;
+                    }
                 }
             }
             handler_healthy.store(false, Ordering::SeqCst);
@@ -343,6 +373,7 @@ impl BrowserSession {
             healthy,
             scratch_user_data_dir,
             attached,
+            focus_emulation: !attached,
             sensitive_nodes: SensitiveNodes::default(),
         }
     }
@@ -352,6 +383,26 @@ impl BrowserSession {
             page,
             sensitive_nodes: self.sensitive_nodes.clone(),
         }
+    }
+
+    /// Wraps a page we are about to drive, giving it page focus first when allowed.
+    ///
+    /// Measured: Chromium's initial tab reports `document.hasFocus() === false`, a
+    /// tab from `new_page()` reports `true`, and Flutter Web drops the first
+    /// `Input.insertText` into the unfocused one, which is the moment page focus
+    /// flips. `Emulation.setFocusEmulationEnabled` makes the page focused before
+    /// any typing without raising an OS window. Why Flutter drops the text was not
+    /// traced into its engine.
+    async fn driven(&self, page: Page) -> BrowserPage {
+        if self.focus_emulation {
+            if let Err(err) = page
+                .execute(SetFocusEmulationEnabledParams::new(true))
+                .await
+            {
+                tracing::warn!(%err, "focus emulation unavailable; typing into an unfocused page may be dropped");
+            }
+        }
+        self.wrap(page)
     }
 
     /// Attaches to an already-running Chromium over its DevTools endpoint.
@@ -369,7 +420,7 @@ impl BrowserSession {
         // Start the handler before fetching targets: chromiumoxide needs its
         // event loop running to receive the fetch response. Without this,
         // attaching to a browser with pre-existing tabs deadlocks here.
-        let session = Self::from_parts(browser, handler, None, true);
+        let mut session = Self::from_parts(browser, handler, None, true);
         session
             .browser
             .lock()
@@ -377,12 +428,34 @@ impl BrowserSession {
             .fetch_targets()
             .await
             .map_err(|_| anyhow!("failed to discover existing Chromium targets"))?;
+        // A failed version read leaves emulation off: the safe side for someone's browser.
+        if let Ok(version) = session.browser.lock().await.version().await {
+            session.focus_emulation = wants_focus_emulation(true, &version.user_agent);
+        }
         Ok(session)
     }
 
-    /// Returns whether the Chromium handler task still reports a live browser.
+    /// Returns cached transport health; a silent peer close needs `check_connection`.
     pub fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::SeqCst)
+    }
+
+    /// Checks whether the browser connection can be reused for the next command.
+    pub async fn check_connection(&self) -> bool {
+        if !self.is_healthy() {
+            return false;
+        }
+        let connected = matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                self.browser.lock().await.version().await
+            })
+            .await,
+            Ok(Ok(_))
+        );
+        if !connected {
+            self.healthy.store(false, Ordering::SeqCst);
+        }
+        connected
     }
 
     /// Opens a new page.
@@ -395,7 +468,7 @@ impl BrowserSession {
             .await
             .context("failed to create Chromium page")?;
 
-        Ok(self.wrap(page))
+        Ok(self.driven(page).await)
     }
 
     /// Returns metadata for all open pages.
@@ -410,7 +483,10 @@ impl BrowserSession {
             .await
             .context("failed to list Chromium pages")?;
         pages.sort_by_key(|page| page.target_id().inner().clone());
-        Ok(pages.into_iter().next().map(|page| self.wrap(page)))
+        let Some(page) = pages.into_iter().next() else {
+            return Ok(None);
+        };
+        Ok(Some(self.driven(page).await))
     }
 
     /// Returns the browser's primary page, waiting briefly for Chromium's initial
@@ -461,7 +537,7 @@ impl BrowserSession {
 
     /// Activates and returns a page selected by short id, full target id, or index.
     pub async fn switch_tab(&self, tab_ref: &str) -> Result<BrowserPage> {
-        let page = self.resolve_tab(tab_ref).await?;
+        let page = self.driven(self.resolve_tab(tab_ref).await?).await;
         page.page
             .activate()
             .await
@@ -474,9 +550,8 @@ impl BrowserSession {
     /// whether the active tab was the one closed).
     pub async fn close_tab(&self, tab_ref: &str) -> Result<String> {
         let page = self.resolve_tab(tab_ref).await?;
-        let target_id = page.target_id();
-        page.page
-            .close()
+        let target_id = page.target_id().as_ref().to_string();
+        page.close()
             .await
             .with_context(|| format!("failed to close tab {tab_ref}"))?;
         Ok(target_id)
@@ -509,7 +584,7 @@ impl BrowserSession {
         }
     }
 
-    async fn resolve_tab(&self, tab_ref: &str) -> Result<BrowserPage> {
+    async fn resolve_tab(&self, tab_ref: &str) -> Result<Page> {
         let mut pages = self
             .browser
             .lock()
@@ -518,10 +593,7 @@ impl BrowserSession {
             .await
             .context("failed to list Chromium pages")?;
         pages.sort_by_key(|page| page.target_id().inner().clone());
-        let page =
-            page_by_ref(pages, tab_ref).with_context(|| format!("tab {tab_ref} not found"))?;
-
-        Ok(self.wrap(page))
+        page_by_ref(pages, tab_ref).with_context(|| format!("tab {tab_ref} not found"))
     }
 }
 
@@ -593,6 +665,31 @@ impl BrowserPage {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Evaluates `expression` in the main frame's *current* execution context.
+    ///
+    /// `Page::evaluate` pins the context id chromiumoxide cached, and that context
+    /// is already destroyed while a navigation commits ("Cannot find context with
+    /// specified id"). A raw `Runtime.evaluate` without a `contextId` lets Chrome
+    /// pick the live one. Promises are awaited and results returned by value, as
+    /// `Page::evaluate` does; an uncaught exception is an error.
+    async fn eval(&self, expression: impl Into<String>) -> Result<EvaluationResult> {
+        let params = EvaluateParams::builder()
+            .expression(expression)
+            .await_promise(true)
+            .return_by_value(true)
+            .build()
+            .map_err(|e| anyhow!("invalid script: {e}"))?;
+        let returns = self.page.execute(params).await?.result;
+        if let Some(exception) = returns.exception_details {
+            let detail = exception
+                .exception
+                .and_then(|object| object.description)
+                .unwrap_or(exception.text);
+            bail!("JavaScript exception: {detail}");
+        }
+        Ok(EvaluationResult::new(returns.result))
+    }
+
     /// Returns current URL and title.
     pub async fn state(&self) -> Result<PageState> {
         let url = self
@@ -601,25 +698,11 @@ impl BrowserPage {
             .await
             .context("failed to read page URL")?
             .unwrap_or_default();
-        // Raw Runtime.evaluate with no contextId: `Page::evaluate` pins the context
-        // id chromiumoxide cached, which is already destroyed while a navigation
-        // commits ("Cannot find context with specified id"). Without it Chrome
-        // uses the main frame's current context.
         let title = self
-            .page
-            .execute(
-                EvaluateParams::builder()
-                    .expression("document.title")
-                    .return_by_value(true)
-                    .build()
-                    .map_err(|e| anyhow!("invalid title probe: {e}"))?,
-            )
+            .eval("document.title")
             .await
             .context("failed to read page title")?
-            .result
-            .result
-            .value
-            .and_then(|v| v.as_str().map(str::to_owned))
+            .into_value()
             .context("failed to decode page title")?;
 
         Ok(PageState { url, title })
@@ -627,10 +710,17 @@ impl BrowserPage {
 
     /// Returns the current page HTML.
     pub async fn content(&self) -> Result<String> {
-        self.page
-            .content()
-            .await
-            .context("failed to read page content")
+        // Same script as `Page::content`, which is pinned to a cached context.
+        self.eval(
+            "(() => { let html = ''; \
+             if (document.doctype) html = new XMLSerializer().serializeToString(document.doctype); \
+             if (document.documentElement) html += document.documentElement.outerHTML; \
+             return html; })()",
+        )
+        .await
+        .context("failed to read page content")?
+        .into_value()
+        .context("failed to decode page content")
     }
 
     /// Returns full page HTML, or one selected element's outer HTML.
@@ -706,24 +796,60 @@ impl BrowserPage {
     }
 
     /// Scrolls the page by one standard MCP increment.
+    ///
+    /// A window that scrolls at all gets `scrollBy`, which is a no-op at either
+    /// end. A window that cannot scroll (Flutter Web draws its own scrollables in
+    /// a fixed window; an open modal sets `overflow: hidden`; some pages scroll
+    /// inside a container) gets a wheel event at the viewport centre, which scrolls
+    /// whatever sits under the pointer.
     pub async fn scroll(&self, direction: &str) -> Result<()> {
         let amount = match direction {
             "up" => -500,
             "down" => 500,
             other => return Err(anyhow!("unsupported scroll direction: {other}")),
         };
-        let script = format!("window.scrollBy(0, {amount})");
-        self.page
-            .evaluate(script)
+        // `window.` throughout: a page's top-level `let scrollY` would shadow a bare
+        // global in this page-scope script. The viewport takes its overflow from
+        // <html>, or from <body> when <html> leaves it visible.
+        let script = format!(
+            "(() => {{ const html = document.documentElement; \
+             const lock = s => s === 'hidden' || s === 'clip'; \
+             const root = getComputedStyle(html).overflowY; \
+             const locked = lock(root) || (root === 'visible' && document.body \
+                 && lock(getComputedStyle(document.body).overflowY)); \
+             const d = document.scrollingElement || html; \
+             const can = !locked && d.scrollHeight - window.innerHeight > 1; \
+             if (can) window.scrollBy(0, {amount}); \
+             return [can, window.innerWidth / 2, window.innerHeight / 2]; }})()"
+        );
+        let (window_moved, x, y): (bool, f64, f64) = self
+            .eval(script)
             .await
-            .context("failed to scroll page")?;
+            .context("failed to scroll page")?
+            .into_value()
+            .context("failed to decode scroll result")?;
+        if window_moved {
+            return Ok(());
+        }
+        self.page
+            .execute(
+                DispatchMouseEventParams::builder()
+                    .r#type(DispatchMouseEventType::MouseWheel)
+                    .x(x)
+                    .y(y)
+                    .delta_x(0.0)
+                    .delta_y(f64::from(amount))
+                    .build()
+                    .map_err(|error| anyhow!("failed to build wheel event: {error}"))?,
+            )
+            .await
+            .context("failed to dispatch wheel event")?;
         Ok(())
     }
 
     /// Returns the current vertical scroll offset.
     pub async fn scroll_y(&self) -> Result<f64> {
-        self.page
-            .evaluate("window.scrollY")
+        self.eval("window.scrollY")
             .await
             .context("failed to read scroll position")?
             .into_value()
@@ -732,8 +858,7 @@ impl BrowserPage {
 
     /// Returns the current horizontal scroll offset.
     pub async fn scroll_x(&self) -> Result<f64> {
-        self.page
-            .evaluate("window.scrollX")
+        self.eval("window.scrollX")
             .await
             .context("failed to read scroll position")?
             .into_value()
@@ -742,8 +867,7 @@ impl BrowserPage {
 
     /// Navigates back in browser history.
     pub async fn go_back(&self) -> Result<()> {
-        self.page
-            .evaluate("window.history.back()")
+        self.eval("window.history.back()")
             .await
             .context("failed to navigate back")?;
         // Back navigation may not fire a lifecycle event (SPA hash routes, data:
@@ -769,8 +893,7 @@ impl BrowserPage {
             selector = serde_json::to_string(selector)?
         );
 
-        self.page
-            .evaluate(script)
+        self.eval(script)
             .await
             .context("failed to query DOM selector")?
             .into_value()
@@ -781,8 +904,7 @@ impl BrowserPage {
     #[cfg(feature = "live-chrome")]
     pub async fn evaluate_json(&self, script: &str) -> Result<serde_json::Value> {
         let result = self
-            .page
-            .evaluate(script)
+            .eval(script)
             .await
             .with_context(|| format!("failed to evaluate script: {script}"))?;
         // A void/undefined result (e.g. calling a function that returns nothing)
@@ -804,8 +926,7 @@ impl BrowserPage {
         // readText() returns a Promise, so this resolves it in-page and reports a
         // rejection as a value rather than letting it surface as an eval error.
         let evaluated = self
-            .page
-            .evaluate(
+            .eval(
                 r#"
                 (async () => {
                     try {
@@ -973,7 +1094,7 @@ impl BrowserPage {
                 });
             })()
         "#;
-        let result = match self.page.evaluate(read_script).await {
+        let result = match self.eval(read_script).await {
             Ok(evaluation) => match evaluation.into_value::<serde_json::Value>() {
                 Ok(value) => value,
                 Err(err) => {
@@ -1139,10 +1260,7 @@ impl BrowserPage {
         // button reported its old slot, so the click landed on whatever had moved
         // into that slot), and a DOM.getDocument refresh does NOT fix it -- the
         // stale part is layout, not the node tree. Reading offsetHeight flushes it.
-        let _ = self
-            .page
-            .evaluate("document.documentElement.offsetHeight")
-            .await;
+        let _ = self.eval("document.documentElement.offsetHeight").await;
         let quads = self
             .page
             .execute(
@@ -1160,8 +1278,7 @@ impl BrowserPage {
     /// CSS-pixel `(width, height)` of the viewport, or infinite when it cannot be
     /// read, which leaves only the negative-coordinate test in force.
     async fn viewport_size(&self) -> (f64, f64) {
-        self.page
-            .evaluate("[window.innerWidth, window.innerHeight]")
+        self.eval("[window.innerWidth, window.innerHeight]")
             .await
             .ok()
             .and_then(|result| result.into_value::<[f64; 2]>().ok())
@@ -1272,79 +1389,14 @@ impl BrowserPage {
     }
 
     /// Focuses an element by stable Chromium backend node id and types text into it.
-    /// A Flutter semantics node is tapped with a real mouse click instead of focused.
     pub async fn type_into_backend_node_id(&self, backend_node_id: i64, text: &str) -> Result<()> {
-        let element = self
-            .current_element_by_backend_node_id(backend_node_id)
-            .await?;
-
-        if self.is_flutter_semantics_node(backend_node_id).await {
-            self.tap_flutter_node(backend_node_id).await?;
-            return self.insert_text_into_focused_element(text).await;
+        if self
+            .fill_native_backend_node_id(backend_node_id, text)
+            .await?
+        {
+            return Ok(());
         }
-
-        self.page
-            .execute(
-                FocusParams::builder()
-                    .backend_node_id(element.backend_node_id)
-                    .build(),
-            )
-            .await
-            .with_context(|| format!("failed to focus backend node id {backend_node_id}"))?;
-
         self.insert_text_into_focused_element(text).await
-    }
-
-    /// Whether a node is part of Flutter Web's semantics tree: an `flt-*` element,
-    /// or the `<input>`/`<textarea>` proxy Flutter tags with `data-semantics-role`.
-    ///
-    /// Checked on Flutter 3.44.8; an engine that tags its proxies differently is
-    /// treated as an ordinary page.
-    async fn is_flutter_semantics_node(&self, backend_node_id: i64) -> bool {
-        let described = self
-            .page
-            .execute(
-                DescribeNodeParams::builder()
-                    .backend_node_id(BackendNodeId::new(backend_node_id))
-                    .build(),
-            )
-            .await;
-        let Ok(described) = described else {
-            return false;
-        };
-        let node = &described.result.node;
-        node.node_name.to_ascii_lowercase().starts_with("flt-")
-            || node
-                .attributes
-                .iter()
-                .flatten()
-                .step_by(2)
-                .any(|name| name == "data-semantics-role")
-    }
-
-    /// Taps the centre of a Flutter semantics node with a real mouse click.
-    ///
-    /// Flutter hands focus to a text field on a pointer tap. `DOM.focus` on its
-    /// proxy `<input>` followed by `insertText` reports success while the app
-    /// discards the text, so a Flutter field must be tapped before it is edited.
-    ///
-    /// A tap that misses still returns Ok, and the keyboard would then act on
-    /// whatever was focused before, so a node whose centre is off screen (or
-    /// under 2×2 px, like the accessibility placeholder) is an error instead.
-    // ponytail: the node is not scrolled into view; do that here if agents need it.
-    async fn tap_flutter_node(&self, backend_node_id: i64) -> Result<()> {
-        let bounds = self
-            .viewport_click_rect(backend_node_id)
-            .await
-            .with_context(|| format!("Flutter node {backend_node_id} has no box to tap"))?;
-        if bounds.prefers_dom_click(self.viewport_size().await) {
-            bail!(
-                "Flutter node {backend_node_id} is outside the viewport or too small to tap; \
-                 scroll it into view first"
-            );
-        }
-        let (x, y) = bounds.center();
-        self.click_coordinates(x, y).await
     }
 
     /// Clicks viewport coordinates, optionally clears the focused field, then types text.
@@ -1371,8 +1423,7 @@ impl BrowserPage {
         self.grant_clipboard_permission().await?;
         let encoded = serde_json::to_string(text).context("failed to encode clipboard text")?;
         let evaluated = self
-            .page
-            .evaluate(format!(
+            .eval(format!(
                 r#"
                 (async () => {{
                     if (!navigator.clipboard) {{
@@ -1538,9 +1589,8 @@ impl BrowserPage {
                 })?;
         }
 
-        self.page
-            .evaluate(
-                r#"
+        self.eval(
+            r#"
                 (() => {
                     const el = document.activeElement;
                     if (!el) return false;
@@ -1549,9 +1599,9 @@ impl BrowserPage {
                     return true;
                 })()
                 "#,
-            )
-            .await
-            .context("failed to dispatch framework input events after typing")?;
+        )
+        .await
+        .context("failed to dispatch framework input events after typing")?;
         Ok(())
     }
 
@@ -1586,18 +1636,10 @@ impl BrowserPage {
     }
 
     /// Clears an element by stable Chromium backend node id, dispatching input/change events.
-    /// A Flutter semantics node is tapped and cleared from the keyboard instead.
     pub async fn clear_backend_node_id(&self, backend_node_id: i64) -> Result<()> {
         let element = self
             .current_element_by_backend_node_id(backend_node_id)
             .await?;
-
-        // Same sequence as `type_at_coordinates`, which is what was proven live on
-        // Flutter; the value-reset path below was never shown to reach its state.
-        if self.is_flutter_semantics_node(backend_node_id).await {
-            self.tap_flutter_node(backend_node_id).await?;
-            return self.clear_focused_element_by_keyboard().await;
-        }
 
         self.page
             .execute(
@@ -1608,9 +1650,8 @@ impl BrowserPage {
             .await
             .with_context(|| format!("failed to focus backend node id {backend_node_id}"))?;
 
-        self.page
-            .evaluate(
-                r#"
+        self.eval(
+            r#"
                 (() => {
                     const el = document.activeElement;
                     if (!el) return false;
@@ -1641,9 +1682,9 @@ impl BrowserPage {
                     return true;
                 })()
                 "#,
-            )
-            .await
-            .context("failed to clear focused element")?;
+        )
+        .await
+        .context("failed to clear focused element")?;
 
         Ok(())
     }
@@ -1715,6 +1756,7 @@ impl BrowserPage {
                     return {{ ok: false, error: "element is " + el.tagName + ", not a <select>" }};
                 }}
                 const select = el;
+                if (select.disabled) return {{ ok: false, error: "select element is disabled" }};
                 const options = Array.from(select.options);
 
                 const findByValue = (v) => options.find(o => o.value === v);
@@ -1736,6 +1778,9 @@ impl BrowserPage {
                         error: "no matching option",
                         available: options.map(o => ({{ value: o.value, text: o.text.trim() }}))
                     }};
+                }}
+                if (target.disabled || target.parentElement.disabled) {{
+                    return {{ ok: false, error: "option is disabled" }};
                 }}
 
                 // 1. Focus (already focused via CDP, but some frameworks re-check).
@@ -1779,8 +1824,7 @@ impl BrowserPage {
         );
 
         let result = self
-            .page
-            .evaluate(script)
+            .eval(script)
             .await
             .context("failed to evaluate select option script")?
             .into_value::<serde_json::Value>()
@@ -1842,8 +1886,7 @@ impl BrowserPage {
             "new URL({}, document.baseURI).href",
             serde_json::to_string(href)?
         );
-        self.page
-            .evaluate(script)
+        self.eval(script)
             .await
             .context("failed to resolve URL")?
             .into_value()
@@ -1909,6 +1952,15 @@ fn short_tab_id(target_id: &str) -> String {
         .collect()
 }
 
+/// Focus emulation makes every page we touch believe it has focus until the
+/// connection drops. That is free in a browser nobody is looking at (one we
+/// launched, or a headless one we attached to) and wrong in someone's own Chrome,
+/// where it would mark messages read and mute notifications in tabs they left.
+fn wants_focus_emulation(attached: bool, user_agent: &str) -> bool {
+    // `Browser.getVersion` says "Chrome/…" even for headless; only the user agent tells.
+    !attached || user_agent.contains("HeadlessChrome")
+}
+
 fn page_by_ref(pages: Vec<Page>, tab_ref: &str) -> Option<Page> {
     // Match by full target id or the documented 4-char short id first, so a tab
     // whose short id happens to be numeric is never mistaken for a position.
@@ -1930,3 +1982,22 @@ fn page_by_ref(pages: Vec<Page>, tab_ref: &str) -> Option<Page> {
 
 #[cfg(all(test, feature = "live-chrome"))]
 mod live_tests;
+
+#[cfg(all(test, feature = "live-chrome"))]
+mod session_tests;
+
+#[cfg(test)]
+mod focus_scope_tests {
+    use super::wants_focus_emulation;
+
+    #[test]
+    fn focus_emulation_is_for_browsers_nobody_is_watching() {
+        let headless =
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 HeadlessChrome/131.0.0.0";
+        let headed = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0";
+        assert!(wants_focus_emulation(false, headed));
+        assert!(wants_focus_emulation(true, headless));
+        assert!(!wants_focus_emulation(true, headed));
+        assert!(!wants_focus_emulation(true, ""));
+    }
+}

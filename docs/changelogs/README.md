@@ -1,8 +1,15 @@
 # Change records
 
+- [2026-10-25 — Upstream sync and Rust contract ports](2026-10-25-upstream-rust-sync/index.md) — current upstream source plus tested ports, fork hardening and local installation.
+
+- [2026-10-16 — Page focus, Flutter scrolling, and context-free script evaluation](2026-10-16-page-focus-and-flutter-gaps.md)
+  — the Flutter index-typing cause was an unfocused initial tab; focus emulation
+  replaces the tap-first workaround, `browser_scroll` reaches Flutter lists, and
+  every script evaluation drops the pinned execution context.
+
 - [2026-10-15 — Flutter index typing](2026-10-15-flutter-index-typing.md)
-  — `browser_type` by index taps Flutter fields with a real click first, so the
-  text reaches the app; replace and clear work too.
+  — superseded: `browser_type` by index tapped Flutter fields with a real click
+  first, so the text reached the app.
 
 - [2026-10-15 — Closing the review gaps](2026-10-15-close-review-gaps.md)
   — live Flutter check passed, skill copies re-synced, reveal-toggled password

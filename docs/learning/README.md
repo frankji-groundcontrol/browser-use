@@ -1,5 +1,10 @@
 # Learning records
 
+- [2026-10-25 — Verify Rust port contracts at every consumer](2026-10-25-verify-rust-port-contracts.md) — consumer projections, shared protocol serializers, launch behavior, and fork merge checks.
+
+- [2026-10-16 — Reproduce on the object production uses, and assert the precondition](2026-10-16-reproduce-on-the-object-production-uses.md)
+  — a harness that opened a fresh tab never saw the unfocused initial tab; two
+  tests asserting an eventual effect stayed green with the fix removed.
 - [2026-10-15 — A pinned execution context races navigation, and load makes it lose](2026-10-15-pinned-execution-context-races-navigation.md)
   — a cached `contextId` is destroyed mid-navigation; a silent test under load is
   starvation until a stack sample says otherwise, so bound it with a timeout.

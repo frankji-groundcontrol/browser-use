@@ -593,11 +593,8 @@ impl BrowserActor {
                 let _ = reply.send(self.click(index, new_tab).await);
             }
             Command::ClickCoordinates { x, y, reply } => {
-                let result = async {
-                    self.guard_active_url().await?;
-                    self.active_page().await?.click_coordinates(x, y).await
-                }
-                .await;
+                let result =
+                    async { self.guard_active_url().await?.click_coordinates(x, y).await }.await;
                 self.selector_cache.clear();
                 let _ = reply.send(result);
             }
@@ -612,8 +609,7 @@ impl BrowserActor {
                 reply,
             } => {
                 let result = async {
-                    self.guard_active_url().await?;
-                    self.active_page()
+                    self.guard_active_url()
                         .await?
                         .type_at_coordinates(x, y, &text, clear)
                         .await
@@ -630,8 +626,7 @@ impl BrowserActor {
                 reply,
             } => {
                 let result = async {
-                    self.guard_active_url().await?;
-                    self.active_page()
+                    self.guard_active_url()
                         .await?
                         .paste_at_coordinates(x, y, &text, clear)
                         .await
@@ -641,11 +636,7 @@ impl BrowserActor {
                 let _ = reply.send(result);
             }
             Command::PressKey { key, reply } => {
-                let result = async {
-                    self.guard_active_url().await?;
-                    self.active_page().await?.press_key(&key).await
-                }
-                .await;
+                let result = async { self.guard_active_url().await?.press_key(&key).await }.await;
                 self.selector_cache.clear();
                 let _ = reply.send(result);
             }
@@ -659,11 +650,8 @@ impl BrowserActor {
                 let _ = reply.send(self.select_option(index, value, label, option_index).await);
             }
             Command::Scroll { direction, reply } => {
-                let result = async {
-                    self.guard_active_url().await?;
-                    self.active_page().await?.scroll(&direction).await
-                }
-                .await;
+                let result =
+                    async { self.guard_active_url().await?.scroll(&direction).await }.await;
                 self.selector_cache.clear();
                 let _ = reply.send(result);
             }
@@ -718,19 +706,17 @@ impl BrowserActor {
 
     /// Navigates back and invalidates the selector cache (the document changed).
     async fn go_back(&mut self) -> Result<()> {
-        self.guard_active_url().await?;
-        let page = self.active_page().await?;
+        let page = self.guard_active_url().await?;
         page.go_back().await?;
         self.selector_cache.clear();
         // History may hold a disallowed URL; reset it if so.
-        self.guard_active_url().await?;
+        self.guard_page_url(&page).await?;
         Ok(())
     }
 
     /// Returns current page metadata, resetting a disallowed active page first.
     async fn page_state(&mut self) -> Result<PageState> {
-        self.guard_active_url().await?;
-        self.active_page().await?.state().await
+        self.guard_active_url().await?.state().await
     }
 
     async fn navigate(&mut self, url: &str, new_tab: bool) -> Result<Option<String>> {
@@ -746,7 +732,7 @@ impl BrowserActor {
             Ok(status) => status,
             Err(error) => {
                 if let Some(target) = new_target {
-                    if let Ok(session) = self.active_session().await {
+                    if let Some(session) = self.session.as_ref() {
                         let _ = session.close_tab(&target).await;
                     }
                     self.page = None;
@@ -783,11 +769,16 @@ impl BrowserActor {
     /// Resolve even the first attached tab before checking policy. Unreadable
     /// state is not proof of permission, and a denied action never resumes after
     /// resetting the tab; the caller must request a new observation.
-    async fn guard_active_url(&mut self) -> Result<()> {
+    async fn guard_active_url(&mut self) -> Result<BrowserPage> {
+        let page = self.active_page().await?;
+        self.guard_page_url(&page).await?;
+        Ok(page)
+    }
+
+    async fn guard_page_url(&mut self, page: &BrowserPage) -> Result<()> {
         if self.policy.is_unrestricted() {
             return Ok(());
         }
-        let page = self.active_page().await?;
         let state = page
             .state()
             .await
@@ -812,11 +803,9 @@ impl BrowserActor {
         // stale index behind for a later click/type. Safe because the actor owns
         // the browser exclusively, so nothing observes the empty window.
         self.selector_cache.clear();
-        self.guard_active_url().await?;
-        let page = self.active_page().await?;
+        let page = self.guard_active_url().await?;
         let state = page.state().await?;
         let elements = page.selector_map().await?;
-        self.selector_cache.replace(&elements);
         let tabs = self.tabs().await?;
         let screenshot = if include_screenshot {
             screenshot_or_none(
@@ -827,6 +816,7 @@ impl BrowserActor {
         } else {
             None
         };
+        self.selector_cache.replace(&elements);
 
         Ok(BrowserStateSnapshot {
             page: state,
@@ -837,11 +827,10 @@ impl BrowserActor {
     }
 
     async fn click(&mut self, index: usize, new_tab: bool) -> Result<ClickOutcome> {
-        self.guard_active_url().await?;
-        let backend_node_id = self.backend_node_id_for_index(index).await?;
+        let page = self.guard_active_url().await?;
+        let backend_node_id = self.backend_node_id_for_index(&page, index).await?;
         let href = self.selector_cache.href_for_index(index);
-        self.guard_active_url().await?;
-        let page = self.active_page().await?;
+        self.guard_page_url(&page).await?;
 
         if new_tab {
             if let Some(href) = href {
@@ -863,17 +852,24 @@ impl BrowserActor {
     }
 
     async fn type_text(&mut self, index: usize, text: &str) -> Result<()> {
-        self.guard_active_url().await?;
-        let backend_node_id = self.backend_node_id_for_index(index).await?;
-        self.guard_active_url().await?;
-        let page = self.active_page().await?;
-        page.clear_backend_node_id(backend_node_id).await?;
-        if text.is_empty() {
-            self.selector_cache.clear();
-            return Ok(());
+        let page = self.guard_active_url().await?;
+        let backend_node_id = self.backend_node_id_for_index(&page, index).await?;
+        self.guard_page_url(&page).await?;
+        let result = async {
+            if page
+                .fill_native_backend_node_id(backend_node_id, text)
+                .await?
+            {
+                return Ok(());
+            }
+            page.clear_backend_node_id(backend_node_id).await?;
+            if text.is_empty() {
+                return Ok(());
+            }
+            self.guard_page_url(&page).await?;
+            page.type_into_backend_node_id(backend_node_id, text).await
         }
-        self.guard_active_url().await?;
-        let result = page.type_into_backend_node_id(backend_node_id, text).await;
+        .await;
         self.selector_cache.clear();
         result
     }
@@ -885,10 +881,9 @@ impl BrowserActor {
         label: Option<String>,
         option_index: Option<usize>,
     ) -> Result<SelectOptionOutcome> {
-        self.guard_active_url().await?;
-        let backend_node_id = self.backend_node_id_for_index(index).await?;
-        self.guard_active_url().await?;
-        let page = self.active_page().await?;
+        let page = self.guard_active_url().await?;
+        let backend_node_id = self.backend_node_id_for_index(&page, index).await?;
+        self.guard_page_url(&page).await?;
         let result = page
             .select_option_backend_node_id(
                 backend_node_id,
@@ -902,29 +897,25 @@ impl BrowserActor {
     }
 
     async fn screenshot(&mut self, full_page: bool, format: ScreenshotFormat) -> Result<Vec<u8>> {
-        self.guard_active_url().await?;
-        self.active_page()
+        self.guard_active_url()
             .await?
             .screenshot_image(full_page, format)
             .await
     }
 
     async fn read_clipboard(&mut self) -> Result<String> {
-        self.guard_active_url().await?;
-        self.active_page().await?.read_clipboard().await
+        self.guard_active_url().await?.read_clipboard().await
     }
 
     async fn set_viewport(&mut self, width: u32, height: u32, mobile: bool) -> Result<()> {
-        self.guard_active_url().await?;
-        self.active_page()
+        self.guard_active_url()
             .await?
             .set_viewport(width, height, mobile)
             .await
     }
 
     async fn get_html(&mut self, selector: Option<&str>) -> Result<String> {
-        self.guard_active_url().await?;
-        let page = self.active_page().await?;
+        let page = self.guard_active_url().await?;
         if let Some(selector) = selector {
             let exists = page.query_selector_exists(selector).await?;
             if !exists {
@@ -950,11 +941,11 @@ impl BrowserActor {
     async fn switch_tab(&mut self, tab: &str) -> Result<PageState> {
         let session = self.active_session().await?;
         let page = session.switch_tab(tab).await?;
-        self.page = Some(page);
+        self.page = Some(page.clone());
         self.selector_cache.clear();
         // Reset the tab if it (e.g. a JS-opened tab) is on a disallowed URL.
-        self.guard_active_url().await?;
-        self.active_page().await?.state().await
+        self.guard_page_url(&page).await?;
+        page.state().await
     }
 
     async fn close_tab(&mut self, tab: &str) -> Result<String> {
@@ -970,27 +961,25 @@ impl BrowserActor {
 
         self.selector_cache.clear();
         // Reset a disallowed active page before returning its URL.
-        self.guard_active_url().await?;
-        let current_url = match self.page.as_ref() {
-            Some(page) => page
-                .state()
-                .await
-                .map(|state| state.url)
-                .unwrap_or_default(),
+        let current_url = match self.page.clone() {
+            Some(page) => {
+                self.guard_page_url(&page).await?;
+                page.state()
+                    .await
+                    .map(|state| state.url)
+                    .unwrap_or_default()
+            }
             None => String::new(),
         };
         Ok(current_url)
     }
 
     async fn list_sessions(&mut self) -> Result<Option<String>> {
-        if self.session.is_none() {
+        if self.session.is_none() || self.page.is_none() {
             return Ok(None);
         }
         // Reset a disallowed active page before surfacing its URL.
-        self.guard_active_url().await?;
-        let Some(page) = self.page.as_ref() else {
-            return Ok(None);
-        };
+        let page = self.guard_active_url().await?;
         Ok(Some(
             page.state()
                 .await
@@ -1020,16 +1009,15 @@ impl BrowserActor {
 
     #[cfg(feature = "live-chrome")]
     async fn evaluate(&mut self, script: &str) -> Result<serde_json::Value> {
-        self.guard_active_url().await?;
-        self.active_page().await?.evaluate_json(script).await
+        self.guard_active_url().await?.evaluate_json(script).await
     }
 
-    async fn backend_node_id_for_index(&mut self, index: usize) -> Result<i64> {
+    async fn backend_node_id_for_index(&mut self, page: &BrowserPage, index: usize) -> Result<i64> {
         if let Some(backend_node_id) = self.selector_cache.backend_node_id_for_index(index) {
             return Ok(backend_node_id);
         }
 
-        let elements = self.active_page().await?.selector_map().await?;
+        let elements = page.selector_map().await?;
         self.selector_cache.replace(&elements);
         self.selector_cache
             .backend_node_id_for_index(index)
@@ -1037,11 +1025,15 @@ impl BrowserActor {
     }
 
     async fn active_page(&mut self) -> Result<BrowserPage> {
+        self.active_session().await?;
         if let Some(page) = self.page.clone() {
             return Ok(page);
         }
         // Adopt Chromium's existing initial page instead of opening a second tab.
-        let session = self.active_session().await?;
+        let session = self
+            .session
+            .as_ref()
+            .expect("active_session initialized session");
         let page = session.primary_page().await?;
         self.page = Some(page.clone());
         self.selector_cache.clear();
@@ -1057,11 +1049,11 @@ impl BrowserActor {
     }
 
     async fn active_session(&mut self) -> Result<&BrowserSession> {
-        if self
-            .session
-            .as_ref()
-            .is_some_and(BrowserSession::is_healthy)
-        {
+        let connected = match self.session.as_ref() {
+            Some(session) => session.check_connection().await,
+            None => false,
+        };
+        if connected {
             return Ok(self.session.as_ref().expect("session checked above"));
         }
 

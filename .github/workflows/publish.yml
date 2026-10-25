@@ -37,7 +37,7 @@ jobs:
     outputs:
       new_tag: ${{ steps.tag.outputs.new_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Create pre-release tag
         id: tag
         env:
@@ -105,11 +105,12 @@ jobs:
             exit 1
           fi
           echo "::notice::Environment '${ENV_NAME}' is protected with prevent_self_review. OK."
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.tag_pre_release.outputs.new_tag || github.ref }}
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
+          version: "0.12.9"
           enable-cache: true
           activate-environment: true
       - run: uv sync --locked

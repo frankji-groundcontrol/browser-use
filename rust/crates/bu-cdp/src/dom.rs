@@ -66,6 +66,9 @@ const SENSITIVE_NAME_MARKERS: &[&str] = &["password", "passwd", "pwd", "passcode
 /// Longest live `value` kept, in characters. A pasted document in a textarea
 /// should not be able to flood `browser_get_state`.
 const MAX_LIVE_VALUE_CHARS: usize = 200;
+const MAX_IMAGE_ATTRIBUTE_CHARS: usize = 4096;
+const MAX_IMAGE_CONTEXTS: usize = 3;
+const MAX_IMAGE_DESCENDANTS: usize = 100;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SelectorMapCandidate {
@@ -488,11 +491,14 @@ pub(crate) fn collect_interactive_elements(
                 if let (Some(backend_node_id), Some(bounds)) =
                     (enhanced.backend_node_id, enhanced.bounds)
                 {
-                    let text = if enhanced.text.is_empty() {
-                        descendant_image_label(node)
-                    } else {
-                        enhanced.text.clone()
-                    };
+                    let mut text = enhanced.text.clone();
+                    let image_context = image_context(node);
+                    if !image_context.is_empty() {
+                        if !text.is_empty() {
+                            text.push(' ');
+                        }
+                        text.push_str(&image_context);
+                    }
                     elements.push(SelectorMapCandidate {
                         backend_node_id,
                         tag: enhanced.tag.clone(),
@@ -868,54 +874,78 @@ fn node_label(node: &Node) -> String {
         .unwrap_or_else(|| descendant_text(node))
 }
 
-/// Borrows a label from a descendant `<img>` for a control that has none of its own.
-///
-/// An icon-only button is otherwise indistinguishable from every other icon-only
-/// button in the selector map. The accessible name usually covers the `alt` case;
-/// this also handles an image with no `alt`, where the file name is the only hint
-/// available. `data:` URIs are skipped — they carry the bytes, not a name.
-fn descendant_image_label(node: &Node) -> String {
-    let mut label = String::new();
-    collect_image_label(node, &mut label);
-    label
+/// Image clues supplement a control's label, including directly clickable images.
+fn image_context(node: &Node) -> String {
+    let mut contexts = Vec::new();
+    if let Some(context) = image_clues(node) {
+        contexts.push(context);
+    }
+    let mut children = vec![node.children.as_deref().unwrap_or_default().iter()];
+    let mut visited = 0;
+    while let Some(iterator) = children.last_mut() {
+        if contexts.len() >= MAX_IMAGE_CONTEXTS || visited >= MAX_IMAGE_DESCENDANTS {
+            break;
+        }
+        let Some(child) = iterator.next() else {
+            children.pop();
+            continue;
+        };
+        visited += 1;
+        if let Some(context) = image_clues(child) {
+            contexts.push(context);
+        }
+        if let Some(descendants) = child.children.as_deref() {
+            children.push(descendants.iter());
+        }
+    }
+    contexts.join(" ")
 }
 
-fn collect_image_label(node: &Node, label: &mut String) {
-    if !label.is_empty() {
-        return;
-    }
-
+fn image_clues(node: &Node) -> Option<String> {
     if node_tag(node) == "img" {
-        for name in ["alt", "aria-label", "title"] {
-            if let Some(value) = attr_value(node, name).map(str::trim) {
+        let mut parts = Vec::new();
+        for (name, output_name) in [
+            ("alt", "image_alt"),
+            ("title", "image_title"),
+            ("aria-label", "image_label"),
+        ] {
+            if let Some(value) = attr_value(node, name)
+                .filter(|value| {
+                    value.chars().take(MAX_IMAGE_ATTRIBUTE_CHARS + 1).count()
+                        <= MAX_IMAGE_ATTRIBUTE_CHARS
+                })
+                .map(str::trim)
+            {
                 if !value.is_empty() {
-                    *label = short_text(value.to_owned());
-                    return;
+                    parts.push(format!("{output_name}={}", short_text(value.to_owned())));
                 }
             }
         }
         if let Some(file_name) = attr_value(node, "src").and_then(image_file_name) {
-            *label = short_text(file_name);
-            return;
+            parts.push(format!("image_src={}", short_text(file_name)));
         }
+        return (!parts.is_empty()).then(|| parts.join(" "));
     }
-
-    for child in node.children.iter().flatten() {
-        collect_image_label(child, label);
-    }
+    None
 }
 
 /// Last path segment of an image URL, without query or fragment.
 fn image_file_name(src: &str) -> Option<String> {
-    let src = src.trim();
+    if src.chars().take(MAX_IMAGE_ATTRIBUTE_CHARS + 1).count() > MAX_IMAGE_ATTRIBUTE_CHARS {
+        return None;
+    }
+    let src = src
+        .trim_matches(|ch| ch <= '\u{20}')
+        .replace(['\t', '\n', '\r'], "");
     if src.is_empty() || src.to_ascii_lowercase().starts_with("data:") {
         return None;
     }
-    let path = src
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(src)
-        .trim_end_matches('/');
+    // A root base gives relative and scheme-relative sources the same path-only handling.
+    let parsed = url::Url::parse("https://image.invalid/")
+        .ok()?
+        .join(&src)
+        .ok()?;
+    let path = parsed.path().trim_end_matches('/');
     let file_name = path.rsplit('/').next().unwrap_or(path);
     (!file_name.is_empty()).then(|| file_name.to_owned())
 }
@@ -962,7 +992,207 @@ fn attr_value<'a>(node: &'a Node, name: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{attribute_is_sensitive, cap_live_value, is_toggle_type, MAX_LIVE_VALUE_CHARS};
+    use super::{
+        attribute_is_sensitive, cap_live_value, collect_interactive_elements, image_file_name,
+        is_toggle_type, EnhancedNode, Node, Rect, MAX_LIVE_VALUE_CHARS,
+    };
+    use std::collections::HashMap;
+
+    fn element(id: i64, tag: &str, attributes: &[(&str, &str)], children: Vec<Node>) -> Node {
+        serde_json::from_value(serde_json::json!({
+            "nodeId": id,
+            "backendNodeId": id,
+            "nodeType": 1,
+            "nodeName": tag.to_ascii_uppercase(),
+            "localName": tag,
+            "nodeValue": "",
+            "attributes": attributes.iter().flat_map(|(name, value)| [name, value]).collect::<Vec<_>>(),
+            "children": children,
+        }))
+        .expect("valid DOM fixture")
+    }
+
+    fn control_text(node: &Node, label: &str) -> String {
+        let enhanced = EnhancedNode {
+            backend_node_id: Some(node.backend_node_id),
+            tag: node.local_name.clone(),
+            text: label.to_owned(),
+            bounds: Some(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 50.0,
+                height: 50.0,
+            }),
+            has_js_click_listener: true,
+            ..Default::default()
+        };
+        let nodes = HashMap::from([(*node.backend_node_id.inner(), enhanced)]);
+        let mut candidates = Vec::new();
+        collect_interactive_elements(node, &nodes, &mut candidates);
+        assert_eq!(candidates.len(), 1);
+        candidates
+            .pop()
+            .expect("indexed control")
+            .into_element(0)
+            .text
+    }
+
+    #[test]
+    fn indexed_controls_keep_their_label_and_image_clues() {
+        let image_attributes = [
+            ("alt", "Payment card"),
+            ("title", "Choose card"),
+            ("aria-label", "Primary method"),
+            ("src", "/logos/card.png?token=must-not-leak#preview"),
+        ];
+        for node in [
+            element(
+                1,
+                "button",
+                &[],
+                vec![element(
+                    2,
+                    "span",
+                    &[],
+                    vec![element(3, "img", &image_attributes, vec![])],
+                )],
+            ),
+            element(1, "img", &image_attributes, vec![]),
+        ] {
+            let text = control_text(&node, "Existing label");
+            for clue in [
+                "Existing label",
+                "image_alt=Payment card",
+                "image_title=Choose card",
+                "image_label=Primary method",
+                "image_src=card.png",
+            ] {
+                assert!(text.contains(clue), "missing {clue:?}: {text:?}");
+            }
+            assert!(!text.contains("must-not-leak"));
+        }
+    }
+
+    #[test]
+    fn indexed_images_omit_browser_normalized_data_sources() {
+        for src in [
+            "\0Da\nTa:image/png;base64,must-not-leak",
+            "\u{1f}da\tta:image/png;base64,must-not-leak\r",
+        ] {
+            let node = element(1, "img", &[("alt", "Card"), ("src", src)], vec![]);
+            let text = control_text(&node, "Card");
+            assert!(text.contains("image_alt=Card"));
+            assert!(
+                !text.contains("image_src="),
+                "data source exposed: {text:?}"
+            );
+            assert!(!text.contains("must-not-leak"));
+        }
+        let node = element(
+            1,
+            "img",
+            &[("src", "\0 /icons/ca\rrd.png?token=private\x1f")],
+            vec![],
+        );
+        assert_eq!(control_text(&node, ""), "image_src=card.png");
+    }
+
+    #[test]
+    fn indexed_images_never_use_url_authority_as_a_filename() {
+        for (src, want) in [
+            ("https://image-user:<password>@image.test", "Safe label"),
+            ("https://image-user:<password>@image.test/", "Safe label"),
+            (
+                "https://image-user:<password>@image.test/?private=hidden#preview",
+                "Safe label",
+            ),
+            ("//image-user:<password>@image.test", "Safe label"),
+            ("//image-user:<password>@image.test/", "Safe label"),
+            (
+                "https://image-user:<password>@image.test/icons/card.png?private=hidden#preview",
+                "Safe label image_src=card.png",
+            ),
+            (
+                "//image-user:<password>@image.test/icons/card.png",
+                "Safe label image_src=card.png",
+            ),
+        ] {
+            let node = element(1, "img", &[("src", src)], vec![]);
+            let text = control_text(&node, "Safe label");
+            assert_eq!(text, want);
+            for private_part in ["image-user", "<password>", "image.test", "hidden"] {
+                assert!(!text.contains(private_part));
+            }
+        }
+    }
+
+    #[test]
+    fn indexed_images_omit_oversized_attributes_before_shortening_them() {
+        let oversized_source = format!("/{}/must-not-leak.png", "x".repeat(4096));
+        let oversized_label = format!("must-not-leak{}", " ".repeat(4096));
+        let node = element(
+            1,
+            "img",
+            &[
+                ("src", &oversized_source),
+                ("alt", &oversized_label),
+                ("title", &oversized_label),
+                ("aria-label", &oversized_label),
+            ],
+            vec![],
+        );
+        assert_eq!(control_text(&node, "Existing label"), "Existing label");
+
+        let source_at_limit = format!("/{}/card.png", "é".repeat(4086));
+        let node = element(1, "img", &[("src", &source_at_limit)], vec![]);
+        assert_eq!(control_text(&node, ""), "image_src=card.png");
+    }
+
+    #[test]
+    fn indexed_controls_report_at_most_three_image_contexts() {
+        let images = || {
+            vec![
+                element(2, "img", &[("src", "/first.png")], vec![]),
+                element(3, "img", &[("src", "/second.png")], vec![]),
+                element(4, "img", &[("src", "/third.png")], vec![]),
+                element(5, "img", &[("src", "/fourth.png")], vec![]),
+            ]
+        };
+        let node = element(1, "button", &[], images());
+        assert_eq!(
+            control_text(&node, ""),
+            "image_src=first.png image_src=second.png image_src=third.png"
+        );
+
+        let node = element(1, "img", &[("src", "/self.png")], images());
+        assert_eq!(
+            control_text(&node, ""),
+            "image_src=self.png image_src=first.png image_src=second.png"
+        );
+    }
+
+    #[test]
+    fn indexed_controls_stop_image_search_after_one_hundred_descendants() {
+        for (ignored, want) in [(99, "image_src=last.png"), (100, "")] {
+            let mut children = (0..ignored)
+                .map(|id| {
+                    element(
+                        id + 2,
+                        "img",
+                        &[("src", "data:image/png;base64,ignored")],
+                        vec![],
+                    )
+                })
+                .collect::<Vec<_>>();
+            children.push(element(200, "img", &[("src", "/last.png")], vec![]));
+            let node = element(1, "button", &[], children);
+            assert_eq!(
+                control_text(&node, ""),
+                want,
+                "{ignored} preceding descendants"
+            );
+        }
+    }
 
     #[test]
     fn toggle_types_are_matched_case_insensitively() {
@@ -1036,6 +1266,25 @@ mod tests {
                 attribute_is_sensitive(name, value),
                 "{name}={value:?} must be redacted"
             );
+        }
+    }
+
+    #[test]
+    fn icon_file_names_come_from_the_url_path_only() {
+        for (src, want) in [
+            ("/icons/star-outline.png", Some("star-outline.png")),
+            ("https://cdn.test/a/b/trash.svg?v=2#x", Some("trash.svg")),
+            // Each separator is pinned alone: the row above is cut by `?` first.
+            ("/sprites/sprite.svg#star", Some("sprite.svg")),
+            ("/icons/a.png?v=2", Some("a.png")),
+            ("  icon.png  ", Some("icon.png")),
+            ("/icons/folder/", Some("folder")),
+            ("DATA:image/png;base64,AAAA", None),
+            ("", None),
+            ("   ", None),
+            ("/", None),
+        ] {
+            assert_eq!(image_file_name(src).as_deref(), want, "src {src:?}");
         }
     }
 
