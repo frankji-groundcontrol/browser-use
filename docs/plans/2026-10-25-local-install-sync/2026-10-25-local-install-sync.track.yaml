@@ -6,11 +6,12 @@ main:
   outcome: Applicable upstream features ported into Rust, fork published, local MCP
     installed, original edits preserved
   owner: Codex
-  status: active
-  next_evidence: Commit and publish the verified merge, install a fresh signed binary,
-    assert 21-tool MCP and native form behavior
+  status: complete
+  next_evidence: 'Delivery proven: implementation published, 243 Rust and 51 Python
+    tests green, signed 21-tool install smoked; final documentation commit carries
+    closure'
 side_tracks: []
-updated_at: '2026-10-25T10:21:35Z'
+updated_at: '2026-10-25T10:27:45Z'
 plan:
 - step: Map upstream changes and review confirmed Rust gaps
   owner: Codex
@@ -32,7 +33,7 @@ plan:
   status: completed
 - step: Run fresh release gates, publish fork, install Rust MCP
   owner: Codex
-  status: in_progress
+  status: completed
 - step: Verify preservation and close durable task records
   owner: Codex
-  status: pending
+  status: completed

@@ -4,7 +4,7 @@ Update after every green milestone. Newest first.
 
 | Date | Phase | Milestone | Status |
 | --- | --- | --- | --- |
-| 2026-10-25 | upstream Rust contracts | Merged upstream through `3df5806a0` (Python 0.13.13); ported live agent forms, image context/privacy, hidden code, Anthropic images, native inputs, disabled options and connection/config behavior. All 243 serial all-feature Rust tests and both Clippy configurations passed; local install and fork publication follow in [the change record](../../changelogs/2026-10-25-upstream-rust-sync/index.md). | release checks passed; delivery in progress |
+| 2026-10-25 | upstream Rust contracts | Merged upstream through `3df5806a0` (Python 0.13.13); ported live agent forms, image context/privacy, hidden code, Anthropic images, native inputs, disabled options and connection/config behavior. All 243 serial all-feature Rust tests and both Clippy configurations passed; local signed 21-tool install and fork publication passed, see [the change record](../../changelogs/2026-10-25-upstream-rust-sync/index.md). | done locally; other hosts separately scoped |
 | 2026-07-05 | — | Plan authored (index/architecture/porting-map/plan/tdd) from the codebase deep-read. | done |
 | 2026-07-05 | — | Plan reviewed (plan-eng-review + outside voice); 13 findings folded; see [review.md](review.md). | done |
 | 2026-07-05 | 0 | `franky-rust` + 11-crate workspace + CI + first RED test. Compiles; RED fails as intended. (commits `fe2082`/`e0fefd`) | **done** |

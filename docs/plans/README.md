@@ -14,12 +14,12 @@ growing this table.
 
 | Task | Status | Owner | Depends on / blocker | Next action | Updated | Plan |
 | --- | --- | --- | --- | --- | --- | --- |
-| Local installation and remote sync | in progress | Codex | Existing dirty fixes must be preserved | Compare upstream, port applicable Rust features, publish and install | 2026-10-25 | [plan](2026-10-25-local-install-sync/2026-10-25-local-install-sync.md) |
-| Close the review gaps (skill-sync drift, sticky redaction, stale execution context, live Flutter check) | complete locally | Claude | Not deployed | Deploy per the practice | 2026-10-15 | [changelog](../changelogs/2026-10-15-close-review-gaps.md) |
-| Flutter `browser_type` by index drops text; Flutter scrolling; context-free script evaluation | complete locally | Claude | Not deployed; verified on one Flutter version (CanvasKit and WasmGC), headless only | Deploy per the practice | 2026-10-16 | [changelog](../changelogs/2026-10-16-page-focus-and-flutter-gaps.md) |
-| Review fixes for the MBP-local WIP (1 blocker, 12 should-fix, 18 nits) | complete locally | Claude | Not deployed to any host | Deploy per the practice (probe now expects 21 tools) | 2026-10-15 | [issue record](../issues/2026-10-15-mbp-local-wip-review-findings.md) |
-| DOM-click offscreen / tiny nodes (Flutter a11y) | complete locally | Cursor | Live check passed on a local build; installed binary not updated | Deploy per the practice | 2026-10-15 | [plan](2026-09-21-dom-click-offscreen.md) |
-| Flutter coordinate typing — `browser_type` coordinates, `browser_paste_at_coordinates`, `browser_press_key` | complete locally | Claude | No plan was opened (recorded retroactively); coordinate typing passed live on a local build, paste and key press not exercised there | Deploy per the practice | 2026-10-15 | [changelog](../changelogs/2026-09-21-flutter-coordinate-typing.md) |
+| Local installation and remote sync | complete | Codex | — | Published and installed locally; reconnect existing MCP clients | 2026-10-25 | [plan](2026-10-25-local-install-sync/2026-10-25-local-install-sync.md) |
+| Close the review gaps (skill-sync drift, sticky redaction, stale execution context, live Flutter check) | complete locally | Claude | Installed locally 2026-10-25; other hosts separate | Deploy remaining hosts per the practice | 2026-10-25 | [changelog](../changelogs/2026-10-15-close-review-gaps.md) |
+| Flutter `browser_type` by index drops text; Flutter scrolling; context-free script evaluation | complete locally | Claude | Installed locally 2026-10-25; Flutter evidence remains one version, headless only | Deploy remaining hosts per the practice | 2026-10-25 | [changelog](../changelogs/2026-10-16-page-focus-and-flutter-gaps.md) |
+| Review fixes for the MBP-local WIP (1 blocker, 12 should-fix, 18 nits) | complete locally | Claude | Installed locally 2026-10-25; other hosts separate | Deploy remaining hosts per the practice (21 tools) | 2026-10-25 | [issue record](../issues/2026-10-15-mbp-local-wip-review-findings.md) |
+| DOM-click offscreen / tiny nodes (Flutter a11y) | complete locally | Cursor | Local installed build verified 2026-10-25 | Deploy remaining hosts per the practice | 2026-10-25 | [plan](2026-09-21-dom-click-offscreen.md) |
+| Flutter coordinate typing — `browser_type` coordinates, `browser_paste_at_coordinates`, `browser_press_key` | complete locally | Claude | Local 21-tool build installed 2026-10-25; no new Flutter-specific live probe | Deploy remaining hosts per the practice | 2026-10-25 | [changelog](../changelogs/2026-09-21-flutter-coordinate-typing.md) |
 | Upstream live form state port — live `value`/`checked` in the selector map | complete locally | Claude | No plan was opened (recorded retroactively) | None; sensitive-field redaction is locked by tests | 2026-10-15 | [changelog](../changelogs/2026-09-21-upstream-sync-live-form-state.md) |
 | Whole-repository adversarial review | complete | Codex | Docker daemon, real provider credentials, and beta child-process matrix unavailable locally | Remediate SEC-01/02/03/04/05 and REL-01/02 first | 2026-09-16 | [plan](2026-09-16-whole-repo-review/2026-09-16-whole-repo-review.md) |
 | Whole-repository hardening and proof | complete | Codex | Docker daemon and real provider credentials unavailable locally | Recorded fixtures plus honest environment blocks | 2026-09-16 | [plan](2026-09-16-hardening-review-findings/2026-09-16-hardening-review-findings.md) |
@@ -33,6 +33,9 @@ growing this table.
 ## Plan registry
 
 One entry per detailed plan, so historical plans stay discoverable.
+
+- [2026-10-25 — Rust upstream sync and local installation](2026-10-25-local-install-sync/2026-10-25-local-install-sync.md)
+  — compare upstream contracts, port applicable Rust behavior, publish the fork and verify the local signed MCP install.
 
 - [2026-09-21 — DOM-click offscreen or tiny nodes](2026-09-21-dom-click-offscreen.md)
   — index-click Flutter's 1×1 `Enable accessibility` placeholder via

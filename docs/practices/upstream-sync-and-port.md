@@ -66,3 +66,9 @@ The review boundary also includes the resource returned by a check: use the
 validated page throughout an operation rather than looking it up again after a
 possible reconnect. For image metadata, extract a parsed URL path rather than
 its authority; for inline styles, match declarations rather than substrings.
+
+For publication, verify the owner fork and branch explicitly. If anonymous
+HTTPS reads succeed but a non-interactive push cannot obtain credentials, test
+the machine's existing SSH access to the same fork. A clone-local transport
+change may use that existing authentication; preserve the owner/repository
+path and confirm the published branch SHA after the push.

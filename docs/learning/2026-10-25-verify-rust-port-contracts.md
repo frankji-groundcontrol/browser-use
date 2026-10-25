@@ -18,6 +18,11 @@ Date: 2026-10-25
 - The presence of an environment variable name does not prove feature parity.
   The security variable already affected Rust URL policy but did not change
   Chromium CORS settings. A two-origin browser check discriminated those paths.
+- Anonymous HTTPS fetch success does not establish push authentication. The
+  non-interactive HTTPS push could not request a username; existing SSH access
+  succeeded for the exact same owner fork. Verify the owner/path before changing
+  only the clone transport, then push the intended branch and verify its SHA.
+  The owner clarified that publication applies to the fork alone.
 - Incoming paths disjoint from dirty files do not imply a conflict-free merge:
   committed fork changes can still conflict with upstream. Preserve a dirty-file
   baseline, inspect both sides, and rerun the retained behavior regressions.

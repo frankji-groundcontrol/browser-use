@@ -2,13 +2,24 @@
 
 ## Current local sync (2026-10-25)
 
-Rust-only upstream sync and local installation are in progress. See the
-[live plan](plans/2026-10-25-local-install-sync/2026-10-25-local-install-sync.md)
-and [change record](changelogs/2026-10-25-upstream-rust-sync/index.md).
-The frozen upstream target is `3df5806a0`; original local fixes are preserved.
-Do not infer that the installed binary has been refreshed until the delivery
-checks in that plan are complete.
+Completed: the fork's `franky-rust` branch contains merge `0d9e428e8` through
+upstream `3df5806a0` (Python 0.13.13), including the original local fixes.
+That implementation commit is published to the owner's fork. The local
+`~/.local/bin/browser-use-rs` was rebuilt from `0d9e428e8`, installed with a
+fresh inode and valid signature, and matched its build artifact hash.
+Sequential installed MCP initialization listed **21 tools**; live native input,
+disabled-choice, privacy and screenshot smoke checks passed. Reconnect existing
+MCP clients to load the new executable.
 
+All 243 serial all-feature Rust tests, both Clippy configurations, formatting,
+the release build and 51 focused Python merge contracts passed. This clone's
+`origin` now uses existing SSH authentication for the same owner fork after
+HTTPS could not prompt for credentials. Other hosts retain their separate
+deployment tasks.
+
+See the [completed plan](plans/2026-10-25-local-install-sync/2026-10-25-local-install-sync.md)
+and [change/verification record](changelogs/2026-10-25-upstream-rust-sync/index.md)
+for scope, explicit Rust gaps and rollback evidence.
 
 ## What the team is trying to finish
 
@@ -26,7 +37,7 @@ coding agent on two developer machines. Two threads are live:
 Current status for every task is on the board:
 [plans/README.md](plans/README.md).
 
-## What is true now
+## Earlier milestones and deployments
 
 The whole-repository hardening goal is complete with honest environment blocks.
 RST-04 Bedrock Converse typed tools, streaming, retries, timeouts, and usage are
@@ -34,7 +45,8 @@ implemented and fixture-proven (`bu-llm --features bedrock`: 70 tests, twice).
 Keep-alive `stop()`/`start()` rebinds session handlers. Cookie scope rejects
 single-label suffix domains. Setup creates and verifies one repo-root
 environment. See the [hardening plan](plans/2026-09-16-hardening-review-findings/2026-09-16-hardening-review-findings.md).
-The deployed source is `e35b0a882` on local, MBP2 and franky-frank. Each host
+At the 2026-09-16 deployment, source `e35b0a882` was installed on local,
+MBP2 and franky-frank. The current local installation is recorded above. Each host
 rebuilt `browser-use-rs` from that commit, installed a fresh inode, and
 answered a sequential MCP `initialize` + `tools/list` with 19 tools (exec
 check exit 1, not 137).
@@ -59,7 +71,7 @@ sha256) and landed as `3c6a553e7`. A pre-commit review found **one blocker
 (autocomplete redaction bypass) and 12 should-fix items**; all are fixed with
 mutation-checked tests, and the 18 nits are triaged, in
 [the review findings](issues/2026-10-15-mbp-local-wip-review-findings.md). The
-fixes are on `franky-rust`. **Nothing is deployed:** MBP-local's own tree is still
+fixes are on `franky-rust`. **At that point nothing was deployed:** MBP-local's own tree was still
 dirty and its installed binary predates the work. The tool count is now **21**
 (15 Python-identical, `browser_type` extended with coordinates, 5 additions), and
 the probe in [deploy-browser-use-rs.md](practices/deploy-browser-use-rs.md) expects
@@ -76,7 +88,8 @@ now emulates page focus in browsers it launched or that are headless) and the ta
 [the issue](issues/2026-10-15-flutter-index-typing-drops-text.md). The same change
 made `browser_scroll` reach Flutter's internal lists and moved every script
 evaluation off the pinned execution context. Real Flutter 3.44.8 verified
-(CanvasKit and WasmGC, headless), not deployed.
+(CanvasKit and WasmGC, headless); deployment was pending then. The current
+local install includes these fixes.
 
 **The LLM environment surface changed on 2026-08-27 and is a breaking change.**
 Configure the model with `BROWSER_USE_LLM_BASE_URL`, `_API_KEY`, `_API`
@@ -142,7 +155,8 @@ needed. Start Chrome with remote debugging, set `BROWSER_USE_CDP_URL`, then run
 the sequential attach probe in the deployment plan. See
 `issues/2026-09-16-current-chrome-devtools-endpoint.md`.
 
-7. **Deploy the 21-tool build.** Follow
+7. **Deploy the 21-tool build on remaining hosts.** Local installation passed
+   on 2026-10-25; other hosts require their own scope and probes. Follow
    [deploy-browser-use-rs.md](practices/deploy-browser-use-rs.md) on each host (the
    probe expects 21 tools) and reconnect the MCP client. The live Flutter check and
    the [page-focus fix](changelogs/2026-10-16-page-focus-and-flutter-gaps.md)

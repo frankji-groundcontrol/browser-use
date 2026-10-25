@@ -1,7 +1,7 @@
 # Upstream sync and Rust contract ports
 
 Date: 2026-10-25
-Status: implementation and release checks complete; publication/install in progress
+Status: complete — published to the owner fork and installed locally
 
 The Rust fork has been synchronized through upstream `3df5806a0` (Python
 0.13.13), preserving the existing uncommitted focus/Flutter/context fixes.
@@ -27,3 +27,9 @@ See [verification](verification.md), the
 [lessons](../../learning/2026-10-25-verify-rust-port-contracts.md),
 [sync practice](../../practices/upstream-sync-and-port.md), and
 [module follow-up](../../issues/2026-10-25-rust-module-size-debt.md).
+
+Implementation/source commit: `0d9e428e8994510484c553c86f58fba290d72d39`. The local signed install answers
+21 MCP tools and passed the live smoke. All 243 Rust and 51 focused Python
+merge tests passed, along with formatting, both Clippy configurations and the
+release build. The final documentation closure is a separate commit; the binary
+was built from the implementation commit above.

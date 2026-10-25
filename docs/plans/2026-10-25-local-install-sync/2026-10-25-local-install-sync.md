@@ -2,7 +2,7 @@
 
 Date: 2026-10-25
 Owner: Codex
-Status: in progress
+Status: complete
 
 ## Outcome and scope
 
@@ -33,10 +33,10 @@ standalone Git boundary; the separate workspace repository is untouched.
 - [x] Fetch origin and upstream; compare branch ancestry and upstream feature changes.
 - [x] Inventory applicable features and review the engineering scope.
 - [x] Port missing Rust behavior with regression tests; merge upstream Python sources.
-- [ ] Run required Rust release gates; rebuild and install the MCP binary.
-- [ ] Confirm CLI startup, sequential MCP initialization and tools/list,
+- [x] Run required Rust release gates; rebuild and install the MCP binary.
+- [x] Confirm CLI startup, sequential MCP initialization and tools/list,
       original-file preservation, links, and final Git status.
-- [ ] Close this plan and YAML, task board, dated changelog, and handoff.
+- [x] Close this plan and YAML, task board, dated changelog, and handoff.
 
 ## Constraints and privacy
 
@@ -49,7 +49,7 @@ this task because no paths in that workspace are changed.
 
 ## Evidence
 
-Both remotes were fetched and compared below. Final review repairs are complete; a fresh integrated release run is next.
+Both remotes were fetched and compared below. All ports, review repairs, release gates, fork publication and local installed smoke checks are complete.
 
 Learning: a directory named browser-use may be a custom Rust MCP fork; restore
 its handoff and honor the user-selected implementation before changing tools.
@@ -257,3 +257,37 @@ changed after the source freeze; only task records were updated during the run.
 
 Next evidence: intentional merge commit and matching fork remote, then fresh
 signed install, installed/build hash match and sequential MCP browser smoke.
+
+## Delivered milestone
+
+Implementation merge `0d9e428e8994510484c553c86f58fba290d72d39` is published on the owner's fork branch
+`franky-rust`. The owner clarified that publication is for this fork only.
+HTTPS could not request credentials; existing SSH access was verified against
+the same owner/repository and the clone's `origin` transport was changed to SSH.
+The explicit fork branch push and remote SHA comparison succeeded.
+
+The local executable was rebuilt from that implementation commit, installed
+with a fresh inode and valid signature, and matched its signed build artifact
+SHA-256 `fcc4da0991569e772b222840968132b2c67770fad94c054da7ef547f8a3c95a0`. Rollback is
+`~/.local/bin/browser-use-rs.prev-20261025-182510-570759`. CLI help/version and the
+uninitialized EOF exec check pass. The installed MCP lists 21 tools and passed
+sequential native date, invalid-date preservation, disabled choice, sensitive
+value, checked-state, JPEG capture and owned-browser closure checks. No model
+request was sent. Existing MCP clients must reconnect for the new executable.
+
+All 18 original files are accounted for in the merge, including both original
+untracked records. The final visible untracked audit is empty; remaining
+closure edits are tracked documentation only. The parent workspace remains
+untouched, so its prior untracked audit remains current. The final docs commit
+and matching remote clean status close the delivery record; no code changes
+followed the accepted release gates.
+
+Explicit limits remain in the applicability matrix: Python-only SDK/Bash,
+cloud provisioning, agent file-export subsystems and native provider factories
+are not claimed as Rust ports. No live provider or other-host deployment was
+performed. Module-size follow-up remains a separately bounded issue.
+
+Final closure audit passed: 198 changed paths, 184 resolving local links, zero
+visible untracked files, no source changes after release acceptance, and the
+installed hash still matches its build artifact. Both remote branch tips were
+rechecked against the delivered/frozen source before the docs-only closure.

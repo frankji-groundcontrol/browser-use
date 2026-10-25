@@ -48,8 +48,10 @@ credential URL cases in the unchanged upstream security test are explicitly
 accounted for; their destination hosts are the fixture domains. All 183 local
 document links resolve; whitespace checks pass.
 The only file above 1 MiB is the already-tracked lockfile, which shrank.
-Commit/push, fresh-inode signed install, sequential MCP smoke, installed/build
-hash comparison and final untracked audit remain pending.
+Implementation commit/push, fresh-inode signed install, sequential MCP smoke
+and installed/build hash comparison passed. All 12 previously visible untracked
+files are now accounted for in the implementation commit; the final closure
+changes only tracked records.
 
 No live model/provider or paid cloud verification is claimed. Other hosts and
 the global Python CLI are unchanged by this task.
@@ -62,3 +64,31 @@ full original content with an appended section. The other nine paths are four
 Rust files integrated with the new ports and five handoff/index records updated
 for this task. The private recovery snapshot remains available; existing
 focus, Flutter, redaction and execution-context regressions remain in the suite.
+
+## Published source and installed executable
+
+- Owner fork branch: `franky-rust`; published implementation `0d9e428e8994510484c553c86f58fba290d72d39`.
+  Its two parents are the starting fork and the frozen upstream target.
+- HTTPS push could not prompt for credentials in this session. Existing SSH
+  access to the same fork succeeded; this clone's `origin` transport now uses
+  SSH. The owner/path and branch are unchanged. Upstream is only merge input.
+- Installed `~/.local/bin/browser-use-rs` has a fresh inode and valid ad-hoc
+  signature. Build/installed SHA-256: `fcc4da0991569e772b222840968132b2c67770fad94c054da7ef547f8a3c95a0`.
+- Rollback copy: `~/.local/bin/browser-use-rs.prev-20261025-182510-570759`. It retains the previous file hash.
+- CLI version/help passed. The Rust package reports `0.1.0`; this is distinct
+  from the merged Python source version `0.13.13`. Uninitialized MCP EOF exited
+  1, with no macOS signature-related kill.
+- Sequential installed MCP: server `browser-use`, 21 tools, native date fills,
+  invalid date preserves its previous value, disabled optgroup choice fails,
+  sensitive form value stays absent, checkbox state is present, JPEG capture
+  succeeds, and `browser_close_all` closes the owned test browser.
+- Smoke used a fresh headless browser and fixture-only model settings; zero
+  model calls. Existing user browser profiles and agent registrations were not
+  used. Existing MCP processes need reconnection to load the new executable.
+
+The following documentation closure commit changes no production source.
+Final clean-tree and owner-fork SHA checks are the publication exit gate.
+
+Final closure audit: 198 changed paths, 184 valid local document links, no
+untracked files, no new large artifact or privacy-pattern hit, and no source
+change after the accepted release run. Installed and build hashes still agree.
