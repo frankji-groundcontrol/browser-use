@@ -307,3 +307,26 @@ Cleanup acceptance: Cargo removed 239564 files / 47.1 GiB logical data; the
 directory is absent and observed free space increased by about 32.5 GiB.
 The installed hash is unchanged, the signature is valid and CLI startup passes.
 No code or dependency changes were needed, and no rebuild was run afterward.
+
+## Codex registration repair
+
+The user reported that Codex's MCP list omitted browser-use. The installed
+executable is present and still matches its recorded hash, but the effective
+`codex mcp list --json` has no browser-use registration. The earlier delivery
+proved the executable directly and did not establish client registration.
+
+- [x] Preserve the current private Codex configuration and add only browser-use.
+- [x] Read back its enabled absolute command and verify MCP initialization,
+      21 tools and a local browser operation through that exact command.
+- [x] Document the client reload requirement and close this configuration repair.
+
+Registration acceptance: the effective workspace config now enables the
+absolute installed command. All previous config bytes and settings are retained,
+mode is 0600, and a private backup remains available. The CLI initially
+normalized unrelated fields; a values-suppressed field comparison identified
+those defaults, and appending to the original fixed the preservation check.
+The exact read-back command passed 21-tool initialization, navigation/state
+and owned-browser closure without a model call. No source change or rebuild
+was needed; target remains absent. The running Codex session still needs to
+reopen to load the new registration; current-session tool visibility is not
+claimed as verified.

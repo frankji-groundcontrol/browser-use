@@ -4,6 +4,17 @@ Date: 2026-10-25
 
 ## Lessons and evidence
 
+- Installation and client registration are distinct checks. The installed
+  executable answered 21 tools, but the user's Codex MCP inventory omitted it
+  because the effective configuration contained no browser-use entry. Verify
+  the client's registration and its read-back command, then distinguish that
+  proof from the already-running client's inventory before reload.
+- Configuration CLIs may normalize unrelated settings. Codex 0.164.0 dropped
+  redundant stdio/empty-args fields and serialized a timeout as a float, causing
+  the preservation assertion to fail. A fields-only comparison found the cause
+  without printing config values. Appending the new entry to the private
+  original preserved all prior bytes and settings, with a passing read-back and
+  browser smoke. Keep config backups private and modes at 0600.
 - Restore the checkout's handoff before treating its directory name as an
   install target. The owner clarified that this checkout deploys a custom Rust
   MCP fork; the global Python CLI was outside scope.

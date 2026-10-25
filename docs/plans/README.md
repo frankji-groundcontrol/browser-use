@@ -14,7 +14,7 @@ growing this table.
 
 | Task | Status | Owner | Depends on / blocker | Next action | Updated | Plan |
 | --- | --- | --- | --- | --- | --- | --- |
-| Local installation and remote sync | complete | Codex | — | Published and installed; build cache cleaned; reconnect existing MCP clients | 2026-10-25 | [plan](2026-10-25-local-install-sync/2026-10-25-local-install-sync.md) |
+| Local installation and remote sync | complete | Codex | Existing Codex client needs reload | Restart Codex to load the verified 21-tool registration; build cache remains clean | 2026-10-25 | [plan](2026-10-25-local-install-sync/2026-10-25-local-install-sync.md) |
 | Close the review gaps (skill-sync drift, sticky redaction, stale execution context, live Flutter check) | complete locally | Claude | Installed locally 2026-10-25; other hosts separate | Deploy remaining hosts per the practice | 2026-10-25 | [changelog](../changelogs/2026-10-15-close-review-gaps.md) |
 | Flutter `browser_type` by index drops text; Flutter scrolling; context-free script evaluation | complete locally | Claude | Installed locally 2026-10-25; Flutter evidence remains one version, headless only | Deploy remaining hosts per the practice | 2026-10-25 | [changelog](../changelogs/2026-10-16-page-focus-and-flutter-gaps.md) |
 | Review fixes for the MBP-local WIP (1 blocker, 12 should-fix, 18 nits) | complete locally | Claude | Installed locally 2026-10-25; other hosts separate | Deploy remaining hosts per the practice (21 tools) | 2026-10-25 | [issue record](../issues/2026-10-15-mbp-local-wip-review-findings.md) |

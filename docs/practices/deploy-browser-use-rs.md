@@ -59,7 +59,12 @@ See [issues/2026-08-26-installed-binary-drift-from-build-tree.md](../issues/2026
    together. Bound it with
    `timeout`: the server keeps running after `tools/list`, so an unbounded
    pipe hangs rather than reporting a count.
-3. **Registration** — `claude mcp list` shows `✔ Connected`; for the other
+3. **Registration** — verify each intended client separately. For Codex,
+   confirm that browser-use is present and enabled in its effective config;
+   probe the read-back command, then reopen the client and check `/mcp`. Keep
+   config/credential values out of output. The installed-binary probe alone
+   missed an absent Codex registration on 2026-10-25.
+   `claude mcp list` shows `✔ Connected`; for the other
    agents, `qoder mcp list`, `grok mcp doctor browser-use` (name the server —
    a bare `grok mcp doctor` probes every configured server and stalls on any
    unreachable one), and for Kimi a one-shot

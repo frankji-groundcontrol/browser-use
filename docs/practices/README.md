@@ -15,7 +15,7 @@ techniques worth repeating. One file (or folder) per practice.
   — the git hooks that ask for a record at commit time (warn on ordinary
   commits, block a `[checkpoint]` missing the handoff trio), and why a fresh
   clone starts with them inert.
-- [Deploying `browser-use-rs`](deploy-browser-use-rs.md) — build → fresh-inode
+- [Deploying `browser-use-rs`](deploy-browser-use-rs.md) — client registration plus build → fresh-inode
   install + codesign → four-step verification ladder (exec, protocol probe,
   registration, sequential live smoke with visual screenshots).
 - [Running the Python CI suite on this machine](running-python-ci.md) — the

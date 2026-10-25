@@ -37,3 +37,9 @@ was built from the implementation commit above.
 Post-install cleanup requested by the owner: `rust/target` was removed with
 Cargo. The installed executable is an independent file and remains usable;
 future source builds must recompile. See the cleanup evidence in verification.
+
+Codex registration follow-up: the installed server was absent from Codex's
+config. The new enabled absolute-command entry preserves all previous config
+bytes and 0600 permissions. Its read-back launch passed 21-tool initialization
+and a browser smoke. Reopen the existing Codex client to load the registration;
+no live model call or rebuild was needed.

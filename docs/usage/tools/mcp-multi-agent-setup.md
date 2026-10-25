@@ -231,19 +231,38 @@ claude mcp add browser-use -s user \
   -- browser-use-rs --mcp
 ```
 
-**Codex CLI** — `~/.codex/config.toml`:
+**Codex CLI** — register the installed binary in `~/.codex/config.toml`:
+
+```bash
+codex mcp add browser-use --env BROWSER_USE_HEADLESS=true -- \
+  "$HOME/.local/bin/browser-use-rs" --mcp
+```
+
+Use an absolute executable path so registration does not depend on the client's
+PATH. The resulting entry is equivalent to:
 
 ```toml
 [mcp_servers.browser-use]
-command = "browser-use-rs"
+command = "/absolute/path/to/browser-use-rs"
 args = ["--mcp"]
+enabled = true
 [mcp_servers.browser-use.env]
-BROWSER_USE_LLM_API_KEY = "…"
-BROWSER_USE_LLM_BASE_URL = "https://…/v1"
-BROWSER_USE_LLM_API = "openai-responses"
-BROWSER_USE_LLM_MODEL = "gpt-5.6-sol"
 BROWSER_USE_HEADLESS = "true"
 ```
+
+The 19 low-level browser tools need no LLM credential; the two model-backed
+tools use the separate settings described in §3. Keep credentials out of this
+entry. Verify that Codex lists the registration as enabled, then launch its
+read-back command for sequential initialization, 21-tool discovery and a local
+browser smoke. A working executable alone does not establish registration.
+Reopen an existing Codex client to load a newly added entry; `/mcp` shows the
+active server inventory. See [OpenAI's MCP configuration documentation](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
+
+Codex CLI 0.164.0 normalized unrelated config fields while adding the entry in
+the 2026-10-25 repair. Preserve a private 0600 backup and compare other settings
+after the edit. This repair appended only the new TOML entry to the original
+file, preserving its existing bytes. Never print a raw config or MCP env dump
+when it may contain credentials.
 
 **OpenCode** — top-level `mcp` object in `opencode.json`:
 

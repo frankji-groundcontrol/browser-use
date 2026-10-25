@@ -101,3 +101,19 @@ increased by approximately 32.5 GiB. The installed executable retains
 its recorded SHA-256 and valid signature, and `--version` still succeeds.
 The separate rollback copy remains in place. No rebuild or full-suite rerun
 followed cleanup, since those actions would recreate the removed cache.
+
+## Codex client registration repair
+
+The user's `/mcp` output and effective `codex mcp list --json` both omitted
+browser-use. The binary's recorded hash and version still matched. A private
+backup preceded registration; Codex CLI 0.164.0 normalized three unrelated
+fields, so the final edit retained the complete original bytes and appended
+only an enabled absolute stdio command plus `BROWSER_USE_HEADLESS=true`.
+Parsed settings outside browser-use are unchanged; config mode is 0600.
+
+Read-back from the user's workspace confirms enabled stdio registration.
+Launching that exact command and args passed initialization (server browser-use),
+21-tool discovery, local navigation, state capture and browser closure. No
+credentials were copied into the new entry, no model was called, and target
+remains absent. The existing Codex session's tool inventory has not reloaded;
+reopening the client is the remaining activation step, not a claimed UI proof.

@@ -2,6 +2,14 @@
 
 ## Current local sync (2026-10-25)
 
+Codex registration was repaired after the owner reported that `/mcp` omitted
+browser-use. The default user config now enables the absolute installed
+`browser-use-rs --mcp` command with headless mode. Its read-back command passed
+MCP initialization, 21-tool discovery, navigation/state and browser closure.
+Existing Codex settings were preserved and config permissions remain 0600.
+**Restart the existing Codex client to load the new registration.** No live
+model call was made, and the build cache remains absent.
+
 Completed: the fork's `franky-rust` branch contains merge `0d9e428e8` through
 upstream `3df5806a0` (Python 0.13.13), including the original local fixes.
 That implementation commit is published to the owner's fork. The local
