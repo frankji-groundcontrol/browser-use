@@ -291,3 +291,19 @@ Final closure audit passed: 198 changed paths, 184 resolving local links, zero
 visible untracked files, no source changes after release acceptance, and the
 installed hash still matches its build artifact. Both remote branch tips were
 rechecked against the delivered/frozen source before the docs-only closure.
+
+## Requested build cleanup
+
+The owner requested removal of the Rust build cache after installation. The
+cache occupies about 33 GiB (31 GiB debug and 1.6 GiB release). The installed
+executable is an independent file, not a symlink into target, and still matches
+the recorded install hash. Scope is only `rust/target`; source and rollback
+files remain outside the cleanup.
+
+- [x] Clean the explicit Rust target directory with Cargo.
+- [x] Confirm the directory is absent and the installed hash, signature and CLI still pass.
+
+Cleanup acceptance: Cargo removed 239564 files / 47.1 GiB logical data; the
+directory is absent and observed free space increased by about 32.5 GiB.
+The installed hash is unchanged, the signature is valid and CLI startup passes.
+No code or dependency changes were needed, and no rebuild was run afterward.

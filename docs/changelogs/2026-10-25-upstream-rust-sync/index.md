@@ -33,3 +33,7 @@ Implementation/source commit: `0d9e428e8994510484c553c86f58fba290d72d39`. The lo
 merge tests passed, along with formatting, both Clippy configurations and the
 release build. The final documentation closure is a separate commit; the binary
 was built from the implementation commit above.
+
+Post-install cleanup requested by the owner: `rust/target` was removed with
+Cargo. The installed executable is an independent file and remains usable;
+future source builds must recompile. See the cleanup evidence in verification.

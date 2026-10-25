@@ -11,6 +11,11 @@ Sequential installed MCP initialization listed **21 tools**; live native input,
 disabled-choice, privacy and screenshot smoke checks passed. Reconnect existing
 MCP clients to load the new executable.
 
+At the owner's request, `cargo clean` subsequently removed `rust/target`,
+reclaiming about 32.5 GiB. The independent installed copy retains its recorded
+hash, valid signature and working CLI. Rebuild before comparing against a
+build-tree artifact again.
+
 All 243 serial all-feature Rust tests, both Clippy configurations, formatting,
 the release build and 51 focused Python merge contracts passed. This clone's
 `origin` now uses existing SSH authentication for the same owner fork after

@@ -7,11 +7,10 @@ main:
     installed, original edits preserved
   owner: Codex
   status: complete
-  next_evidence: 'Delivery proven: implementation published, 243 Rust and 51 Python
-    tests green, signed 21-tool install smoked; final documentation commit carries
-    closure'
+  next_evidence: 'Cleanup proven: rust/target absent, about 32.5 GiB reclaimed, installed
+    hash/signature/startup unchanged; no rebuild afterward'
 side_tracks: []
-updated_at: '2026-10-25T10:27:45Z'
+updated_at: '2026-10-25T10:34:34Z'
 plan:
 - step: Map upstream changes and review confirmed Rust gaps
   owner: Codex
@@ -35,5 +34,8 @@ plan:
   owner: Codex
   status: completed
 - step: Verify preservation and close durable task records
+  owner: Codex
+  status: completed
+- step: Clean Rust build artifacts and verify the independent installed binary
   owner: Codex
   status: completed

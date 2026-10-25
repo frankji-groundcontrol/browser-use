@@ -92,3 +92,12 @@ Final clean-tree and owner-fork SHA checks are the publication exit gate.
 Final closure audit: 198 changed paths, 184 valid local document links, no
 untracked files, no new large artifact or privacy-pattern hit, and no source
 change after the accepted release run. Installed and build hashes still agree.
+
+## Requested cleanup after installation
+
+`cargo clean` with the explicit `rust/target` directory removed 239564 files
+(47.1 GiB logical size). The target directory is absent; available disk space
+increased by approximately 32.5 GiB. The installed executable retains
+its recorded SHA-256 and valid signature, and `--version` still succeeds.
+The separate rollback copy remains in place. No rebuild or full-suite rerun
+followed cleanup, since those actions would recreate the removed cache.
